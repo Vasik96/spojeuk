@@ -382,18 +382,35 @@ private fun SearchScreen(
         scope.launch {
             appState.userLoc = lat to lng
             if (appState.autoFillDone) return@launch
-            // pokud mezitím uživatel začal sám psát, nic nepřepisuj
             val untouched = appState.from == null && appState.to == null &&
                     appState.fromQuery.isBlank() && appState.toQuery.isBlank()
             if (!untouched) return@launch
 
-            val near = runCatching { api.nearestCandidates(lat, lng, 6) }.getOrNull().orEmpty()
-                .filter { it.second <= 500.0 }
-            if (near.isEmpty()) return@launch
+            // širší výběr kandidátů vzdušnou čarou, ať se nevyřadí zastávka, která je po cestě blíž
+            val cands = runCatching { api.nearestCandidates(lat, lng, 6) }.getOrNull().orEmpty()
+            if (cands.isEmpty()) return@launch
 
-            // 1. nejčastější spoj z nejbližších zastávek, 2. jinak jen nejbližší zastávka jako "odkud"
+            // zpřesnění po silnici (s jedním opakováním, OSRM bývá první pokus pomalý)
+            var refined: List<Pair<Stop, Double>>? = null
+            if (cands.size > 1) {
+                repeat(2) {
+                    if (refined == null) {
+                        refined = runCatching { api.refineByRoad(lat, lng, cands) }.getOrNull()
+                            ?.let { listOf(it) }
+                    }
+                }
+            }
+            val best = refined?.firstOrNull() ?: cands[0]
+
+            // limit až na vzdálenost po silnici
+            if (best.second > 700.0) return@launch
+
+            // pro historii použij pořadí podle silnice: nejlepší první
+            val ordered = listOf(best) + cands.filter { it.first.name != best.first.name }
+            val near = ordered.filter { it.second <= 700.0 || it === best }
+
             val sug = appState.history.suggest(near.map { it.first.name to it.second })
-            val fromName = sug?.first ?: near.first().first.name
+            val fromName = sug?.first ?: best.first.name
             val from = appState.stops.firstOrNull { it.name == fromName } ?: return@launch
             val to = sug?.second?.let { n -> appState.stops.firstOrNull { it.name == n } }
 
