@@ -26,7 +26,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -55,6 +56,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import android.annotation.SuppressLint
 import androidx.compose.foundation.clickable
+import androidx.compose.material3.*
+import androidx.compose.material3.CardColors;
+import androidx.compose.ui.graphics.toArgb
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -64,6 +68,8 @@ import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.milliseconds
+import androidx.core.graphics.createBitmap
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
 private val UstiCenter = LatLng(50.6606, 14.0323)
 private const val FIRST_PAGE = 8
@@ -71,6 +77,7 @@ private const val MORE_PAGE = 6
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
         setContent { SpojeApp() }
     }
@@ -211,11 +218,12 @@ private fun SpojeApp() {
                     TopAppBar(
                         title = {
                             Column {
-                                Text("Spoje UK", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                                Text("Spoje UK", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                                 Text(
                                     "Doprava Ústeckého kraje", style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+
                             }
                         }
                     )
@@ -681,7 +689,14 @@ private fun SearchScreen(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            ElevatedCard(shape = RoundedCornerShape(28.dp)) {
+            ElevatedCard(
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+
+
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     StopField(
                         label = "Odkud",
@@ -1123,7 +1138,13 @@ private fun StopField(
 
 @Composable
 private fun JourneyCard(j: Journey, now: LocalDateTime, onMap: () -> Unit) {
-    ElevatedCard(shape = RoundedCornerShape(26.dp)) {
+    ElevatedCard(
+        shape = RoundedCornerShape(26.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        )
+
+    ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -1317,6 +1338,82 @@ private fun createLocationDot(context: Context): Bitmap {
 private fun findVehicle(list: List<Vehicle>, ref: TripRef): Vehicle? =
     list.firstOrNull { it.cis == ref.cis && it.trip == ref.trip && it.state in 0..1 }
 
+
+private fun bearingBetween(
+    start: LatLng,
+    end: LatLng
+): Float {
+    val lat1 = Math.toRadians(start.latitude)
+    val lat2 = Math.toRadians(end.latitude)
+    val dLon = Math.toRadians(end.longitude - start.longitude)
+
+    val y = kotlin.math.sin(dLon) * kotlin.math.cos(lat2)
+    val x = kotlin.math.cos(lat1) * kotlin.math.sin(lat2) -
+            kotlin.math.sin(lat1) * kotlin.math.cos(lat2) *
+            kotlin.math.cos(dLon)
+
+    return (
+            Math.toDegrees(kotlin.math.atan2(y, x)).toFloat() + 360f
+            ) % 360f
+}
+
+private fun routeArrowDescriptor(
+    primaryColor: Int,
+    scale: Float
+): BitmapDescriptor {
+    val size = (96 * scale).toInt().coerceAtLeast(18)
+    val bitmap = Bitmap.createBitmap(
+        size, size, Bitmap.Config.ARGB_8888
+    )
+    val canvas = Canvas(bitmap)
+
+    // Souřadnice se škálují společně s bitmapou.
+    canvas.save()
+    canvas.scale(size / 72f, size / 72f)
+
+    val path = android.graphics.Path().apply {
+        moveTo(13f, 43f)
+        lineTo(36f, 15f)
+        lineTo(59f, 43f)
+    }
+
+    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.BLACK
+        style = Paint.Style.STROKE
+        strokeWidth = 18f
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+    }
+    canvas.drawPath(path, borderPaint)
+
+    val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = primaryColor
+        style = Paint.Style.STROKE
+        strokeWidth = 11f
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+    }
+    canvas.drawPath(path, arrowPaint)
+
+    canvas.restore()
+
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
+}
+
+
+private fun arrowSizeForZoom(zoom: Float): Float {
+    return when {
+        zoom >= 18f -> 1.4f
+        zoom >= 16f -> 1.15f
+        zoom >= 14f -> 0.9f
+        zoom >= 12f -> 0.65f
+        zoom >= 10f -> 0.45f
+        else -> 0.3f
+    }
+}
+
+
+
 @SuppressLint("MissingPermission")
 @Composable
 private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, api: DukApi) {
@@ -1420,15 +1517,72 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
                 mapToolbarEnabled = false
             )
         ) {
+
+
+            val primaryColor = MaterialTheme.colorScheme.primary
+            val primaryArgb = primaryColor.toArgb()
+            val arrowColor = MaterialTheme.colorScheme.onBackground
+            val arrowArgb = arrowColor.toArgb()
+
+// Při větším přiblížení jsou šipky blíž u sebe.
+            val zoom = cameraPositionState.position.zoom
+            val arrowScale = arrowSizeForZoom(zoom)
+
+            val arrowIcon = remember(primaryArgb, arrowScale) {
+                routeArrowDescriptor(
+                    primaryColor = arrowArgb,
+                    scale = arrowScale
+                )
+            }
+
+            val arrowSpacing = when {
+                zoom >= 17f -> 180f
+                zoom >= 15f -> 300f
+                zoom >= 13f -> 500f
+                zoom >= 11f -> 900f
+                zoom >= 9f  -> 1600f
+                else        -> 3000f
+            }
+
             if (appState.tripRoute.isNotEmpty()) {
                 Polyline(
                     points = appState.tripRoute,
-                    color = Color(0xFF1B5E20),
+                    color = primaryColor,
                     width = 12f,
+                    zIndex = 0f,
                     startCap = RoundCap(),
                     endCap = RoundCap(),
                     jointType = JointType.ROUND
                 )
+            }
+
+            if (appState.tripRoute.size >= 2) {
+                val route = appState.tripRoute
+
+                val routeArrowsIcon = arrowIcon
+
+                val arrows = remember(route, arrowSpacing) {
+                    createRouteArrows(
+                        route = route,
+                        spacingMeters = arrowSpacing
+                    )
+                }
+
+                arrows.forEachIndexed { index, arrow ->
+                    key(index) {
+                        Marker(
+                            state = rememberUpdatedMarkerState(
+                                position = arrow.position
+                            ),
+                            icon = arrowIcon,
+                            anchor = androidx.compose.ui.geometry.Offset(0.5f, 0.5f),
+                            flat = true,
+                            rotation = arrow.bearing,
+                            zIndex = 1f,
+                            onClick = { true }
+                        )
+                    }
+                }
             }
             for (v in activeVehicles) {
                 key(v.id) {
@@ -1440,7 +1594,7 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
                         state = markerState,
                         icon = markerDescriptor(context, v.line, v.train, v.delay, iconPhase),
                         anchor = androidx.compose.ui.geometry.Offset(0.5f, 0.5f),
-                        zIndex = if (iconPhase != 0) 2f else 0f,
+                        zIndex = if (iconPhase != 0) 3f else 2f,
                         onClick = { appState.selectedVehicle = v; true }
                     )
                 }
@@ -1680,4 +1834,100 @@ private fun VehicleDetailBottomSheet(
             Spacer(Modifier.height(16.dp))
         }
     }
+}
+
+private data class RouteArrow(
+    val position: LatLng,
+    val bearing: Float
+)
+
+private fun distanceMeters(a: LatLng, b: LatLng): Float {
+    val result = FloatArray(1)
+
+    android.location.Location.distanceBetween(
+        a.latitude, a.longitude,
+        b.latitude, b.longitude,
+        result
+    )
+
+    return result[0]
+}
+
+private fun pointAtDistance(
+    route: List<LatLng>,
+    targetMeters: Float
+): LatLng {
+    if (route.size < 2 || targetMeters <= 0f) {
+        return route.first()
+    }
+
+    var travelled = 0f
+
+    for (i in 0 until route.lastIndex) {
+        val start = route[i]
+        val end = route[i + 1]
+        val segmentLength = distanceMeters(start, end)
+
+        if (segmentLength <= 0f) continue
+
+        if (travelled + segmentLength >= targetMeters) {
+            val fraction = (
+                    (targetMeters - travelled) / segmentLength
+                    ).coerceIn(0f, 1f).toDouble()
+
+            return LatLng(
+                start.latitude +
+                        (end.latitude - start.latitude) * fraction,
+                start.longitude +
+                        (end.longitude - start.longitude) * fraction
+            )
+        }
+
+        travelled += segmentLength
+    }
+
+    return route.last()
+}
+
+private fun createRouteArrows(
+    route: List<LatLng>,
+    spacingMeters: Float = 300f
+): List<RouteArrow> {
+    if (route.size < 2) return emptyList()
+
+    val totalLength = route.zipWithNext()
+        .sumOf { (a, b) -> distanceMeters(a, b).toDouble() }
+        .toFloat()
+
+    if (totalLength < 100f) return emptyList()
+
+    val arrows = mutableListOf<RouteArrow>()
+
+    // První šipka bude přibližně 150 m od začátku.
+    var distance = spacingMeters / 2f
+
+    while (distance < totalLength - 20f) {
+        val position = pointAtDistance(route, distance)
+
+        // Směr určíme podle bodů těsně před a za šipkou.
+        // Tím se omezí chybné natočení na ostrých zatáčkách.
+        val before = pointAtDistance(
+            route,
+            (distance - 15f).coerceAtLeast(0f)
+        )
+
+        val after = pointAtDistance(
+            route,
+            (distance + 15f).coerceAtMost(totalLength)
+        )
+
+        arrows += RouteArrow(
+            position = position,
+            bearing = bearingBetween(before, after)
+        )
+
+        distance += spacingMeters
+    }
+
+    return arrows
 }

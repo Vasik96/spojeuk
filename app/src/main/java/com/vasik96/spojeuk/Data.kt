@@ -105,7 +105,8 @@ data class DbTrip(
     val svc: Int,
     val wheel: Int,
     val t0: Int,
-    val t1: Int
+    val t1: Int,
+    val gid: String = "" // GTFS trip_id, klíč do shapes.sqlite
 )
 
 data class SvcInfo(
@@ -316,7 +317,7 @@ class GtfsImporter(private val dbFile: File) {
                 routes[id] = RouteData(short, agencies[agId] ?: "")
             }
 
-            data class TripMeta(val routeId: String, val serviceId: String, val headsign: String, val shortName: String, val wheel: String)
+            data class TripMeta(val routeId: String, val serviceId: String, val headsign: String, val shortName: String, val wheel: String, val shapeId: String)
             val tripsMeta = HashMap<String, TripMeta>()
             readCsvFromFile(File(tempDir, "trips.txt")) { h, r ->
                 val tripId = r.getOrNull(h["trip_id"] ?: -1) ?: return@readCsvFromFile
@@ -325,7 +326,8 @@ class GtfsImporter(private val dbFile: File) {
                 val head = r.getOrNull(h["trip_headsign"] ?: -1) ?: ""
                 val short = r.getOrNull(h["trip_short_name"] ?: -1) ?: ""
                 val wheel = r.getOrNull(h["wheelchair_accessible"] ?: -1) ?: "0"
-                tripsMeta[tripId] = TripMeta(routeId, svcId, head, short, wheel)
+                val shapeId = r.getOrNull(h["shape_id"] ?: -1) ?: ""
+                tripsMeta[tripId] = TripMeta(routeId, svcId, head, short, wheel, shapeId)
             }
 
             log("Zpracovávám jízdní řády…")
@@ -341,7 +343,7 @@ class GtfsImporter(private val dbFile: File) {
 
             db.execSQL("CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);")
             db.execSQL("CREATE TABLE stop(id INTEGER PRIMARY KEY, name TEXT, place TEXT, lat REAL, lon REAL, inreg INTEGER);")
-            db.execSQL("CREATE TABLE trip(id INTEGER PRIMARY KEY, line TEXT, agency TEXT, cis TEXT, num TEXT, head TEXT, svc INTEGER, wheel INTEGER, t0 INTEGER, t1 INTEGER);")
+            db.execSQL("CREATE TABLE trip(id INTEGER PRIMARY KEY, line TEXT, agency TEXT, cis TEXT, num TEXT, head TEXT, svc INTEGER, wheel INTEGER, t0 INTEGER, t1 INTEGER, gid TEXT DEFAULT '');")
             db.execSQL("CREATE TABLE trip_times(trip INTEGER PRIMARY KEY, stops BLOB, arr BLOB, dep BLOB);")
             db.execSQL("CREATE TABLE svc(id INTEGER PRIMARY KEY, dow TEXT, d0 TEXT, d1 TEXT);")
             db.execSQL("CREATE TABLE svc_date(svc INTEGER, d TEXT, type INTEGER);")
@@ -411,6 +413,7 @@ class GtfsImporter(private val dbFile: File) {
                 stmtTrip.bindLong(8, (meta.wheel.toIntOrNull() ?: 0).toLong())
                 stmtTrip.bindLong(9, de[0].toLong())
                 stmtTrip.bindLong(10, ar.last().toLong())
+                stmtTrip.bindString(11, tripId)
                 stmtTrip.executeInsert()
 
                 stmtTimes.bindLong(1, tid.toLong())
@@ -425,7 +428,7 @@ class GtfsImporter(private val dbFile: File) {
             var countTrips = 0
             db.beginTransaction()
             try {
-                val stmtTrip = db.compileStatement("INSERT INTO trip VALUES(?,?,?,?,?,?,?,?,?,?)")
+                val stmtTrip = db.compileStatement("INSERT INTO trip VALUES(?,?,?,?,?,?,?,?,?,?,?)")
                 val stmtTimes = db.compileStatement("INSERT INTO trip_times VALUES(?,?,?,?)")
 
                 var currentTripId: String? = null
@@ -457,6 +460,8 @@ class GtfsImporter(private val dbFile: File) {
                         countTrips++
                     }
                 }
+
+
 
                 val stmtStop = db.compileStatement("INSERT INTO stop VALUES(?,?,?,?,?,?)")
                 for ((g, sid) in stopIndexMap) {
@@ -520,8 +525,11 @@ class GtfsImporter(private val dbFile: File) {
                 db.close()
             }
 
-            dbFile.delete()
-            tmpDb.renameTo(dbFile)
+            // rename přepíše soubor atomicky; stará DB, kterou ještě někdo čte, nezmizí uprostřed
+            if (!tmpDb.renameTo(dbFile)) {
+                dbFile.delete()
+                tmpDb.renameTo(dbFile)
+            }
             progress(1.0f)
             log("Hotovo! Importováno $countTrips spojů.")
         } finally {
@@ -550,8 +558,25 @@ class Timetable(val dbFile: File) {
     private val actCache = HashMap<LocalDate, Set<Int>>()
     var foot: Map<Int, List<Pair<Int, Int>>>? = null
 
+    /** DB je ve verzi s tabulkou shape (starší static.sqlite ji nemá). */
+    var hasGid = false
+        private set
+
     init {
         loadFromDb()
+    }
+
+    fun tripsServing(sids: Set<Int>): List<Int> {
+        val out = ArrayList<Int>()
+        val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
+        try {
+            db.rawQuery("SELECT trip, stops FROM trip_times", null).use { c ->
+                while (c.moveToNext()) {
+                    if (bytesToIntArray(c.getBlob(1)).any { it in sids }) out.add(c.getInt(0))
+                }
+            }
+        } finally { db.close() }
+        return out
     }
 
     private fun loadFromDb() {
@@ -581,7 +606,12 @@ class Timetable(val dbFile: File) {
                 index.add(foldText(prettyName(p)) to p)
             }
 
-            db.rawQuery("SELECT id, line, agency, cis, num, head, svc, wheel, t0, t1 FROM trip", null).use { c ->
+            db.rawQuery("PRAGMA table_info(trip)", null).use { c ->
+                while (c.moveToNext()) if (c.getString(1) == "gid") hasGid = true
+            }
+
+            val gidCol = if (hasGid) ", gid" else ""
+            db.rawQuery("SELECT id, line, agency, cis, num, head, svc, wheel, t0, t1$gidCol FROM trip", null).use { c ->
                 while (c.moveToNext()) {
                     val id = c.getInt(0)
                     val line = c.getString(1) ?: "?"
@@ -593,8 +623,10 @@ class Timetable(val dbFile: File) {
                     val wheel = c.getInt(7)
                     val t0 = c.getInt(8)
                     val t1 = c.getInt(9)
+                    val gid = if (hasGid) c.getString(10) ?: "" else ""
 
-                    val t = DbTrip(id, line, agency, cis, num, head, svc, wheel, t0, t1)
+
+                    val t = DbTrip(id, line, agency, cis, num, head, svc, wheel, t0, t1, gid)
                     trips[id] = t
                     if (cis.isNotBlank()) {
                         byKey.getOrPut("$cis:$num") { mutableListOf() }.add(id)
@@ -763,7 +795,6 @@ class Timetable(val dbFile: File) {
     }
 
 
-
     fun tripStops(tid: Int): IntArray {
         val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
         try {
@@ -816,6 +847,14 @@ class Net(val tt: Timetable, val day: LocalDate) {
         val tomorrow = day.plusDays(1)
         val svcsTmrw = tt.activeSvcs(tomorrow)
 
+        android.util.Log.i(
+            "RaptorDebug",
+            "day=$day " +
+                    "servicesYesterday=${svcsYest.size} " +
+                    "servicesToday=${svcsToday.size} " +
+                    "servicesTomorrow=${svcsTmrw.size}"
+        )
+
         for ((tid, t) in tt.trips) {
             if (t.svc in svcsYest && t.t1 >= 86400) {
                 active.getOrPut(tid) { mutableListOf() }.add(-86400)
@@ -827,6 +866,12 @@ class Net(val tt: Timetable, val day: LocalDate) {
                 active.getOrPut(tid) { mutableListOf() }.add(86400)
             }
         }
+
+        android.util.Log.i(
+            "RaptorDebug",
+            "activeTrips=${active.size} " +
+                    "activeInstances=${active.values.sumOf { it.size }}"
+        )
 
         val groups = HashMap<List<Int>, MutableList<TripInstance>>()
         val db = SQLiteDatabase.openDatabase(tt.dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
@@ -853,6 +898,11 @@ class Net(val tt: Timetable, val day: LocalDate) {
                         )
                     }
                 }
+                android.util.Log.i(
+                    "RaptorDebug",
+                    "patterns=${groups.size} " +
+                            "tripInstances=${groups.values.sumOf { it.size }}"
+                )
             }
         } finally {
             db.close()
@@ -1118,6 +1168,41 @@ class Planner(val tt: Timetable) {
 
         val srcs = tt.places[fromPlace] ?: emptyList()
         val dsts = (tt.places[toPlace] ?: emptyList()).toSet()
+        for (sid in srcs) {
+            val stop = tt.stops[sid]
+            val pats = n.stopPats[sid].orEmpty()
+
+
+            android.util.Log.i(
+                "RaptorDebug",
+                "source sid=$sid " +
+                        "name=${stop?.name} " +
+                        "place=${stop?.place} " +
+                        "patterns=${pats.size} " +
+                        "inNet=${pats.isNotEmpty()}"
+            )
+        }
+
+        val sourcePositions = srcs.flatMap { n.stopPats[it].orEmpty() }
+
+        val sourceDepartures = sourcePositions.sumOf { (pi, pos) ->
+            n.patterns[pi].cols[pos].count { it >= tSec }
+        }
+
+        val unsortedColumns = n.patterns.sumOf { pattern ->
+            pattern.cols.count { col ->
+                (1 until col.size).any { i -> col[i] < col[i - 1] }
+            }
+        }
+
+        android.util.Log.i(
+            "RaptorDebug",
+            "sourcePositions=${sourcePositions.size} " +
+                    "departuresAfterStart=$sourceDepartures " +
+                    "unsortedColumns=$unsortedColumns"
+        )
+
+        android.util.Log.i("Search", "from=$fromPlace srcs=${srcs.size} to=$toPlace dsts=${dsts.size} trips=${tt.trips.size} patterns=${n.patterns.size}")
         if (srcs.isEmpty() || dsts.isEmpty()) return emptyList()
 
         val out = HashMap<String, Journey>()
@@ -1125,16 +1210,15 @@ class Planner(val tt: Timetable) {
 
         while (out.size < count && tSec <= tEndSec && runs < 40) {
             val js = n.raptor(srcs, dsts, tSec)
+            android.util.Log.i("Search", "run=$runs t=$tSec end=$tEndSec js=${js.size} foot=${tt.foot?.size} deps=${js.map { it.dep }}")
             if (js.isEmpty()) break
             for (j in js) {
-                if (j.dep <= tEndSec) {
-                    out[j.key] = j
-                }
+                if (j.dep <= tEndSec) out[j.key] = j
             }
             tSec = (js.minByOrNull { it.dep }?.dep ?: tSec) + 1
             runs++
         }
-
+        android.util.Log.i("Search", "out=${out.size} pruned=${prune(out.values.toList()).size}")
         return prune(out.values.toList())
     }
 
@@ -1160,10 +1244,10 @@ fun prune(js: List<Journey>): List<Journey> {
     val keep = js.filter { j ->
         !js.any { k ->
             k !== j &&
-            k.depDt >= j.depDt &&
-            k.dep + (k.day.toEpochDay() - j.day.toEpochDay()) * 86400 <= j.dep.toLong() &&
-            k.transfers <= j.transfers &&
-            !(k.depDt == j.depDt && k.dep == j.dep && k.transfers == j.transfers)
+                    k.depDt >= j.depDt &&
+                    k.dep + (k.day.toEpochDay() - j.day.toEpochDay()) * 86400 <= j.dep.toLong() &&
+                    k.transfers <= j.transfers &&
+                    !(k.depDt == j.depDt && k.dep == j.dep && k.transfers == j.transfers)
         }
     }
     return keep.sortedWith(compareBy<Journey> { it.depDt }.thenBy { it.dep })

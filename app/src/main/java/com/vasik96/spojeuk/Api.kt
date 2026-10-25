@@ -1,7 +1,10 @@
 package com.vasik96.spojeuk
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -13,6 +16,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 
 
@@ -118,6 +122,9 @@ class DukApi(val context: Context? = null) {
         val base = context?.cacheDir ?: File("/tmp")
         OsrmClient(base)
     }
+
+    private val shapeStore by lazy { ShapeStore(dbFile.parentFile ?: File("/tmp"), context) }
+
     private val realtimeClient by lazy {
         RealtimeClient(snapshotFile = File(context?.filesDir ?: File("/tmp"), "last_seen.json"))
     }
@@ -133,6 +140,29 @@ class DukApi(val context: Context? = null) {
     @Volatile
     private var planner: Planner? = null
 
+
+    private fun diagnose(tt: Timetable) {
+        val today = todayPrague()
+        val act = tt.activeSvcs(today)
+        val ds = today.format(DateTimeFormatter.BASIC_ISO_DATE)
+        android.util.Log.i("DbDiag", "tag=${tt.meta["tag"]} built=${tt.meta["built"]} trips=${tt.trips.size} stops=${tt.stops.size} svcs=${tt.svcs.size} hasGid=${tt.hasGid}")
+
+        val total = tt.trips.values.groupingBy { it.agency }.eachCount()
+        val active = tt.trips.values.filter { it.svc in act }.groupingBy { it.agency }.eachCount()
+        total.entries.sortedByDescending { it.value }.take(10).forEach {
+            android.util.Log.i("DbDiag", "dopravce='${it.key}' spojů=${it.value} dnes aktivních=${active[it.key] ?: 0}")
+        }
+
+        val sids = tt.places["Ústí nad Labem,Divadlo"].orEmpty().toSet()
+        val served = tt.tripsServing(sids)
+        android.util.Log.i("DbDiag", "Divadlo sids=$sids spojů celkem=${served.size} dnes aktivních=${served.count { (tt.trips[it]?.svc ?: -1) in act }}")
+        served.take(5).forEach { tid ->
+            val t = tt.trips[tid] ?: return@forEach
+            val s = tt.svcs[t.svc]
+            val ex = tt.svcDates[ds]?.filter { it.svc == t.svc }?.map { it.type }
+            android.util.Log.i("DbDiag", "  tid=$tid linka=${t.line} svc=${t.svc} dow=${s?.dow} ${s?.d0}-${s?.d1} výjimky dnes=$ex")
+        }
+    }
 
     suspend fun ensureTimetable(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): Timetable = withContext(Dispatchers.IO) {
         timetable?.let { return@withContext it }
@@ -162,7 +192,29 @@ class DukApi(val context: Context? = null) {
         val tt = Timetable(dbFile)
         timetable = tt
         planner = Planner(tt)
+        bgScope.launch { runCatching { diagnose(tt) } }
+
+        android.util.Log.i("Shapes", "DB: hasGid=${tt.hasGid} trips=${tt.meta["trips"]} tag=${tt.meta["tag"]}")
+        if (!tt.hasGid) scheduleShapeUpgrade()
+        bgScope.launch {
+            runCatching { shapeStore.sync(http) }
+                .onFailure { android.util.Log.w("Shapes", "sync selhal: ${it.message}") }
+        }
         tt
+
+    }
+
+    @Volatile
+    private var shapeUpgradeTried = false
+    private val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private fun scheduleShapeUpgrade() {
+        if (shapeUpgradeTried) return
+        shapeUpgradeTried = true
+        bgScope.launch {
+            runCatching { updateFromGitHub() }
+                .onFailure { android.util.Log.w("Shapes", "aktualizace s trasami selhala: ${it.message}") }
+        }
     }
 
     suspend fun updateFromGitHub(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}) = withContext(Dispatchers.IO) {
@@ -306,10 +358,45 @@ class DukApi(val context: Context? = null) {
         val tid = tt.findTripId(v.cis, v.trip)
             ?: tt.findTripByLine(v.line, v.lat, v.lng)
             ?: return@withContext emptyList()
+        // přesná trasa z GTFS shapes; OSRM jen když ji spoj nemá
+        shapeStore.points(tt.trips[tid]?.gid ?: "")?.let {
+            android.util.Log.i("Shapes", "trip $tid: přesná trasa (${it.size} bodů)")
+            return@withContext it
+        }
+        android.util.Log.i("Shapes", "trip $tid: trasa chybí -> OSRM")
         val coords = tt.tripStops(tid).toList().mapNotNull { sid ->
             tt.stops[sid]?.takeIf { it.lat != 0.0 || it.lng != 0.0 }?.let { it.lat to it.lng }
         }
         osrmClient.pathFor(coords)
+    }
+
+    /** Úsek přesné trasy mezi nastupní a výstupní zastávkou jízdy, nebo null (spoj nemá tvar / nesedí). */
+    private fun legShapeGeometry(tt: Timetable, leg: Leg): List<Pair<Double, Double>>? {
+        val trip = tt.trips[leg.tid] ?: return null
+        val shape = shapeStore.points(trip.gid) ?: return null
+        val seq = leg.stops.map { it.first }
+        if (seq.size < 2) return null
+
+        val ids = tt.tripStops(leg.tid)
+        var board = -1
+        var i = 0
+        while (i + seq.size <= ids.size && board < 0) {
+            var same = true
+            for (k in seq.indices) if (ids[i + k] != seq[k]) { same = false; break }
+            if (same) board = i
+            i++
+        }
+        if (board < 0) return null
+
+        // jen zastávky se souřadnicemi; indexy nástupu/výstupu přepočítat do tohoto seznamu
+        val valid = ids.indices.filter { idx ->
+            tt.stops[ids[idx]]?.let { it.lat != 0.0 || it.lng != 0.0 } == true
+        }
+        val bi = valid.indexOf(board)
+        val ai = valid.indexOf(board + seq.size - 1)
+        if (bi < 0 || ai < 0) return null
+        val coords = valid.map { idx -> tt.stops[ids[idx]]!!.let { it.lat to it.lng } }
+        return ShapeGeometry.sliceBetween(shape, coords, bi, ai)
     }
 
     // DukApi
@@ -317,8 +404,14 @@ class DukApi(val context: Context? = null) {
         val tt = ensureTimetable()
         fun xy(sid: Int) = tt.stops[sid]?.takeIf { it.lat != 0.0 || it.lng != 0.0 }?.let { it.lat to it.lng }
         j.rawLegs.flatMap { leg ->
-            if (leg.kind == "ride") osrmClient.pathFor(leg.stops.mapNotNull { xy(it.first) })
-            else listOfNotNull(xy(leg.fromStop), xy(leg.toStop))
+            if (leg.kind == "ride") {
+                val sh = legShapeGeometry(tt, leg)
+                android.util.Log.i(
+                    "Shapes",
+                    "leg tid=${leg.tid} gid=    ${tt.trips[leg.tid]?.gid?.takeLast(12)}: " + if (sh != null) "přesná trasa (${sh.size} bodů)" else "OSRM"
+                )
+                sh ?: osrmClient.pathFor(leg.stops.mapNotNull { xy(it.first) })
+            } else listOfNotNull(xy(leg.fromStop), xy(leg.toStop))
         }
     }
 
