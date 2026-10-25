@@ -134,6 +134,8 @@ class DukApi(val context: Context? = null) {
     fun heldCount(): Int = realtimeClient.heldCount
     fun vehicleAgeSec(v: Vehicle): Long = realtimeClient.ageSec(v)
 
+    fun isFirstRun(): Boolean = !dbFile.exists() || dbFile.length() < 100_000L
+
     @Volatile
     private var timetable: Timetable? = null
 
@@ -262,10 +264,11 @@ class DukApi(val context: Context? = null) {
         planner = Planner(tt)
     }
 
-    suspend fun loadStops(): List<Stop> = withContext(Dispatchers.IO) {
-        val tt = ensureTimetable()
-        tt.stops.values.distinctBy { it.name }
-    }
+    suspend fun loadStops(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): List<Stop> =
+        withContext(Dispatchers.IO) {
+            val tt = ensureTimetable(log, progress)
+            tt.stops.values.distinctBy { it.name }
+        }
 
     fun newSearch(from: List<Stop>, to: List<Stop>, fromName: String, toName: String): JourneySearch {
         return JourneySearch(this, fromName, toName)

@@ -3,10 +3,11 @@
 package com.vasik96.spojeuk
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.BlurMaskFilter
 import android.graphics.Bitmap
+import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
@@ -18,58 +19,64 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.DrawableRes
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PaintingStyle.Companion.Stroke
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.model.*
+import com.google.maps.android.compose.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import android.annotation.SuppressLint
-import androidx.compose.foundation.clickable
-import androidx.compose.material3.*
-import androidx.compose.material3.CardColors;
-import androidx.compose.ui.graphics.toArgb
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
-import com.google.android.gms.maps.CameraUpdateFactory
-import com.google.android.gms.maps.model.*
-import com.google.maps.android.compose.*
 import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.milliseconds
-import androidx.core.graphics.createBitmap
-import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
 private val UstiCenter = LatLng(50.6606, 14.0323)
 private const val FIRST_PAGE = 8
@@ -108,6 +115,16 @@ class SpojeAppState(
     var to by mutableStateOf<Stop?>(null)
     var fromQuery by mutableStateOf("")
     var toQuery by mutableStateOf("")
+
+    val listState = LazyListState()
+    val shownKeys = HashSet<String>()
+
+
+    var showSetup by mutableStateOf(false)
+    var setupMessage by mutableStateOf("")
+    var setupProgress by mutableFloatStateOf(0f)
+    var setupDismissed by mutableStateOf(false)
+
 
     var journeys by mutableStateOf<List<Journey>>(emptyList())
     var searchLoading by mutableStateOf(false)
@@ -196,15 +213,36 @@ private fun SpojeApp() {
     LaunchedEffect(Unit) {
         if (appState.stops.isEmpty()) {
             appState.stopsLoading = true
-            runCatching { api.loadStops() }
+            val guard = if (api.isFirstRun()) launch {
+                delay(600)
+                if (appState.stopsLoading) appState.showSetup = true
+            } else null
+            runCatching {
+                api.loadStops(
+                    log = { appState.setupMessage = it },
+                    progress = { appState.setupProgress = it }
+                )
+            }
                 .onSuccess { loaded -> appState.updateIndexedStops(loaded) }
                 .onFailure {
                     if (it is CancellationException) throw it
                     appState.searchError = "Zastávky se nepodařilo načíst: ${it.message}"
                 }
+            guard?.cancel()
+            appState.showSetup = false
             appState.stopsLoading = false
         }
     }
+
+    // mapa se vytvoří až při první návštěvě a pak zůstane naživu
+    var mapVisited by remember { mutableStateOf(false) }
+    LaunchedEffect(appState.selectedTab) {
+        if (appState.selectedTab == 1 && !mapVisited) {
+            delay(120.milliseconds)
+            mapVisited = true
+        }
+    }
+    val showMap = mapVisited
 
     val dark = isSystemInDarkTheme()
     val scheme = if (Build.VERSION.SDK_INT >= 31) {
@@ -213,70 +251,97 @@ private fun SpojeApp() {
 
     MaterialTheme(colorScheme = scheme) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Scaffold(
-                topBar = {
-                    TopAppBar(
-                        title = {
-                            Column {
-                                Text("Spoje UK", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                                Text(
-                                    "Doprava Ústeckého kraje", style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+            Box(Modifier.fillMaxSize()) {
+                Scaffold(
+                    topBar = {
+                        TopAppBar(
+                            title = {
+                                Column {
+                                    Text("Spoje UK", style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                    Text("Doprava Ústeckého kraje", style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            },
+                            actions = { SourceBadges(); Spacer(Modifier.width(12.dp)) }
+                        )
+                    },
+                    bottomBar = {
+                        NavigationBar {
+                            NavigationBarItem(
+                                selected = appState.selectedTab == 0,
+                                onClick = { appState.selectedTab = 0 },
+                                icon = { Icon(Icons.Default.DirectionsBus, null) },
+                                label = { Text("Spoje") }
+                            )
+                            NavigationBarItem(
+                                selected = appState.selectedTab == 1,
+                                onClick = { appState.selectedTab = 1 },
+                                icon = { Icon(Icons.Default.Map, null) },
+                                label = { Text("Mapa") }
+                            )
+                        }
+                    }
+                ) { padding ->
+                    Box(Modifier.padding(padding).fillMaxSize()) {
+                        if (showMap) {
+                            MapScreen(
+                                modifier = Modifier.fillMaxSize(),
+                                appState = appState,
+                                api = api,
+                                active = appState.selectedTab == 1
+                            )
+                        }
 
+                        AnimatedVisibility(
+                            visible = appState.selectedTab == 0,
+                            enter = fadeIn(tween(150)),
+                            exit = fadeOut(tween(150))
+                        ) {
+                            Surface(
+                                modifier = Modifier.fillMaxSize().pointerInput(Unit) {},
+                                color = MaterialTheme.colorScheme.background
+                            ) {
+                                SearchScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    appState = appState,
+                                    api = api,
+                                    onShowMapForJourney = { journey ->
+                                        val ref = TripRef(journey.cis, journey.trip)
+                                        appState.selectedVehicle = null
+                                        appState.tripRoute = emptyList()
+                                        appState.routeLoading = true
+                                        appState.vehiclesLoaded = false
+                                        appState.focusTrip = ref
+                                        appState.highlightedTrip = ref
+                                        appState.selectedTab = 1
+                                        scope.launch {
+                                            val points = api.journeyGeometry(journey)
+                                            appState.tripRoute = points.map { LatLng(it.first, it.second) }
+                                            appState.routeLoading = false
+                                        }
+                                    }
+                                )
                             }
                         }
-                    )
-                },
-                bottomBar = {
-                    NavigationBar {
-                        NavigationBarItem(
-                            selected = appState.selectedTab == 0,
-                            onClick = { appState.selectedTab = 0 },
-                            icon = { Icon(Icons.Default.DirectionsBus, null) },
-                            label = { Text("Spoje") }
-                        )
-                        NavigationBarItem(
-                            selected = appState.selectedTab == 1,
-                            onClick = { appState.selectedTab = 1 },
-                            icon = { Icon(Icons.Default.Map, null) },
-                            label = { Text("Mapa") }
-                        )
                     }
                 }
-            ) { padding ->
-                if (appState.selectedTab == 0) {
-                    SearchScreen(
-                        modifier = Modifier.padding(padding),
-                        appState = appState,
-                        api = api,
-                        onShowMapForJourney = { journey ->
-                            val ref = TripRef(journey.cis, journey.trip)
-                            appState.selectedVehicle = null
-                            appState.tripRoute = emptyList()
-                            appState.routeLoading = true
-                            appState.focusTrip = ref
-                            appState.highlightedTrip = ref
-                            appState.selectedTab = 1
-                            scope.launch {
-                                val points = api.journeyGeometry(journey)
-                                appState.tripRoute = points.map { LatLng(it.first, it.second) }
-                                appState.routeLoading = false
-                            }
-                        }
-                    )
-                } else {
-                    MapScreen(
-                        modifier = Modifier.padding(padding),
-                        appState = appState,
-                        api = api
+
+                AnimatedVisibility(
+                    visible = appState.showSetup && !appState.setupDismissed,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    SetupOverlay(
+                        message = appState.setupMessage,
+                        progress = appState.setupProgress,
+                        onBackground = { appState.setupDismissed = true }
                     )
                 }
             }
         }
     }
 }
-
 
 @SuppressLint("MissingPermission")
 @Composable
@@ -289,7 +354,7 @@ private fun SearchScreen(
     val scope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
-    val listState = rememberLazyListState()
+    val listState = appState.listState
     val context = LocalContext.current
     var locatingTarget by remember { mutableStateOf<String?>(null) }
     var pendingLocation by remember { mutableStateOf<Pair<String, (Stop) -> Unit>?>(null) }
@@ -501,7 +566,10 @@ private fun SearchScreen(
 
         appState.history.record(a.name, b.name)
 
-        scope.launch { appState.refreshUsage() }
+        scope.launch {
+            appState.refreshUsage()
+        }
+
 
         val s = api.newSearch(
             from = appState.stops.filter { it.name == a.name },
@@ -520,6 +588,9 @@ private fun SearchScreen(
         appState.hasEarlier = true
         appState.loadingEarlier = false
         appState.searchError = null
+
+        appState.shownKeys.clear()
+        listState.requestScrollToItem(0)
 
         appState.searchJob = scope.launch {
             try {
@@ -551,6 +622,8 @@ private fun SearchScreen(
         appState.hasEarlier = true
         appState.loadingEarlier = false
         appState.searchError = null
+
+        appState.shownKeys.clear()
 
         appState.searchJob = scope.launch {
             // Refresh poběží minimálně 1 sekundu.
@@ -855,8 +928,10 @@ private fun SearchScreen(
                 ) {
 
 
-                    items(appState.journeys, key = { it.key }) { journey ->
-                        JourneyCard(journey, now) { onShowMapForJourney(journey) }
+                    itemsIndexed(appState.journeys, key = { _, j -> j.key }) { index, journey ->
+                        AppearAnimated(appState, journey.key, index, Modifier.animateItem()) {
+                            JourneyCard(journey, now) { onShowMapForJourney(journey) }
+                        }
                     }
 
                     item(key = "footer") {
@@ -878,6 +953,114 @@ private fun SearchScreen(
         }
     }
 }
+
+
+@Composable
+private fun AppearAnimated(
+    appState: SpojeAppState,
+    key: String,
+    index: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    // true jen při prvním zobrazení karty, takže při scrollování zpět se nepřehrává
+    val state = remember(key) { MutableTransitionState(!appState.shownKeys.add(key)).apply { targetState = true } }
+    val d = index.coerceAtMost(6) * 50
+    AnimatedVisibility(
+        visibleState = state,
+        modifier = modifier,
+        enter = fadeIn(tween(300, delayMillis = d)) + slideInVertically(tween(350, delayMillis = d)) { it / 5 }
+    ) { content() }
+}
+
+
+@Composable
+private fun SourceBadges() {
+    var showInfo by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClickLabel = "Informace o zdrojích dat") { showInfo = true },
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LogoChip(R.drawable.duk, "Doprava Ústeckého kraje")
+        LogoChip(R.drawable.dpmul, "Dopravní podnik města Ústí nad Labem")
+    }
+
+    if (showInfo) {
+        AlertDialog(
+            onDismissRequest = { showInfo = false },
+            icon = { Icon(Icons.Default.Info, null) },
+            title = { Text("Neoficiální aplikace") },
+            text = {
+                Text(
+                    "Spoje UK nejsou nijak spojeny, provozovány ani schváleny společnostmi " +
+                            "Doprava Ústeckého kraje (DÚK) ani Dopravní podnik města Ústí nad Labem (DPMÚL).\n\n" +
+                            "Loga slouží pouze pro vizuální informaci o tom, jaká data se v aplikaci zobrazují (a ještě to s tím vypadá lépe), " +
+                            "a jsou ochrannými známkami svých vlastníků."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showInfo = false }) { Text("Rozumím") }
+            }
+        )
+    }
+}
+
+
+@Composable
+private fun LogoChip(@DrawableRes res: Int, description: String) {
+    Surface(shape = RoundedCornerShape(6.dp), color = Color.White) {
+        Image(
+            painter = painterResource(res),
+            contentDescription = description,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.height(24.dp).padding(horizontal = 6.dp, vertical = 3.dp)
+        )
+    }
+}
+
+
+@Composable
+private fun SetupOverlay(message: String, progress: Float, onBackground: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxSize().pointerInput(Unit) {},   // blokuje dotyky na mapu pod ním
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().systemBarsPadding().padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Wavy(64.dp)
+            Spacer(Modifier.height(24.dp))
+            Text("Stahování zastávek", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                message.ifBlank { "Připravuji jízdní řády…" },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+            if (progress > 0f) {
+                Spacer(Modifier.height(16.dp))
+                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Při prvním spuštění se stahují jízdní řády (~20 MB). Toto může trvat 30s.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(24.dp))
+            TextButton(onClick = onBackground) { Text("Stahovat na pozadí") }
+        }
+    }
+}
+
 
 private fun fmtMinutes(m: Long): String = when {
     m < 60 -> "$m\u00A0min"
@@ -1413,16 +1596,26 @@ private fun arrowSizeForZoom(zoom: Float): Float {
 }
 
 
+private fun arrowSpacingForZoom(zoom: Float): Float = when {
+    zoom >= 17f -> 180f
+    zoom >= 15f -> 300f
+    zoom >= 13f -> 500f
+    zoom >= 11f -> 900f
+    zoom >= 9f -> 1600f
+    else -> 3000f
+}
+
 
 @SuppressLint("MissingPermission")
 @Composable
-private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, api: DukApi) {
+private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, api: DukApi, active: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     // polling poloh
-    LaunchedEffect(Unit) {
-        appState.vehiclesLoaded = false
+    LaunchedEffect(active) {
+        if (!active) return@LaunchedEffect
+        if (appState.vehicles.isEmpty()) appState.vehiclesLoaded = false
         while (true) {
             runCatching { api.vehiclePositions() }
                 .onSuccess {
@@ -1435,9 +1628,10 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
                     appState.mapError = "Polohy vozidel se nepodařilo načíst"
                 }
             appState.vehiclesLoaded = true
-            delay(7_000)
+            delay(6_000)
         }
     }
+
 
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(appState.mapCenter, appState.mapZoom)
@@ -1484,16 +1678,23 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
         val route = appState.tripRoute
         if (v != null) {
             cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(LatLng(v.lat, v.lng), 16f), 700)
-        } else if (route.isNotEmpty()) {
-            val lats = route.map { it.latitude }
-            val lons = route.map { it.longitude }
-            val span = maxOf(lats.max() - lats.min(), lons.max() - lons.min())
-            val zoom = if (span > 0.3) 10f else if (span > 0.15) 11f else if (span > 0.07) 12f else 13f
-            cameraPositionState.animate(
-                CameraUpdateFactory.newLatLngZoom(
-                    LatLng((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), zoom
-                ), 700
-            )
+        } else {
+            android.widget.Toast.makeText(
+                context,
+                "Autobus tohoto spoje teď není na mapě, možná ještě nevyjel",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            if (route.isNotEmpty()) {
+                val lats = route.map { it.latitude }
+                val lons = route.map { it.longitude }
+                val span = maxOf(lats.max() - lats.min(), lons.max() - lons.min())
+                val zoom = if (span > 0.3) 10f else if (span > 0.15) 11f else if (span > 0.07) 12f else 13f
+                cameraPositionState.animate(
+                    CameraUpdateFactory.newLatLngZoom(
+                        LatLng((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), zoom
+                    ), 700
+                )
+            }
         }
         appState.focusTrip = null
     }
@@ -1524,25 +1725,14 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
             val arrowColor = MaterialTheme.colorScheme.onBackground
             val arrowArgb = arrowColor.toArgb()
 
-// Při větším přiblížení jsou šipky blíž u sebe.
-            val zoom = cameraPositionState.position.zoom
-            val arrowScale = arrowSizeForZoom(zoom)
 
-            val arrowIcon = remember(primaryArgb, arrowScale) {
-                routeArrowDescriptor(
-                    primaryColor = arrowArgb,
-                    scale = arrowScale
-                )
+            val arrowScale by remember { derivedStateOf { arrowSizeForZoom(cameraPositionState.position.zoom) } }
+            val arrowSpacing by remember { derivedStateOf { arrowSpacingForZoom(cameraPositionState.position.zoom) } }
+
+            val arrowIcon = remember(arrowArgb, arrowScale) {
+                routeArrowDescriptor(primaryColor = arrowArgb, scale = arrowScale)
             }
 
-            val arrowSpacing = when {
-                zoom >= 17f -> 180f
-                zoom >= 15f -> 300f
-                zoom >= 13f -> 500f
-                zoom >= 11f -> 900f
-                zoom >= 9f  -> 1600f
-                else        -> 3000f
-            }
 
             if (appState.tripRoute.isNotEmpty()) {
                 Polyline(
@@ -1558,8 +1748,6 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
 
             if (appState.tripRoute.size >= 2) {
                 val route = appState.tripRoute
-
-                val routeArrowsIcon = arrowIcon
 
                 val arrows = remember(route, arrowSpacing) {
                     createRouteArrows(
@@ -1633,7 +1821,7 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
             }
         }
 
-        if (showHeldInfo) {
+        if (active && showHeldInfo) {
             AlertDialog(
                 onDismissRequest = { showHeldInfo = false },
                 icon = { Icon(Icons.Default.Warning, null) },
@@ -1679,8 +1867,10 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
             modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
         ) { Icon(Icons.Default.MyLocation, contentDescription = "Moje poloha") }
 
-        appState.selectedVehicle?.let { v ->
-            VehicleDetailBottomSheet(v, api, appState) { appState.selectedVehicle = null }
+        if (active) {
+            appState.selectedVehicle?.let { v ->
+                VehicleDetailBottomSheet(v, api, appState) { appState.selectedVehicle = null }
+            }
         }
     }
 }
