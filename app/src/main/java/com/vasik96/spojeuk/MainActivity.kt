@@ -15,17 +15,16 @@ import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.*
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -38,6 +37,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -59,6 +59,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
@@ -82,6 +85,7 @@ import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.milliseconds
+import androidx.core.graphics.createBitmap
 
 private val UstiCenter = LatLng(50.6606, 14.0323)
 private const val FIRST_PAGE = 8
@@ -103,7 +107,59 @@ data class IndexedStop(
 )
 
 /** Odkaz na konkrétní spoj (každá instance je unikátní → opakovaný klik znovu spustí zvýraznění). */
-class TripRef(val cis: String, val trip: String)
+class TripRef(
+    val cis: String,
+    val trip: String,
+    val line: String,
+    val boardLat: Double?,
+    val boardLng: Double?
+)
+
+
+class VehicleMatch(val vehicle: Vehicle, val approximate: Boolean)
+
+enum class SettingsSubscreen {
+    MAIN,
+    DATA_UPDATES
+}
+
+private const val MAX_ROUTE_OFFSET_M = 50f     // max. vzdálenost autobusu od trasy
+private const val MAX_APPROACH_M = 8_000f      // max. vzdálenost před zastávkou po trase (v metrech)
+
+private fun findVehicle(list: List<Vehicle>, ref: TripRef, route: List<LatLng>): VehicleMatch? {
+    val live = list.filter { it.state in 0..1 }
+
+    // 1) přesná shoda
+    live.firstOrNull { it.cis == ref.cis && it.trip == ref.trip }
+        ?.let { return VehicleMatch(it, approximate = false) }
+
+    // 2) fallback: nejbližší autobus stejné linky PŘED nástupní zastávkou
+    val bLat = ref.boardLat ?: return null
+    val bLng = ref.boardLng ?: return null
+    if (route.size < 2) return null
+
+    val board = LatLng(bLat, bLng)
+    val boardIdx = route.indices.minByOrNull { distanceMeters(board, route[it]) } ?: return null
+
+    // kumulativní vzdálenost podél trasy
+    val cum = FloatArray(route.size)
+    for (i in 1 until route.size) cum[i] = cum[i - 1] + distanceMeters(route[i - 1], route[i])
+
+    var best: Vehicle? = null
+    var bestGap = Float.MAX_VALUE
+    for (v in live) {
+        if (v.line != ref.line) continue
+        val p = LatLng(v.lat, v.lng)
+        val idx = route.indices.minByOrNull { distanceMeters(p, route[it]) } ?: continue
+        if (distanceMeters(p, route[idx]) > MAX_ROUTE_OFFSET_M) continue   // není na trase
+        if (idx > boardIdx) continue                                       // už zastávku projel
+        val gap = cum[boardIdx] - cum[idx]
+        if (gap <= MAX_APPROACH_M && gap < bestGap) { bestGap = gap; best = v }
+    }
+    return best?.let { VehicleMatch(it, approximate = true) }
+}
+
+
 
 class SpojeAppState(
     val context: Context,
@@ -123,6 +179,8 @@ class SpojeAppState(
 
     val listState = LazyListState()
     val shownKeys = HashSet<String>()
+
+    var fullRoute by mutableStateOf<List<LatLng>>(emptyList())
 
 
     var showSetup by mutableStateOf(false)
@@ -172,8 +230,22 @@ class SpojeAppState(
     var autoFillDone = false      // předvyplnění proběhlo
     var autoFillAsked = false     // o oprávnění jsme už žádali
 
-    // Settings & Updates
-    var showSettings by mutableStateOf(false)
+    // Settings & Preferences
+    private val settingsPrefs = context.getSharedPreferences("app_settings_prefs", Context.MODE_PRIVATE)
+
+    var settingsSubscreen by mutableStateOf(SettingsSubscreen.MAIN)
+
+    var hideOtherVehiclesOnMap by mutableStateOf(
+        settingsPrefs.getBoolean("hide_other_vehicles_on_map", false)
+    )
+
+    var focusedTripVehicle by mutableStateOf<Vehicle?>(null)
+
+    fun setHideOtherVehicles(hide: Boolean) {
+        hideOtherVehiclesOnMap = hide
+        settingsPrefs.edit().putBoolean("hide_other_vehicles_on_map", hide).apply()
+    }
+
     var isUpdatingData by mutableStateOf(false)
     var updateStatusMessage by mutableStateOf<String?>(null)
     var updateProgress by mutableFloatStateOf(0f)
@@ -395,6 +467,14 @@ private fun SpojeApp() {
     }
     val showMap = mapVisited
 
+    BackHandler(enabled = appState.selectedTab == 2) {
+        if (appState.settingsSubscreen == SettingsSubscreen.DATA_UPDATES) {
+            appState.settingsSubscreen = SettingsSubscreen.MAIN
+        } else {
+            appState.selectedTab = 0
+        }
+    }
+
     val dark = isSystemInDarkTheme()
     val scheme = if (Build.VERSION.SDK_INT >= 31) {
         if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
@@ -464,9 +544,12 @@ private fun SpojeApp() {
                                     appState = appState,
                                     api = api,
                                     onShowMapForJourney = { journey ->
-                                        val ref = TripRef(journey.cis, journey.trip)
+                                        val bp = api.boardingPoint(journey)
+                                        val ref = TripRef(journey.cis, journey.trip, journey.line, bp?.first, bp?.second)
                                         appState.selectedVehicle = null
+                                        appState.focusedTripVehicle = null
                                         appState.tripRoute = emptyList()
+                                        appState.fullRoute = emptyList()
                                         appState.routeLoading = true
                                         appState.vehiclesLoaded = false
                                         appState.focusTrip = ref
@@ -474,7 +557,9 @@ private fun SpojeApp() {
                                         appState.selectedTab = 1
                                         scope.launch {
                                             val points = api.journeyGeometry(journey)
+                                            val full = api.firstLegFullRoute(journey)
                                             appState.tripRoute = points.map { LatLng(it.first, it.second) }
+                                            appState.fullRoute = full.map { LatLng(it.first, it.second) }
                                             appState.routeLoading = false
                                         }
                                     }
@@ -662,7 +747,7 @@ private fun SearchScreen(
             val to = sug?.second?.let { n -> appState.stops.firstOrNull { it.name == n } }
 
             appState.from = from
-            appState.fromQuery = stopLabel(from.name)
+            appState.fromQuery = myLocLabel(from.name)
             if (to != null) {
                 appState.to = to
                 appState.toQuery = stopLabel(to.name)
@@ -962,7 +1047,7 @@ private fun SearchScreen(
                         stopsLoading = appState.stopsLoading || locatingTarget == "from",
                         onRemoveUsed = { removeUsed(it) },
                         onMyLocation = {
-                            useMyLocation("from") { s -> appState.from = s; appState.fromQuery = stopLabel(s.name) }
+                            useMyLocation("from") { s -> appState.from = s; appState.fromQuery = myLocLabel(s.name) }
                         }
                     )
 
@@ -998,7 +1083,7 @@ private fun SearchScreen(
                         originLng = origin.second,
                         onRemoveUsed = { removeUsed(it) },
                         onMyLocation = {
-                            useMyLocation("to") { s -> appState.to = s; appState.toQuery = stopLabel(s.name) }
+                            useMyLocation("to") { s -> appState.to = s; appState.toQuery = myLocLabel(s.name) }
                         }
                     )
 
@@ -1276,6 +1361,8 @@ private fun ageLabel(s: Long): String = when {
 
 private fun stopLabel(name: String): String = splitStopName(name).first.ifBlank { name }
 
+private fun myLocLabel(name: String) = "Moje poloha (${stopLabel(name)})"
+
 
 private fun getStopMatches(
     query: String,
@@ -1364,8 +1451,9 @@ private fun StopField(
     // Filtrování mimo hlavní vlákno; psaní tím není nijak blokované
     LaunchedEffect(tfv.text, indexedStops, originLat, originLng) {
         delay(60.milliseconds)
+        val q = if (tfv.text.startsWith("Moje poloha (")) "" else tfv.text
         options = withContext(Dispatchers.Default) {
-            getStopMatches(tfv.text, indexedStops, originLat, originLng)
+            getStopMatches(q, indexedStops, originLat, originLng)
         }
     }
 
@@ -1417,7 +1505,8 @@ private fun StopField(
             expanded = showMenu,
             onDismissRequest = { expanded = false }
         ) {
-            if (tfv.text.isBlank()) {
+            val isMyLoc = tfv.text.startsWith("Moje poloha (")
+            if (tfv.text.isBlank() || isMyLoc) {
                 DropdownMenuItem(
                     leadingIcon = { Icon(Icons.Default.MyLocation, null, tint = MaterialTheme.colorScheme.primary) },
                     text = {
@@ -1674,7 +1763,7 @@ private fun createLineMarkerDrawable(
 private fun createLocationDot(context: Context): Bitmap {
     val d = context.resources.displayMetrics.density
     val size = (34 * d).toInt()
-    val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val bmp = createBitmap(size, size)
     val c = Canvas(bmp)
     val cx = size / 2f
     val cy = size / 2f
@@ -1692,9 +1781,6 @@ private fun createLocationDot(context: Context): Bitmap {
     c.drawCircle(cx, cy, 7.5f * d, blue)
     return bmp
 }
-
-private fun findVehicle(list: List<Vehicle>, ref: TripRef): Vehicle? =
-    list.firstOrNull { it.cis == ref.cis && it.trip == ref.trip && it.state in 0..1 }
 
 
 private fun bearingBetween(
@@ -1837,10 +1923,10 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
     }
 
     // zvýraznění markeru
-    LaunchedEffect(appState.highlightedTrip, appState.vehiclesLoaded) {
+    LaunchedEffect(appState.highlightedTrip, appState.vehiclesLoaded, appState.routeLoading) {
         if (appState.highlightedTrip == null) { appState.pulsePhase = 0; return@LaunchedEffect }
-        if (!appState.vehiclesLoaded) return@LaunchedEffect
-        repeat(6) { i -> appState.pulsePhase = if (i % 2 == 0) 1 else 2; delay(400) }
+        if (!appState.vehiclesLoaded || appState.routeLoading) return@LaunchedEffect
+        repeat(6) { i -> appState.pulsePhase = if (i % 2 == 0) 1 else 2; delay(400.milliseconds) }
         appState.pulsePhase = 0
         appState.highlightedTrip = null
     }
@@ -1848,17 +1934,35 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
     // přiblížení po kliknutí na "Mapa"
     LaunchedEffect(appState.focusTrip, appState.vehiclesLoaded, appState.routeLoading) {
         val ref = appState.focusTrip ?: return@LaunchedEffect
+
+
+        android.util.Log.i("Focus", "sameLine=" + appState.vehicles.filter { it.line == ref.line }
+            .map { "id${it.id}/st${it.state}/${it.lat},${it.lng}" })
+
+
         if (!appState.vehiclesLoaded || appState.routeLoading) return@LaunchedEffect
-        val v = findVehicle(appState.vehicles, ref)
         val route = appState.tripRoute
+        val searchRoute = appState.fullRoute.ifEmpty { route }
+        val match = findVehicle(appState.vehicles, ref, searchRoute)
+        val v = match?.vehicle
         if (v != null) {
+            appState.focusedTripVehicle = v
+            if (match.approximate) {
+                android.widget.Toast.makeText(
+                    context,
+                    "ID spoje nenalezeno. Zobrazen nejbližší bus linky ${ref.line}, může být jiný.",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+
+            }
             cameraPositionState.animate(CameraUpdateFactory.newLatLngZoom(LatLng(v.lat, v.lng), 16f), 700)
         } else {
-            android.widget.Toast.makeText(
-                context,
-                "Autobus tohoto spoje teď není na mapě, možná ještě nevyjel",
-                android.widget.Toast.LENGTH_LONG
-            ).show()
+            appState.focusedTripVehicle = null
+            val msg = if (appState.mapError != null)
+                "Polohy vozidel se nepodařilo načíst"
+            else
+                "Autobus tohoto spoje teď není na mapě, možná ještě nevyjel"
+            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
             if (route.isNotEmpty()) {
                 val lats = route.map { it.latitude }
                 val lons = route.map { it.longitude }
@@ -1877,9 +1981,16 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
     val phase = appState.pulsePhase
     val ref = appState.highlightedTrip
     val allVehicles = appState.vehicles
-    val target = if (ref != null) findVehicle(allVehicles, ref) else null
-    val activeVehicles = allVehicles.filter {
-        it === target || (it.lat in 50.35..50.95 && it.lng in 13.55..14.60)
+    val target = if (ref != null)
+        findVehicle(allVehicles, ref, appState.fullRoute.ifEmpty { appState.tripRoute })?.vehicle
+    else appState.focusedTripVehicle ?: appState.selectedVehicle
+
+    val activeVehicles = if (appState.hideOtherVehiclesOnMap && appState.focusedTripVehicle != null && appState.tripRoute.isNotEmpty()) {
+        listOfNotNull(appState.focusedTripVehicle)
+    } else {
+        allVehicles.filter {
+            it === target || (it.lat in 50.35..50.95 && it.lng in 13.55..14.60)
+        }
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -1896,7 +2007,6 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
 
 
             val primaryColor = MaterialTheme.colorScheme.primary
-            val primaryArgb = primaryColor.toArgb()
             val arrowColor = MaterialTheme.colorScheme.onBackground
             val arrowArgb = arrowColor.toArgb()
 
@@ -2017,7 +2127,11 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
         // logo Google je vlevo dole, proto odsazení
         if (appState.tripRoute.isNotEmpty()) {
             SmallFloatingActionButton(
-                onClick = { appState.tripRoute = emptyList() },
+                onClick = {
+                    appState.tripRoute = emptyList()
+                    appState.fullRoute = emptyList()
+                    appState.focusedTripVehicle = null
+                },
                 modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 52.dp)
             ) { Icon(Icons.Default.Close, contentDescription = "Skrýt trasu") }
         }
@@ -2303,6 +2417,199 @@ private fun SettingsScreen(
     appState: SpojeAppState,
     api: DukApi
 ) {
+    AnimatedContent(
+        targetState = appState.settingsSubscreen,
+        modifier = modifier,
+        transitionSpec = {
+            if (targetState == SettingsSubscreen.DATA_UPDATES) {
+                (slideInHorizontally(tween(280)) { it / 4 } + fadeIn(tween(280))) togetherWith
+                        (slideOutHorizontally(tween(280)) { -it / 4 } + fadeOut(tween(200)))
+            } else {
+                (slideInHorizontally(tween(280)) { -it / 4 } + fadeIn(tween(280))) togetherWith
+                        (slideOutHorizontally(tween(280)) { it / 4 } + fadeOut(tween(200)))
+            }
+        },
+        label = "settingsSubscreen"
+    ) { screen ->
+        // Surface s pozadím, aby se obě obrazovky při přechodu nepřekrývaly průhledně
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            when (screen) {
+                SettingsSubscreen.DATA_UPDATES -> DataUpdatesScreen(
+                    modifier = Modifier.fillMaxSize(),
+                    appState = appState,
+                    api = api,
+                    onBack = { appState.settingsSubscreen = SettingsSubscreen.MAIN }
+                )
+                SettingsSubscreen.MAIN -> SettingsMain(
+                    modifier = Modifier.fillMaxSize(),
+                    appState = appState
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsMain(
+    modifier: Modifier = Modifier,
+    appState: SpojeAppState
+) {
+    val scope = rememberCoroutineScope()
+
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            "Zobrazení a mapa",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary
+        )
+
+        val checked = appState.hideOtherVehiclesOnMap
+
+        OutlinedCard(
+            onClick = { appState.setHideOtherVehicles(!checked) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics { role = Role.Switch }
+        ) {
+            Row(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.FilterList,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Skrýt ostatní vozidla na mapě",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Při zobrazení konkrétního spoje na mapě skryje ostatní autobusy a vlaky, pokud byl autobus správně nalezen.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = checked,
+                    onCheckedChange = null,
+                    thumbContent = {
+                        Icon(
+                            imageVector = if (checked) Icons.Default.Check else Icons.Default.Close,
+                            contentDescription = null,
+                            modifier = Modifier.size(SwitchDefaults.IconSize),
+                            tint = if (checked) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surfaceContainerHighest
+                        )
+                    }
+                )
+            }
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+        Text(
+            "Data a aktualizace",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary
+        )
+
+        OutlinedCard(
+            onClick = {
+                scope.launch {
+                    delay(70.milliseconds)
+                    appState.settingsSubscreen = SettingsSubscreen.DATA_UPDATES
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudDownload,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Aktualizace dat",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Stahování jízdních řádů GTFS, tvarů tras (Shapes), živých dat a vyčištění keše tras OSRM.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = "Otevřít aktualizace dat",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+        Text(
+            "O aplikaci",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary
+        )
+
+        OutlinedCard(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    "Spoje UK",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Doprava Ústeckého kraje",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+
+@Composable
+private fun DataUpdatesScreen(
+    modifier: Modifier = Modifier,
+    appState: SpojeAppState,
+    api: DukApi,
+    onBack: () -> Unit
+) {
     val scope = rememberCoroutineScope()
     val timetableMeta = remember(appState.isUpdatingData) { api.getTimetableMeta() }
     val shapesMeta = remember(appState.isUpdatingData) { api.getShapesMeta() }
@@ -2317,11 +2624,12 @@ private fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(
-                imageVector = Icons.Default.CloudDownload,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary
-            )
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Zpět do nastavení"
+                )
+            }
             Text(
                 "Aktualizace dat",
                 style = MaterialTheme.typography.titleMedium,
@@ -2460,7 +2768,7 @@ private fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSecondaryContainer
                         )
                         Text(
-                            "Kompletní aktualizace: Jízdní řády GTFS, trasy linek Shapes, živá poloha vozidel a vyčištění cache tras.",
+                            "Kompletní aktualizace: Jízdní řády GTFS, trasy linek Shapes, živá poloha vozidel a vyčištění keše tras.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
                         )
@@ -2523,11 +2831,11 @@ private fun SettingsScreen(
         )
 
         SettingUpdateItemCard(
-            title = "Cache pěších a silničních tras (OSRM)",
+            title = "Keš pěších a silničních tras (OSRM)",
             description = "Vymazat a obnovit uložené trasy OSRM v zařízení.",
             infoBadge = null,
             icon = Icons.Default.DeleteSweep,
-            buttonText = "Vyčistit cache",
+            buttonText = "Vyčistit keš",
             enabled = !appState.isUpdatingData,
             onClick = { appState.performClearOsrmCache(api, scope) }
         )

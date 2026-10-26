@@ -264,6 +264,18 @@ class DukApi(val context: Context? = null) {
         planner = Planner(tt)
     }
 
+    /** Celá trasa prvního spoje (i před nástupní zastávkou), pro hledání autobusu, který ještě nedojel. */
+    suspend fun firstLegFullRoute(j: Journey): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
+        val tt = ensureTimetable()
+        val leg = j.rawLegs.firstOrNull { it.kind == "ride" } ?: return@withContext emptyList()
+        val trip = tt.trips[leg.tid] ?: return@withContext emptyList()
+        shapeStore.points(trip.gid)?.let { return@withContext it }
+        val coords = tt.tripStops(leg.tid).toList().mapNotNull { sid ->
+            tt.stops[sid]?.takeIf { it.lat != 0.0 || it.lng != 0.0 }?.let { it.lat to it.lng }
+        }
+        osrmClient.pathFor(coords)
+    }
+
     suspend fun loadStops(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): List<Stop> =
         withContext(Dispatchers.IO) {
             val tt = ensureTimetable(log, progress)
@@ -272,6 +284,13 @@ class DukApi(val context: Context? = null) {
 
     fun newSearch(from: List<Stop>, to: List<Stop>, fromName: String, toName: String): JourneySearch {
         return JourneySearch(this, fromName, toName)
+    }
+
+    fun boardingPoint(j: Journey): Pair<Double, Double>? {
+        val tt = timetable ?: return null
+        val leg = j.rawLegs.firstOrNull { it.kind == "ride" } ?: return null
+        val s = tt.stops[leg.fromStop] ?: return null
+        return if (s.lat == 0.0 && s.lng == 0.0) null else s.lat to s.lng
     }
 
     suspend fun searchConnections(
