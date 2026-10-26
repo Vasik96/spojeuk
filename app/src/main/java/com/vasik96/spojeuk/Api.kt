@@ -468,6 +468,73 @@ class DukApi(val context: Context? = null) {
         cands[i].first to road[i]!!
     }
 
+    fun getTimetableMeta(): Map<String, String> {
+        return timetable?.meta ?: run {
+            if (dbFile.exists()) {
+                runCatching { Timetable(dbFile).meta }.getOrDefault(emptyMap())
+            } else emptyMap()
+        }
+    }
+
+    fun getShapesMeta(): String? = shapeStore.getBuiltDate()
+
+    suspend fun updateTimetable(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): Timetable =
+        withContext(Dispatchers.IO) {
+            updateFromGitHub(log, progress)
+            val tt = Timetable(dbFile)
+            timetable = tt
+            planner = Planner(tt)
+            tt
+        }
+
+    suspend fun updateShapes(log: (String) -> Unit = {}, forceDownload: Boolean = false): Boolean =
+        withContext(Dispatchers.IO) {
+            log("Kontroluji trasy spojů (Shapes)…")
+            val updated = shapeStore.sync(http, force = true, forceDownload = forceDownload)
+            if (updated) log("Trasy spojů byly aktualizovány.")
+            else log("Trasy spojů jsou již aktuální.")
+            updated
+        }
+
+    suspend fun updateRealtime(log: (String) -> Unit = {}): List<Vehicle> =
+        withContext(Dispatchers.IO) {
+            log("Obnovuji živá data vozidel…")
+            val vehicles = vehiclePositions()
+            log("Živá data obnovena (${vehicles.size} vozidel).")
+            vehicles
+        }
+
+    fun clearOsrmCache(log: (String) -> Unit = {}): Int {
+        log("Čistím keš OSRM tras…")
+        val count = osrmClient.clearCache()
+        log("Keš tras vyčištěna ($count souborů smazáno).")
+        return count
+    }
+
+    suspend fun updateAllData(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}) =
+        withContext(Dispatchers.IO) {
+            log("Zahajuji kompletní aktualizaci všech dat…")
+            progress(0.05f)
+
+            log("1/4: Stahuji nejnovější jízdní řády (GTFS)…")
+            updateTimetable(log = { log("1/4: $it") }, progress = { progress(0.05f + it * 0.5f) })
+
+            log("2/4: Stahuji trasy a geometrie (Shapes)…")
+            progress(0.6f)
+            updateShapes(log = { log("2/4: $it") }, forceDownload = true)
+
+            log("3/4: Obnovuji živá data vozidel…")
+            progress(0.8f)
+            updateRealtime(log = { log("3/4: $it") })
+
+            log("4/4: Čistím keš tras OSRM…")
+            progress(0.95f)
+            clearOsrmCache(log = { log("4/4: $it") })
+
+            progress(1.0f)
+            log("Kompletní aktualizace dat byla úspěšně dokončena!")
+        }
+
 
 }
 
@@ -478,7 +545,7 @@ class JourneySearch(
 ) {
     private val currentJourneys = mutableListOf<Journey>()
     private val mutex = Mutex()
-    private val startTime: LocalDateTime = nowPrague()
+    private val startTime: LocalDateTime = nowPrague().withSecond(0).withNano(0)
     // konec hledání dopředu: 04:00 následujícího dne
     private val cutoff: LocalDateTime =
         startTime.toLocalDate().plusDays(1).atStartOfDay().plusHours(4)

@@ -67,17 +67,22 @@ class ShapeStore(private val dir: File, private val context: Context? = null) {
         return null
     }
 
+    fun getBuiltDate(): String? {
+        if (!metaFile.exists()) return null
+        return runCatching { JSONObject(metaFile.readText()).optString("built") }.getOrNull()
+    }
+
     /**
      * Zkontroluje shapes.json na GitHubu (pár set bajtů) a když je novější, stáhne shapes.sqlite.
      * Vrací true, když se soubor vyměnil. Kontrola nejvýš jednou za 12 h, pokud není [force].
      */
-    suspend fun sync(http: OkHttpClient, force: Boolean = false): Boolean = withContext(Dispatchers.IO) {
+    suspend fun sync(http: OkHttpClient, force: Boolean = false, forceDownload: Boolean = false): Boolean = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
-        if (!force && dbFile.exists() && now - checkedFile.lastModified() < 12 * 3600_000L) return@withContext false
+        if (!force && !forceDownload && dbFile.exists() && now - checkedFile.lastModified() < 12 * 3600_000L) return@withContext false
 
         val remote = JSONObject(httpGet(http, "$SHAPES_BASE_URL/shapes.json"))
         val localBuilt = runCatching { JSONObject(metaFile.readText()).optString("built") }.getOrDefault("")
-        if (!force && dbFile.exists() && remote.optString("built") == localBuilt) {
+        if (!forceDownload && dbFile.exists() && remote.optString("built") == localBuilt) {
             checkedFile.writeText(now.toString())
             return@withContext false
         }

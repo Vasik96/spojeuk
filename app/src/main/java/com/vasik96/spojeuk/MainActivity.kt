@@ -33,8 +33,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -43,6 +46,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.vector.ImageVector
+import kotlinx.coroutines.CoroutineScope
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -167,6 +172,152 @@ class SpojeAppState(
     var autoFillDone = false      // předvyplnění proběhlo
     var autoFillAsked = false     // o oprávnění jsme už žádali
 
+    // Settings & Updates
+    var showSettings by mutableStateOf(false)
+    var isUpdatingData by mutableStateOf(false)
+    var updateStatusMessage by mutableStateOf<String?>(null)
+    var updateProgress by mutableFloatStateOf(0f)
+    var updateError by mutableStateOf<String?>(null)
+    var updateSuccess by mutableStateOf<String?>(null)
+
+    fun performUpdateAll(api: DukApi, scope: CoroutineScope) {
+        if (isUpdatingData) return
+        isUpdatingData = true
+        updateError = null
+        updateSuccess = null
+        updateStatusMessage = "Zahajuji aktualizaci…"
+        updateProgress = 0f
+
+        scope.launch {
+            runCatching {
+                api.updateAllData(
+                    log = { updateStatusMessage = it },
+                    progress = { updateProgress = it }
+                )
+                stopsLoading = true
+                val loaded = api.loadStops(
+                    log = { updateStatusMessage = it },
+                    progress = { updateProgress = it }
+                )
+                updateIndexedStops(loaded)
+                stopsLoading = false
+            }.onSuccess {
+                updateSuccess = "Všechna data byla úspěšně stažena a aktualizována!"
+                updateStatusMessage = null
+            }.onFailure {
+                if (it is CancellationException) throw it
+                updateError = "Aktualizace selhala: ${it.message}"
+                updateStatusMessage = null
+            }
+            isUpdatingData = false
+        }
+    }
+
+    fun performUpdateTimetable(api: DukApi, scope: CoroutineScope) {
+        if (isUpdatingData) return
+        isUpdatingData = true
+        updateError = null
+        updateSuccess = null
+        updateStatusMessage = "Aktualizuji jízdní řády…"
+        updateProgress = 0f
+
+        scope.launch {
+            runCatching {
+                api.updateTimetable(
+                    log = { updateStatusMessage = it },
+                    progress = { updateProgress = it }
+                )
+                stopsLoading = true
+                val loaded = api.loadStops(
+                    log = { updateStatusMessage = it },
+                    progress = { updateProgress = it }
+                )
+                updateIndexedStops(loaded)
+                stopsLoading = false
+            }.onSuccess {
+                updateSuccess = "Jízdní řády byly úspěšně aktualizovány!"
+                updateStatusMessage = null
+            }.onFailure {
+                if (it is CancellationException) throw it
+                updateError = "Aktualizace JŘ selhala: ${it.message}"
+                updateStatusMessage = null
+            }
+            isUpdatingData = false
+        }
+    }
+
+    fun performUpdateShapes(api: DukApi, scope: CoroutineScope) {
+        if (isUpdatingData) return
+        isUpdatingData = true
+        updateError = null
+        updateSuccess = null
+        updateStatusMessage = "Aktualizuji trasy spojů (Shapes)…"
+        updateProgress = 0f
+
+        scope.launch {
+            runCatching {
+                api.updateShapes(
+                    log = { updateStatusMessage = it },
+                    forceDownload = true
+                )
+            }.onSuccess {
+                updateSuccess = "Trasy spojů (Shapes) byly úspěšně aktualizovány!"
+                updateStatusMessage = null
+            }.onFailure {
+                if (it is CancellationException) throw it
+                updateError = "Aktualizace tras selhala: ${it.message}"
+                updateStatusMessage = null
+            }
+            isUpdatingData = false
+        }
+    }
+
+    fun performUpdateRealtime(api: DukApi, scope: CoroutineScope) {
+        if (isUpdatingData) return
+        isUpdatingData = true
+        updateError = null
+        updateSuccess = null
+        updateStatusMessage = "Obnovuji živá data vozidel…"
+        updateProgress = 0f
+
+        scope.launch {
+            runCatching {
+                api.updateRealtime(log = { updateStatusMessage = it })
+            }.onSuccess { vehiclesList ->
+                updateSuccess = "Živá data obnovena (${vehiclesList.size} vozidel)!"
+                updateStatusMessage = null
+            }.onFailure {
+                if (it is CancellationException) throw it
+                updateError = "Obnovení živých dat selhalo: ${it.message}"
+                updateStatusMessage = null
+            }
+            isUpdatingData = false
+        }
+    }
+
+    fun performClearOsrmCache(api: DukApi, scope: CoroutineScope) {
+        if (isUpdatingData) return
+        isUpdatingData = true
+        updateError = null
+        updateSuccess = null
+        updateStatusMessage = "Čistím cache tras OSRM…"
+        updateProgress = 0f
+
+        scope.launch {
+            runCatching {
+                api.clearOsrmCache(log = { updateStatusMessage = it })
+            }.onSuccess { count ->
+                updateSuccess = "Cache OSRM byla vyčištěna ($count souborů smazáno)."
+                updateStatusMessage = null
+            }.onFailure {
+                if (it is CancellationException) throw it
+                updateError = "Vyčištění cache selhalo: ${it.message}"
+                updateStatusMessage = null
+            }
+            isUpdatingData = false
+        }
+    }
+
 
     private fun effectiveUsage(name: String): Int =
         (usageManager.getUsageCount(name) - baseline.get(name)).coerceAtLeast(0)
@@ -280,6 +431,12 @@ private fun SpojeApp() {
                                 icon = { Icon(Icons.Default.Map, null) },
                                 label = { Text("Mapa") }
                             )
+                            NavigationBarItem(
+                                selected = appState.selectedTab == 2,
+                                onClick = { appState.selectedTab = 2 },
+                                icon = { Icon(Icons.Default.Settings, null) },
+                                label = { Text("Nastavení") }
+                            )
                         }
                     }
                 ) { padding ->
@@ -321,6 +478,23 @@ private fun SpojeApp() {
                                             appState.routeLoading = false
                                         }
                                     }
+                                )
+                            }
+                        }
+
+                        AnimatedVisibility(
+                            visible = appState.selectedTab == 2,
+                            enter = fadeIn(tween(150)),
+                            exit = fadeOut(tween(150))
+                        ) {
+                            Surface(
+                                modifier = Modifier.fillMaxSize().pointerInput(Unit) {},
+                                color = MaterialTheme.colorScheme.background
+                            ) {
+                                SettingsScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    appState = appState,
+                                    api = api
                                 )
                             }
                         }
@@ -985,8 +1159,9 @@ private fun SourceBadges() {
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        LogoChip(R.drawable.duk, "Doprava Ústeckého kraje")
         LogoChip(R.drawable.dpmul, "Dopravní podnik města Ústí nad Labem")
+        LogoChip(R.drawable.duk, "Doprava Ústeckého kraje")
+
     }
 
     if (showInfo) {
@@ -1055,8 +1230,9 @@ private fun SetupOverlay(message: String, progress: Float, onBackground: () -> U
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
-            Spacer(Modifier.height(24.dp))
-            TextButton(onClick = onBackground) { Text("Stahovat na pozadí") }
+            // commented out due to instability, keep it here
+            //Spacer(Modifier.height(24.dp))
+            //TextButton(onClick = onBackground) { Text("Stahovat na pozadí") }
         }
     }
 }
@@ -1071,12 +1247,11 @@ private fun fmtMinutes(m: Long): String = when {
 private fun departsIn(j: Journey, now: LocalDateTime): String {
     val secs = ChronoUnit.SECONDS.between(now, j.depDt)
     return when {
-        secs >= 60 -> "za ${fmtMinutes(secs / 60)}"
+        secs > 0 -> "za ${fmtMinutes((secs + 59) / 60)}"   // zaokrouhlení nahoru
         secs > -60 -> "právě odjíždí"
         else -> "odjel před ${fmtMinutes(-secs / 60)}"
     }
 }
-
 
 /** "Ústí nad Labem,Divadlo" → ("Divadlo", "Ústí nad Labem") */
 private fun splitStopName(name: String): Pair<String, String> {
@@ -2120,4 +2295,306 @@ private fun createRouteArrows(
     }
 
     return arrows
+}
+
+@Composable
+private fun SettingsScreen(
+    modifier: Modifier = Modifier,
+    appState: SpojeAppState,
+    api: DukApi
+) {
+    val scope = rememberCoroutineScope()
+    val timetableMeta = remember(appState.isUpdatingData) { api.getTimetableMeta() }
+    val shapesMeta = remember(appState.isUpdatingData) { api.getShapesMeta() }
+
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.CloudDownload,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                "Aktualizace dat",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+
+        Text(
+            "Vyberte, zda chcete stáhnout ze zdrojů kompletně všechna data, nebo aktualizovat pouze jednotlivé položky.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        if (appState.isUpdatingData || appState.updateStatusMessage != null) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.5.dp
+                        )
+                        Text(
+                            "Probíhá aktualizace…",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                    appState.updateStatusMessage?.let { msg ->
+                        Text(
+                            msg,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                    if (appState.updateProgress > 0f) {
+                        LinearProgressIndicator(
+                            progress = { appState.updateProgress },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+        }
+
+        appState.updateSuccess?.let { successMsg ->
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Text(
+                        successMsg,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
+        appState.updateError?.let { errorMsg ->
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Error,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Text(
+                        errorMsg,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Stáhnout ze zdrojů úplně všechno",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        Text(
+                            "Kompletní aktualizace: Jízdní řády GTFS, trasy linek Shapes, živá poloha vozidel a vyčištění cache tras.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = { appState.performUpdateAll(api, scope) },
+                    enabled = !appState.isUpdatingData,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Aktualizovat kompletně vše")
+                }
+            }
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+        Text(
+            "Jednotlivé položky ke stažení",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+
+        SettingUpdateItemCard(
+            title = "Jízdní řády a spojení (GTFS)",
+            description = "Stáhnout nejnovější databázi spojů, linek a zastávek z GitHubu.",
+            infoBadge = timetableMeta["tag"]?.let { "Verze $it" } ?: timetableMeta["built"]?.let { "Sestaveno $it" },
+            icon = Icons.Default.DirectionsBus,
+            buttonText = "Aktualizovat JŘ",
+            enabled = !appState.isUpdatingData,
+            onClick = { appState.performUpdateTimetable(api, scope) }
+        )
+
+        SettingUpdateItemCard(
+            title = "Trasy a geometrie linek (Shapes)",
+            description = "Stáhnout přesné tvary tras pro zobrazení linek na mapě.",
+            infoBadge = shapesMeta?.let { "Sestaveno $it" },
+            icon = Icons.Default.Route,
+            buttonText = "Aktualizovat trasy",
+            enabled = !appState.isUpdatingData,
+            onClick = { appState.performUpdateShapes(api, scope) }
+        )
+
+        SettingUpdateItemCard(
+            title = "Živá poloha vozidel (Realtime)",
+            description = "Obnovit okamžité polohy autobusů, trolejbusů a vlaků.",
+            infoBadge = "Aktuální polohy",
+            icon = Icons.Default.LocationOn,
+            buttonText = "Obnovit polohy",
+            enabled = !appState.isUpdatingData,
+            onClick = { appState.performUpdateRealtime(api, scope) }
+        )
+
+        SettingUpdateItemCard(
+            title = "Cache pěších a silničních tras (OSRM)",
+            description = "Vymazat a obnovit uložené trasy OSRM v zařízení.",
+            infoBadge = null,
+            icon = Icons.Default.DeleteSweep,
+            buttonText = "Vyčistit cache",
+            enabled = !appState.isUpdatingData,
+            onClick = { appState.performClearOsrmCache(api, scope) }
+        )
+
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun SettingUpdateItemCard(
+    title: String,
+    description: String,
+    infoBadge: String?,
+    icon: ImageVector,
+    buttonText: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (infoBadge != null) {
+                        Spacer(Modifier.height(4.dp))
+                        SuggestionChip(
+                            onClick = {},
+                            enabled = false,
+                            label = {
+                                Text(
+                                    infoBadge,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+            OutlinedButton(
+                onClick = onClick,
+                enabled = enabled,
+                modifier = Modifier.align(Alignment.End)
+            ) {
+                Text(buttonText)
+            }
+        }
+    }
 }

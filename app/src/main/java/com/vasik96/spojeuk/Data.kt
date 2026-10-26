@@ -1234,7 +1234,9 @@ class Planner(val tt: Timetable) {
         if (journeys.isEmpty()) return emptyList()
         val first = journeys.minOf { it.depDt }
         val lo = maxOf(first.minusHours(hours.toLong()), first.toLocalDate().atStartOfDay())
-        val newJs = find(fromPlace, toPlace, lo, count, end = first.minusSeconds(1))
+        val newJs = find(fromPlace, toPlace, lo, 60, end = first.minusSeconds(1))
+            .sortedBy { it.depDt }
+            .takeLast(count)
         val existingKeys = journeys.mapTo(HashSet()) { it.key }
         return prune(journeys + newJs.filter { it.key !in existingKeys })
     }
@@ -1571,6 +1573,17 @@ class OsrmClient(private val cacheDir: File) {
         } catch (e: Exception) {
             null
         }
+    }
+
+    fun clearCache(): Int {
+        val dir = File(cacheDir, "routes")
+        if (!dir.exists()) return 0
+        val files = dir.listFiles() ?: return 0
+        var count = 0
+        for (f in files) {
+            if (f.delete()) count++
+        }
+        return count
     }
 
 }
