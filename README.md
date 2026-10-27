@@ -144,6 +144,6 @@ Kotlin · Jetpack Compose · Material 3 (Expressive) · Coroutines · OkHttp · 
 
 ## 📄 Licence a poděkování
 
-Licence: **MIT**
+Licence: [MIT](LICENSE)
 
 Díky patří projektu [obehy.cz / Sap1k](https://github.com/Sap1k/obehy) za zpracování jízdních řádů, přispěvatelům [OpenStreetMap](https://www.openstreetmap.org/copyright) a otevřeným datům CIS JŘ.
