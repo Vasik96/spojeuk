@@ -225,6 +225,8 @@ class SpojeAppState(
 
     var heldCount by mutableIntStateOf(0)
 
+    var vehicleSource by mutableStateOf("")
+
     var userLoc by mutableStateOf<Pair<Double, Double>?>(null)
 
     var autoFillDone = false      // předvyplnění proběhlo
@@ -240,6 +242,38 @@ class SpojeAppState(
     )
 
     var focusedTripVehicle by mutableStateOf<Vehicle?>(null)
+    var focusedTripRef by mutableStateOf<TripRef?>(null)
+
+    fun updateVehicles(newVehicles: List<Vehicle>) {
+        vehicles = newVehicles
+        val ref = focusedTripRef
+        val curFocused = focusedTripVehicle
+        if (curFocused != null) {
+            val updated = newVehicles.firstOrNull {
+                it.uid == curFocused.uid ||
+                        (curFocused.cis.isNotBlank() && curFocused.trip.isNotBlank() && it.cis == curFocused.cis && it.trip == curFocused.trip)
+            } ?: ref?.let { findVehicle(newVehicles, it, fullRoute.ifEmpty { tripRoute })?.vehicle }
+            if (updated != null) {
+                focusedTripVehicle = updated
+            }
+        } else if (ref != null && tripRoute.isNotEmpty()) {
+            val found = findVehicle(newVehicles, ref, fullRoute.ifEmpty { tripRoute })?.vehicle
+            if (found != null) {
+                focusedTripVehicle = found
+            }
+        }
+
+        val curSelected = selectedVehicle
+        if (curSelected != null) {
+            val updated = newVehicles.firstOrNull {
+                it.uid == curSelected.uid ||
+                        (curSelected.cis.isNotBlank() && curSelected.trip.isNotBlank() && it.cis == curSelected.cis && it.trip == curSelected.trip)
+            }
+            if (updated != null) {
+                selectedVehicle = updated
+            }
+        }
+    }
 
     fun setHideOtherVehicles(hide: Boolean) {
         hideOtherVehiclesOnMap = hide
@@ -356,6 +390,7 @@ class SpojeAppState(
             runCatching {
                 api.updateRealtime(log = { updateStatusMessage = it })
             }.onSuccess { vehiclesList ->
+                updateVehicles(vehiclesList)
                 updateSuccess = "Živá data obnovena (${vehiclesList.size} vozidel)!"
                 updateStatusMessage = null
             }.onFailure {
@@ -548,6 +583,7 @@ private fun SpojeApp() {
                                         val ref = TripRef(journey.cis, journey.trip, journey.line, bp?.first, bp?.second)
                                         appState.selectedVehicle = null
                                         appState.focusedTripVehicle = null
+                                        appState.focusedTripRef = ref
                                         appState.tripRoute = emptyList()
                                         appState.fullRoute = emptyList()
                                         appState.routeLoading = true
@@ -1880,8 +1916,9 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
         while (true) {
             runCatching { api.vehiclePositions() }
                 .onSuccess {
-                    appState.vehicles = it
+                    appState.updateVehicles(it)
                     appState.heldCount = api.heldCount()
+                    appState.vehicleSource = api.sourceLabel()
                     appState.mapError = null
                 }
                 .onFailure {
@@ -1947,6 +1984,7 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
         val v = match?.vehicle
         if (v != null) {
             appState.focusedTripVehicle = v
+            appState.focusedTripRef = ref
             if (match.approximate) {
                 android.widget.Toast.makeText(
                     context,
@@ -2058,7 +2096,7 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
                 }
             }
             for (v in activeVehicles) {
-                key(v.id) {
+                key(v.uid) {
                     val pos = LatLng(v.lat, v.lng)
                     val markerState = remember { MarkerState(pos) }
                     markerState.position = pos
@@ -2090,6 +2128,14 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (appState.vehicleSource.isNotBlank()) {
+                        Text(
+                            "Zdroj: ${appState.vehicleSource}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if ("zastaralé" in appState.vehicleSource || appState.vehicleSource == "žádný zdroj")
+                                MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
                 if (appState.routeLoading) { Wavy(24.dp); Spacer(Modifier.width(8.dp)) }
                 if (appState.mapError != null) {
@@ -2131,6 +2177,7 @@ private fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, ap
                     appState.tripRoute = emptyList()
                     appState.fullRoute = emptyList()
                     appState.focusedTripVehicle = null
+                    appState.focusedTripRef = null
                 },
                 modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 52.dp)
             ) { Icon(Icons.Default.Close, contentDescription = "Skrýt trasu") }
@@ -2175,8 +2222,10 @@ private fun VehicleDetailBottomSheet(
     val scope = rememberCoroutineScope()
     val ctx = androidx.compose.ui.platform.LocalContext.current
 
-    var tripInfo by remember(vehicle.id) { mutableStateOf<VehicleTripInfo?>(null) }
-    LaunchedEffect(vehicle.id) {
+    var tripInfo by remember(vehicle.uid) { mutableStateOf<VehicleTripInfo?>(null) }
+
+
+    LaunchedEffect(vehicle.uid) {
         tripInfo = runCatching { api.vehicleTripInfo(vehicle) }.getOrNull()
     }
 
@@ -2220,6 +2269,8 @@ private fun VehicleDetailBottomSheet(
             }
 
             Text("ID spoje: ${vehicle.trip}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Zdroj polohy: ${vehicle.source}", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
 
             val ageSec by produceState(api.vehicleAgeSec(vehicle), vehicle) {
                 while (true) {
@@ -2613,6 +2664,8 @@ private fun DataUpdatesScreen(
     val scope = rememberCoroutineScope()
     val timetableMeta = remember(appState.isUpdatingData) { api.getTimetableMeta() }
     val shapesMeta = remember(appState.isUpdatingData) { api.getShapesMeta() }
+
+
 
     Column(
         modifier = modifier

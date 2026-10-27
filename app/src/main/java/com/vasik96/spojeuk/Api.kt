@@ -99,8 +99,12 @@ data class Vehicle(
     val id: Int = 0,
     val airConditioned: Boolean? = null,
     val ageSec: Int = 0,
+    val source: String = SRC_DUK,
+    val tid: Int = 0,
+    val heading: Double? = null,
 ) {
     val vehicleKey: String? get() = if (cis != "000000" && cis.isNotBlank()) "$cis:$trip" else null
+    val uid: String get() = "$source#" + if (id != 0) id.toString() else vehicleId.ifBlank { "$lat,$lng" }
 }
 
 fun tm(value: String): Int {
@@ -131,8 +135,18 @@ class DukApi(val context: Context? = null) {
 
     private val lineCache = ConcurrentHashMap<String, String>()
 
-    fun heldCount(): Int = realtimeClient.heldCount
-    fun vehicleAgeSec(v: Vehicle): Long = realtimeClient.ageSec(v)
+    private val dpmulClient = DpmulClient()
+    @Volatile private var sourceLabelValue = ""
+    private var dpmulMatchedAt = 0L
+    private var dpmulMatched: List<Vehicle> = emptyList()
+
+    fun sourceLabel(): String = sourceLabelValue
+
+    // když DPMÚL pokrývá MHD, výpadek Portabo varování nepotřebuje
+    fun heldCount(): Int = if (dpmulClient.isFresh()) 0 else realtimeClient.heldCount
+
+    fun vehicleAgeSec(v: Vehicle): Long =
+        if (v.source == SRC_DPMUL) dpmulClient.ageSec(v) else realtimeClient.ageSec(v)
 
     fun isFirstRun(): Boolean = !dbFile.exists() || dbFile.length() < 100_000L
 
@@ -359,25 +373,47 @@ class DukApi(val context: Context? = null) {
     }
 
     suspend fun vehiclePositions(): List<Vehicle> = withContext(Dispatchers.IO) {
-        val list = realtimeClient.refresh(0)
-        val tt = timetable ?: return@withContext list
-        list.map { v ->
+        dpmulClient.kick(bgScope)                      // neblokuje, odpověď může trvat desítky sekund
+
+        val dukRes = runCatching { realtimeClient.refresh(0) }
+        val dukOk = dukRes.isSuccess
+        if (!dukOk && !dpmulClient.hasData) throw dukRes.exceptionOrNull() ?: IllegalStateException("žádný zdroj")
+        val dukRaw = dukRes.getOrElse { realtimeClient.vehicles }
+        val tt = timetable
+
+        val duk = if (tt == null) dukRaw else dukRaw.map { v ->
             val key = "${v.cis}:${v.trip}:${v.line}"
-            val cached = lineCache[key]
-            val line = cached ?: run {
+            val line = lineCache[key] ?: run {
                 val tid = tt.findTripId(v.cis, v.trip)
-                val resolved = tid?.let { tt.trips[it]?.line }
-                    ?.takeIf { it.isNotBlank() && it != "?" }
-                if (resolved != null) lineCache[key] = resolved   // nepropisovat nenalezené
+                val resolved = tid?.let { tt.trips[it]?.line }?.takeIf { it.isNotBlank() && it != "?" }
+                if (resolved != null) lineCache[key] = resolved
                 resolved ?: v.line
             }
             if (line == v.line) v else v.copy(line = line)
         }
+
+        synchronized(this@DukApi) {
+            val stamp = dpmulClient.lastOkMs
+            if (stamp != dpmulMatchedAt) {
+                dpmulMatched = if (tt != null) dpmulClient.vehicles.map { VehicleMerger.attachTrip(tt, it) }
+                else dpmulClient.vehicles
+                dpmulMatchedAt = if (tt != null) stamp else 0L   // bez JŘ zkusit znovu
+            }
+        }
+
+        val res = VehicleMerger.merge(
+            tt, duk, dukOk, realtimeClient.heldCount > OUTAGE_MIN,
+            dpmulMatched, dpmulClient.isFresh(), dpmulClient.hasData,
+            ::vehicleAgeSec
+        )
+        sourceLabelValue = res.label
+        res.vehicles
     }
 
     suspend fun tripGeometry(v: Vehicle): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
         val tt = ensureTimetable()
-        val tid = tt.findTripId(v.cis, v.trip)
+        val tid = v.tid.takeIf { it != 0 }
+            ?: tt.findTripId(v.cis, v.trip)
             ?: tt.findTripByLine(v.line, v.lat, v.lng)
             ?: return@withContext emptyList()
         // přesná trasa z GTFS shapes; OSRM jen když ji spoj nemá
@@ -440,7 +476,7 @@ class DukApi(val context: Context? = null) {
     suspend fun vehicleTripInfo(v: Vehicle): VehicleTripInfo = withContext(Dispatchers.IO) {
         val none = VehicleTripInfo(null, null)
         val tt = ensureTimetable()
-        val tid = tt.findTripId(v.cis, v.trip) ?: return@withContext none
+        val tid = v.tid.takeIf { it != 0 } ?: tt.findTripId(v.cis, v.trip) ?: return@withContext none
         val t = tt.trips[tid] ?: return@withContext none
         val (stopIds, arr, _) = tt.tripTimes(tid) ?: return@withContext none
         if (stopIds.isEmpty()) return@withContext none

@@ -2,6 +2,7 @@ package com.vasik96.spojeuk
 
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteStatement
+import com.vasik96.spojeuk.geoDistM
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -21,8 +22,13 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
+import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.hypot
 
 // ───────────────────────── Konfigurace a konstanty ─────────────────────────
 
@@ -92,6 +98,23 @@ fun intArrayToBytes(arr: IntArray): ByteArray {
     for (v in arr) bb.putInt(v)
     return bb.array()
 }
+
+fun geoDistM(la1: Double, lo1: Double, la2: Double, lo2: Double): Double =
+    hypot((lo2 - lo1) * 111320.0 * cos(Math.toRadians(la1)), (la2 - la1) * 110540.0)
+
+fun bearingDeg(la1: Double, lo1: Double, la2: Double, lo2: Double): Double {
+    val y = (lo2 - lo1) * cos(Math.toRadians(la1))
+    val x = la2 - la1
+    return (Math.toDegrees(atan2(y, x)) + 360) % 360
+}
+
+fun angDiff(a: Double, b: Double): Double { val d = abs(a - b) % 360; return if (d > 180) 360 - d else d }
+
+fun normLine(s: String): String {
+    val t = s.trim()
+    return if (t.isNotEmpty() && t.all { it.isDigit() }) (t.toIntOrNull()?.toString() ?: t) else foldText(t)
+}
+
 
 // ───────────────────────── Modely pro DB a RAPTOR ─────────────────────────
 
@@ -558,6 +581,8 @@ class Timetable(val dbFile: File) {
     private val actCache = HashMap<LocalDate, Set<Int>>()
     var foot: Map<Int, List<Pair<Int, Int>>>? = null
 
+    private val timesCache = ConcurrentHashMap<Int, Triple<IntArray, IntArray, IntArray>>()
+
     /** DB je ve verzi s tabulkou shape (starší static.sqlite ji nemá). */
     var hasGid = false
         private set
@@ -565,6 +590,7 @@ class Timetable(val dbFile: File) {
     init {
         loadFromDb()
     }
+
 
     fun tripsServing(sids: Set<Int>): List<Int> {
         val out = ArrayList<Int>()
@@ -729,20 +755,17 @@ class Timetable(val dbFile: File) {
     }
 
     fun tripTimes(tid: Int): Triple<IntArray, IntArray, IntArray>? {
+        timesCache[tid]?.let { return it }
         val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
         try {
             db.rawQuery("SELECT stops, arr, dep FROM trip_times WHERE trip=?", arrayOf(tid.toString())).use { c ->
                 if (c.moveToFirst()) {
-                    return Triple(
-                        bytesToIntArray(c.getBlob(0)),
-                        bytesToIntArray(c.getBlob(1)),
-                        bytesToIntArray(c.getBlob(2))
-                    )
+                    val t = Triple(bytesToIntArray(c.getBlob(0)), bytesToIntArray(c.getBlob(1)), bytesToIntArray(c.getBlob(2)))
+                    timesCache[tid] = t
+                    return t
                 }
             }
-        } finally {
-            db.close()
-        }
+        } finally { db.close() }
         return null
     }
 
@@ -795,20 +818,102 @@ class Timetable(val dbFile: File) {
     }
 
 
-    fun tripStops(tid: Int): IntArray {
-        val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
-        try {
-            db.rawQuery("SELECT stops FROM trip_times WHERE trip=?", arrayOf(tid.toString())).use { c ->
-                if (c.moveToFirst()) {
-                    return bytesToIntArray(c.getBlob(0))
-                }
-            }
-        } finally {
-            db.close()
-        }
-        return intArrayOf()
+    fun tripStops(tid: Int): IntArray = tripTimes(tid)?.first ?: intArrayOf()
+
+    private fun isDpmulAgency(a: String): Boolean {
+        val f = foldText(a)
+        return "dopravni podnik mesta usti" in f || "dpmul" in f
     }
+
+    private val dpmulByLine: Map<String, List<Int>> by lazy {
+        val dp = trips.values.filter { isDpmulAgency(it.agency) }
+        (if (dp.isEmpty()) trips.values else dp).groupBy({ normLine(it.line) }, { it.id })
+    }
+
+    fun matchDpmulTrip(v: Vehicle): Int? {
+        val now = nowPrague()
+        val fd = foldText(v.destination)
+        var best: Int? = null
+        var bestSc = 800.0
+        for (dday in 0L..1L) {
+            val day = now.toLocalDate().minusDays(dday)
+            val rel = Duration.between(day.atStartOfDay(), now).seconds - v.delay * 60.0
+            val act = activeSvcs(day)
+            for (tid in dpmulByLine[normLine(v.line)].orEmpty()) {
+                val t = trips[tid] ?: continue
+                if (t.svc !in act || rel < t.t0 - 900 || rel > t.t1 + 900) continue
+                val (sIds, _, dep) = tripTimes(tid) ?: continue
+                var sc = Double.MAX_VALUE
+                var hd: Double? = null
+                for (i in sIds.indices) {
+                    val s = stops[sIds[i]] ?: continue
+                    if (s.lat == 0.0 && s.lng == 0.0) continue
+                    val d = geoDistM(v.lat, v.lng, s.lat, s.lng)
+                    if (d > 400) continue
+                    val c = d + 0.5 * abs(dep[i] - rel)
+                    if (c < sc) {
+                        sc = c
+                        val j = if (i + 1 < sIds.size) i else i - 1
+                        val a = stops[sIds[j]]
+                        val b = stops[sIds[j + 1]]
+                        hd = if (a != null && b != null) bearingDeg(a.lat, a.lng, b.lat, b.lng) else null
+                    }
+                }
+                if (sc == Double.MAX_VALUE) continue
+                val vh = v.heading
+                if (vh != null && hd != null && angDiff(vh, hd) > 100) sc += 600
+                val fh = foldText(t.head)
+                if (fd.isNotBlank() && fh.isNotBlank() && (fd in fh || fh in fd)) sc -= 250
+                if (v.trip.isNotBlank() && t.num == v.trip) sc -= 1000
+                if (sc < bestSc) { best = tid; bestSc = sc }
+            }
+        }
+        return best
+    }
+
+
+    private class TripLine(val lat: DoubleArray, val lng: DoubleArray, val cum: DoubleArray)
+    private val tripLines = ConcurrentHashMap<Int, TripLine>()
+
+    fun progressOnTrip(tid: Int, lat: Double, lng: Double): Double? {
+        val tl = tripLines[tid] ?: run {
+            val pts = ArrayList<Stop>()
+            for (sid in tripStops(tid)) {
+                val s = stops[sid] ?: continue
+                if (s.lat != 0.0 || s.lng != 0.0) pts.add(s)
+            }
+            if (pts.size < 2) return null
+            val cum = DoubleArray(pts.size)
+            for (i in 1 until pts.size) {
+                cum[i] = cum[i - 1] + geoDistM(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng)
+            }
+            val built = TripLine(
+                DoubleArray(pts.size) { pts[it].lat },
+                DoubleArray(pts.size) { pts[it].lng },
+                cum
+            )
+            tripLines[tid] = built
+            built
+        }
+        val cosLat = cos(Math.toRadians(lat))
+        var bestD = Double.MAX_VALUE
+        var bestS = 0.0
+        for (i in 0 until tl.lat.size - 1) {
+            val ax = (tl.lng[i] - lng) * 111320.0 * cosLat
+            val ay = (tl.lat[i] - lat) * 110540.0
+            val dx = (tl.lng[i + 1] - lng) * 111320.0 * cosLat - ax
+            val dy = (tl.lat[i + 1] - lat) * 110540.0 - ay
+            val l2 = dx * dx + dy * dy
+            val t = if (l2 == 0.0) 0.0 else ((-ax * dx - ay * dy) / l2).coerceIn(0.0, 1.0)
+            val d = hypot(ax + t * dx, ay + t * dy)
+            if (d < bestD) { bestD = d; bestS = tl.cum[i] + t * (tl.cum[i + 1] - tl.cum[i]) }
+        }
+        return bestS
+    }
+
+
 }
+
 
 // ───────────────────────── RAPTOR Engine ─────────────────────────
 
