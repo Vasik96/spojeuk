@@ -127,7 +127,12 @@ class PortaboSource(
                     source = ID,
                     lat = lat,
                     lng = lon,
-                    line = e.optStringClean("qride_linename", e.optStringClean("LineID", "?")),
+                    line = when (
+                        e.optStringClean("qride_linename", e.optStringClean("LineID", "?")).trim()
+                    ) {
+                        "200" -> "X"
+                        else -> e.optStringClean("qride_linename", e.optStringClean("LineID", "?")).trim()
+                    },
                     delay = e.optInt("Delay", 0),
                     // server může vůz držet; skutečné stáří poskytuje _ageSec
                     observedAtMs = System.currentTimeMillis() - serverAgeSec * 1000L,

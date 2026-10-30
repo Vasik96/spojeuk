@@ -96,26 +96,40 @@ internal fun VehicleDetailBottomSheet(
                 }
             }
 
-            Text("ID spoje: ${vehicle.trip}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(
-                "Zdroj polohy: ${api.sourceName(vehicle.source)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    if (vehicle.id != 0) {
+                        "ID vozidla: ${vehicle.source}:${vehicle.id}"
+                    } else {
+                        "ID vozidla: není dostupné"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-            // stáří polohy se přepočítává každou sekundu; při novém dotazu se vůz v appState vymění za čerstvý
-            val ageSec by produceState(vehicle.ageSec(), vehicle) {
-                while (true) {
-                    value = vehicle.ageSec()
-                    delay(1000.milliseconds)
+                Text(
+                    "Zdroj polohy: ${api.sourceName(vehicle.source)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                val ageSec by produceState(vehicle.ageSec(), vehicle) {
+                    while (true) {
+                        value = vehicle.ageSec()
+                        delay(1000.milliseconds)
+                    }
                 }
+
+                Text(
+                    ageLabel(ageSec),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (ageSec > 40) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-            Text(
-                ageLabel(ageSec),
-                style = MaterialTheme.typography.bodySmall,
-                color = if (ageSec > 40) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.onSurfaceVariant
-            )
+
             Button(
                 onClick = {
                     scope.launch {
@@ -154,11 +168,23 @@ internal fun VehicleDetailBottomSheet(
                 Text("Dopravce: ${vehicle.agency}", style = MaterialTheme.typography.bodyMedium)
             }
 
-            tripInfo?.nextStop?.let {
-                Text("Příští zastávka: $it", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            }
-            tripInfo?.finalStop?.let {
-                Text("Konečná zastávka: $it", style = MaterialTheme.typography.bodyMedium)
+            Column(
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                tripInfo?.nextStop?.let {
+                    Text(
+                        "Příští zastávka: $it",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                tripInfo?.finalStop?.let {
+                    Text(
+                        "Konečná zastávka: $it",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
 
             if (vehicle.airConditioned == true || vehicle.accessible == true) {
