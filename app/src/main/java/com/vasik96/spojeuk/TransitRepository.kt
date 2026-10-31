@@ -181,6 +181,16 @@ class TransitRepository(context: Context? = null) {
         geometry.forTrip(tt, tid)
     }
 
+    suspend fun tripStopLocations(v: Vehicle): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
+        val tt = store.ensure().timetable
+        val tid = v.tid.takeIf { it != 0 }
+            ?: tt.findTripId(v.cis, v.trip)
+            ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
+            ?: return@withContext emptyList()
+        val stopIds = tt.tripStops(tid)
+        stopIds.asIterable().mapNotNull { id -> tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng } }
+    }
+
     suspend fun resolveTripId(v: Vehicle): Int? = withContext(Dispatchers.IO) {
         val tt = store.ensure().timetable
         v.tid.takeIf { it != 0 }
@@ -198,6 +208,13 @@ class TransitRepository(context: Context? = null) {
 
     suspend fun firstLegFullRoute(j: Journey): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
         geometry.firstLegFull(store.ensure().timetable, j)
+    }
+
+    suspend fun firstLegStopLocations(j: Journey): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
+        val tt = store.ensure().timetable
+        val leg = j.rawLegs.firstOrNull { it.kind == "ride" } ?: return@withContext emptyList()
+        val stopIds = tt.tripStops(leg.tid)
+        stopIds.asIterable().mapNotNull { id -> tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng } }
     }
 
     fun boardingPoint(j: Journey): Pair<Double, Double>? {

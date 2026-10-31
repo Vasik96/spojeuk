@@ -85,6 +85,7 @@ class SpojeAppState(
     var mapError by mutableStateOf<String?>(null)
     var selectedVehicle by mutableStateOf<Vehicle?>(null)
     var tripRoute by mutableStateOf<List<LatLng>>(emptyList())
+    var tripStops by mutableStateOf<List<LatLng>>(emptyList())
     var routeLoading by mutableStateOf(false)
 
     /** Spoj, na který má mapa přiblížit (jednorázově). */
@@ -107,6 +108,10 @@ class SpojeAppState(
 
     var autoFillDone = false      // předvyplnění proběhlo
     var autoFillAsked = false     // o oprávnění jsme už žádali
+
+    var walkRoute by mutableStateOf<WalkRoute?>(null)
+
+    var searchedFrom by mutableStateOf<Stop?>(null)
 
     // Settings & Preferences
     private val settingsPrefs = context.getSharedPreferences("app_settings_prefs", Context.MODE_PRIVATE)

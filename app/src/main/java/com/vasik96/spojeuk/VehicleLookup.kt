@@ -7,6 +7,27 @@ class VehicleMatch(val vehicle: Vehicle, val approximate: Boolean)
 private const val MAX_ROUTE_OFFSET_M = 50f     // max. vzdálenost autobusu od trasy
 private const val MAX_APPROACH_M = 8_000f      // max. vzdálenost před zastávkou po trase (v metrech)
 
+private const val MAX_HEADING_DIFF = 70.0   // max. úhlová odchylka od směru trasy (°)
+
+private fun bearingDeg(a: LatLng, b: LatLng): Double {
+    val r = FloatArray(2)
+    android.location.Location.distanceBetween(
+        a.latitude, a.longitude, b.latitude, b.longitude, r
+    )
+    // initialBearing je ve druhém prvku jen pokud je pole délky >= 3
+    val res = FloatArray(3)
+    android.location.Location.distanceBetween(
+        a.latitude, a.longitude, b.latitude, b.longitude, res
+    )
+    return ((res[1].toDouble() % 360.0) + 360.0) % 360.0
+}
+
+private fun angleDiff(a: Double, b: Double): Double {
+    val d = Math.abs(a - b) % 360.0
+    return if (d > 180.0) 360.0 - d else d
+}
+
+
 internal fun distanceMeters(a: LatLng, b: LatLng): Float {
     val result = FloatArray(1)
     android.location.Location.distanceBetween(
@@ -25,7 +46,7 @@ internal fun findVehicle(list: List<Vehicle>, ref: TripRef, route: List<LatLng>)
     live.firstOrNull { it.cis == ref.cis && it.trip == ref.trip }
         ?.let { return VehicleMatch(it, approximate = false) }
 
-    // 2) fallback: nejbližší autobus stejné linky PŘED nástupní zastávkou
+    // 2) fallback: nejbližší autobus stejné linky PŘED nástupní zastávkou, správným směrem
     val bLat = ref.boardLat ?: return null
     val bLng = ref.boardLng ?: return null
     if (route.size < 2) return null
@@ -33,7 +54,6 @@ internal fun findVehicle(list: List<Vehicle>, ref: TripRef, route: List<LatLng>)
     val board = LatLng(bLat, bLng)
     val boardIdx = route.indices.minByOrNull { distanceMeters(board, route[it]) } ?: return null
 
-    // kumulativní vzdálenost podél trasy
     val cum = FloatArray(route.size)
     for (i in 1 until route.size) cum[i] = cum[i - 1] + distanceMeters(route[i - 1], route[i])
 
@@ -43,8 +63,20 @@ internal fun findVehicle(list: List<Vehicle>, ref: TripRef, route: List<LatLng>)
         if (v.line != ref.line) continue
         val p = LatLng(v.lat, v.lng)
         val idx = route.indices.minByOrNull { distanceMeters(p, route[it]) } ?: continue
-        if (distanceMeters(p, route[idx]) > MAX_ROUTE_OFFSET_M) continue   // není na trase
-        if (idx > boardIdx) continue                                       // už zastávku projel
+        if (distanceMeters(p, route[idx]) > MAX_ROUTE_OFFSET_M) continue
+        if (idx > boardIdx) continue
+
+        // směr: úsek trasy kolem idx vs. heading vozu
+        val h = v.heading
+        if (h != null) {
+            val a = route[idx]
+            val b = route[minOf(route.lastIndex, idx + 3)]
+            if (a != b) {
+                val routeBearing = bearingDeg(a, b)
+                if (angleDiff(routeBearing, h) > MAX_HEADING_DIFF) continue
+            }
+        }
+
         val gap = cum[boardIdx] - cum[idx]
         if (gap <= MAX_APPROACH_M && gap < bestGap) { bestGap = gap; best = v }
     }

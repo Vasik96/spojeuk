@@ -21,6 +21,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Warning
+import com.google.android.gms.maps.model.Dot
+import com.google.android.gms.maps.model.Gap
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,6 +68,7 @@ import com.google.maps.android.compose.rememberCameraPositionState
 import com.google.maps.android.compose.rememberUpdatedMarkerState
 import androidx.compose.runtime.key
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.geometry.Offset
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -78,7 +81,7 @@ import kotlin.time.Duration.Companion.milliseconds
 internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, api: TransitRepository, active: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-
+    var showFullRoute by remember { mutableStateOf(false) }
 
     // polling poloh
     LaunchedEffect(active) {
@@ -200,9 +203,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val phase = appState.pulsePhase
     val ref = appState.highlightedTrip
     val allVehicles = appState.vehicles
-    val target = if (ref != null)
-        findVehicle(allVehicles, ref, appState.fullRoute.ifEmpty { appState.tripRoute })?.vehicle
-    else appState.focusedTripVehicle ?: appState.selectedVehicle
+    val target = appState.focusedTripVehicle ?: appState.selectedVehicle
 
 
     val keyer = remember { VehicleKeyer() }
@@ -245,9 +246,26 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 routeArrowDescriptor(primaryColor = arrowArgb, scale = arrowScale)
             }
 
-            if (appState.tripRoute.isNotEmpty()) {
+            val walk = appState.walkRoute
+            if (walk != null && appState.tripRoute.isNotEmpty()) {
+                val walkPoints = remember(walk) { walk.points.map { LatLng(it.first, it.second) } }
                 Polyline(
-                    points = appState.tripRoute,
+                    points = walkPoints,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    width = 14f,
+                    zIndex = 0.2f,
+                    pattern = listOf(Dot(), Gap(14f)),
+                    startCap = RoundCap(),
+                    endCap = RoundCap(),
+                    jointType = JointType.ROUND
+                )
+            }
+
+            if (appState.tripRoute.isNotEmpty()) {
+                val full = appState.fullRoute
+                val line = if (showFullRoute && full.size >= 2) full else appState.tripRoute
+                Polyline(
+                    points = line,
                     color = primaryColor,
                     width = 12f,
                     zIndex = 0f,
@@ -259,17 +277,18 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
             if (appState.tripRoute.size >= 2) {
                 val route = appState.tripRoute
+                val stops = appState.tripStops
 
                 val arrows = remember(route, arrowSpacing) {
                     createRouteArrows(route = route, spacingMeters = arrowSpacing)
                 }
 
                 arrows.forEachIndexed { index, arrow ->
-                    key(index) {
+                    key("arrow_$index") {
                         Marker(
                             state = rememberUpdatedMarkerState(position = arrow.position),
                             icon = arrowIcon,
-                            anchor = androidx.compose.ui.geometry.Offset(0.5f, 0.5f),
+                            anchor = Offset(0.5f, 0.5f),
                             flat = true,
                             rotation = arrow.bearing,
                             zIndex = 1f,
@@ -277,6 +296,33 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         )
                     }
                 }
+
+                val full = appState.fullRoute
+                val useFull = showFullRoute && full.size >= 2
+                val startPos = if (useFull) full.first() else route.first()
+                val endPos = if (useFull) full.last() else route.last()
+
+
+                val startIcon = remember(context) { routeStartDescriptor(context) }
+                val endIcon = remember(context) { routeEndDescriptor(context) }
+
+                // Začátek trasy (zelený kruh)
+                Marker(
+                    state = rememberUpdatedMarkerState(position = startPos),
+                    icon = startIcon,
+                    anchor = Offset(0.5f, 0.5f),
+                    zIndex = 0.5f,
+                    onClick = { true }
+                )
+
+                // Konec trasy (červený kruh)
+                Marker(
+                    state = rememberUpdatedMarkerState(position = endPos),
+                    icon = endIcon,
+                    anchor = Offset(0.5f, 0.5f),
+                    zIndex = 0.5f,
+                    onClick = { true }
+                )
             }
             for ((vkey, v) in activeVehicles) {
                 key(vkey) {
@@ -308,7 +354,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         motion.animate(markerState, predict)
                     }
 
-                    val iconPhase = if (target != null && v.sameAs(target)) phase else 0
+                    val iconPhase = if (target != null && v.uid == target.uid) phase else 0
                     Marker(
                         state = markerState,
                         icon = markerDescriptor(context, v.line, v.train, v.delay, iconPhase),
@@ -340,7 +386,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         Text(
                             "Zdroj: ${appState.vehicleSource}",
                             style = MaterialTheme.typography.bodySmall,
-                            color = if ("zastaralé" in appState.vehicleSource || appState.vehicleSource == "žádný zdroj")
+                            color = if ("zastaralé" in appState.vehicleSource || appState.vehicleSource == SourceLabel.NONE)
                                 MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -384,6 +430,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 onClick = {
                     appState.tripRoute = emptyList()
                     appState.fullRoute = emptyList()
+                    appState.tripStops = emptyList()
                     appState.focusedTripVehicle = null
                     appState.focusedTripRef = null
                 },
@@ -416,5 +463,55 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 VehicleDetailBottomSheet(v, api, appState) { appState.selectedVehicle = null }
             }
         }
+
     }
+}
+
+private fun closestPointOnRoute(
+    point: LatLng,
+    route: List<LatLng>
+): LatLng {
+    if (route.isEmpty()) return point
+
+    if (route.size == 1) return route.first()
+
+    var closest = route.first()
+    var minDistance = Double.MAX_VALUE
+
+    for (i in 0 until route.lastIndex) {
+        val a = route[i]
+        val b = route[i + 1]
+
+        val dx = b.longitude - a.longitude
+        val dy = b.latitude - a.latitude
+
+        val lengthSquared = dx * dx + dy * dy
+
+        val t = if (lengthSquared == 0.0) {
+            0.0
+        } else {
+            (
+                    ((point.longitude - a.longitude) * dx +
+                            (point.latitude - a.latitude) * dy) / lengthSquared
+                    ).coerceIn(0.0, 1.0)
+        }
+
+        val projected = LatLng(
+            a.latitude + t * dy,
+            a.longitude + t * dx
+        )
+
+        val distance =
+            (point.latitude - projected.latitude) *
+                    (point.latitude - projected.latitude) +
+                    (point.longitude - projected.longitude) *
+                    (point.longitude - projected.longitude)
+
+        if (distance < minDistance) {
+            minDistance = distance
+            closest = projected
+        }
+    }
+
+    return closest
 }

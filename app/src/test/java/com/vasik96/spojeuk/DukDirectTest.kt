@@ -41,4 +41,54 @@ class DukDirectTest {
         val pruned = prune(listOf(j1, j2))
         assertEquals(2, pruned.size)
     }
+
+    @Test
+    fun testSourceLabelWhenDukRegionalStale() {
+        val dpmulReport = SourceReport(
+            id = "dpmul",
+            name = "DPMÚL",
+            priority = 0,
+            segments = setOf(Segment.CITY),
+            health = Health.LIVE,
+            staleSegments = emptySet(),
+            vehicleCount = 20
+        )
+        val dukReport = SourceReport(
+            id = "duk",
+            name = "DÚK",
+            priority = 1,
+            segments = setOf(Segment.CITY, Segment.REGIONAL),
+            health = Health.LIVE,
+            staleSegments = setOf(Segment.CITY, Segment.REGIONAL),
+            vehicleCount = 50
+        )
+
+        val label = SourceLabel.build(listOf(dpmulReport, dukReport))
+        assertEquals("DPMÚL, DÚK (regionální doprava zastaralé)", label)
+    }
+
+    @Test
+    fun testSourceLabelWhenDukDeliversNothing() {
+        val dpmulReport = SourceReport(
+            id = "dpmul",
+            name = "DPMÚL",
+            priority = 0,
+            segments = setOf(Segment.CITY),
+            health = Health.LIVE,
+            staleSegments = emptySet(),
+            vehicleCount = 20
+        )
+        val dukReport = SourceReport(
+            id = "duk",
+            name = "DÚK",
+            priority = 1,
+            segments = setOf(Segment.CITY, Segment.REGIONAL),
+            health = Health.LIVE,
+            staleSegments = setOf(Segment.CITY, Segment.REGIONAL),
+            vehicleCount = 0
+        )
+
+        val label = SourceLabel.build(listOf(dpmulReport, dukReport))
+        assertEquals("DPMÚL", label)
+    }
 }

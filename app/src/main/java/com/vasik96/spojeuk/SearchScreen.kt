@@ -10,11 +10,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,6 +25,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.ArrowRightAlt
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
+import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.ArrowRightAlt
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
@@ -69,6 +76,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.material.icons.filled.DirectionsWalk
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
@@ -87,6 +96,7 @@ import kotlin.time.Duration.Companion.milliseconds
 private const val FIRST_PAGE = 8
 private const val MORE_PAGE = 6
 
+private const val WALK_MAX_MIN = 20
 @SuppressLint("MissingPermission")
 @Composable
 internal fun SearchScreen(
@@ -108,6 +118,26 @@ internal fun SearchScreen(
         val u = appState.userLoc
         if (u != null && u.first in 50.35..50.95 && u.second in 13.55..14.60) u
         else UstiCenter.latitude to UstiCenter.longitude
+    }
+
+    val osrm = remember { OsrmClient(context.cacheDir) }
+
+    // Pěší trasa od uživatele k zvolené zastávce "Odkud"
+    LaunchedEffect(appState.searchedFrom?.name, appState.userLoc) {
+        val from = appState.searchedFrom
+        val u = appState.userLoc
+        if (from == null || u == null || !from.hasCoords) {
+            appState.walkRoute = null
+            return@LaunchedEffect
+        }
+        if (Geo.distanceM(u.first, u.second, from.lat, from.lng) > 1200.0) {
+            appState.walkRoute = null
+            return@LaunchedEffect
+        }
+        val route = withContext(Dispatchers.IO) {
+            osrm.walkRoute(u, from.lat to from.lng)
+        }
+        appState.walkRoute = route?.takeIf { it.minutes <= WALK_MAX_MIN }
     }
 
     // Poloha jen z cache, bez zapínání GPS; spustí se při každém návratu na záložku Spoje
@@ -322,6 +352,7 @@ internal fun SearchScreen(
         appState.hasEarlier = true
         appState.loadingEarlier = false
         appState.searchError = null
+        appState.searchedFrom = a
 
         appState.shownKeys.clear()
         listState.requestScrollToItem(0)
@@ -582,6 +613,7 @@ internal fun SearchScreen(
 
             appState.searchError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
+
             if (appState.searched && !appState.searchLoading) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Výsledky", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
@@ -648,7 +680,7 @@ internal fun SearchScreen(
                 ) {
                     itemsIndexed(appState.journeys, key = { _, j -> j.key }) { index, journey ->
                         AppearAnimated(appState, journey.key, index, Modifier.animateItem()) {
-                            JourneyCard(journey, now) { onShowMapForJourney(journey) }
+                            JourneyCard(journey, now, appState.walkRoute) { onShowMapForJourney(journey) }
                         }
                     }
 
@@ -890,93 +922,255 @@ private fun StopField(
 
 // ───────────────────────── karta spojení ─────────────────────────
 
+
+
 @Composable
-private fun JourneyCard(j: Journey, now: LocalDateTime, onMap: () -> Unit) {
+private fun JourneyCard(
+    j: Journey,
+    now: LocalDateTime,
+    walk: WalkRoute?,
+    onMap: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+
     ElevatedCard(
         shape = RoundedCornerShape(26.dp),
         colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer
+            containerColor = colors.surfaceContainer
         )
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "${j.departure.take(5)}  →  ${j.arrival.take(5)}",
-                        style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        departsIn(j, now),
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        "${j.durationMinutes} min jízdy",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                FilledTonalButton(onClick = onMap, contentPadding = PaddingValues(horizontal = 12.dp)) {
-                    Icon(Icons.Default.Map, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Mapa")
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+
+            // 1. Časy + Mapa
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    Text(j.line, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), fontWeight = FontWeight.Bold)
-                }
-                if (j.line2 != null) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text("Přestup ${j.line2}", modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), fontWeight = FontWeight.Medium)
+                        Text(
+                            j.departure.take(5),
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                        )
+
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = "Příjezd",
+                            modifier = Modifier.size(22.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Text(
+                            j.arrival.take(5),
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Text(
+                            departsIn(j, now),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.primary,
+                            fontWeight = FontWeight.Medium
+                        )
+
+                        Text(
+                            "· ",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                            fontWeight = FontWeight.Bold
+                        )
+
+
+                        Text(
+                            "${j.durationMinutes} min jízdy",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant
+                        )
                     }
                 }
+
+
+                FilledTonalButton(
+                    onClick = onMap,
+                    contentPadding = PaddingValues(horizontal = 12.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Map,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("Mapa")
+                }
+            }
+
+            HorizontalDivider(
+                color = colors.outlineVariant.copy(alpha = 0.35f)
+            )
+
+            // 2. Linky + zpoždění
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                itemVerticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(9.dp),
+                    color = colors.primaryContainer,
+                    contentColor = colors.onPrimaryContainer
+                ) {
+                    Text(
+                        j.line,
+                        modifier = Modifier.padding(
+                            horizontal = 10.dp,
+                            vertical = 7.dp
+                        ),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (j.line2 != null) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = "Přestup",
+                        modifier = Modifier.size(20.dp),
+                        tint = colors.onSurfaceVariant
+                    )
+
+                    Surface(
+                        shape = RoundedCornerShape(9.dp),
+                        color = colors.secondaryContainer,
+                        contentColor = colors.onSecondaryContainer
+                    ) {
+                        Text(
+                            j.line2,
+                            modifier = Modifier.padding(
+                                horizontal = 10.dp,
+                                vertical = 7.dp
+                            ),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
                 if (j.realtime) {
                     val (bg, fg, label) = when {
                         j.delay > 3 -> Triple(
-                            MaterialTheme.colorScheme.errorContainer,
-                            MaterialTheme.colorScheme.onErrorContainer,
+                            colors.errorContainer,
+                            colors.onErrorContainer,
                             "Zpoždění ${j.delay} min"
                         )
+
                         j.delay > 0 -> Triple(
-                            MaterialTheme.colorScheme.tertiaryContainer,
-                            MaterialTheme.colorScheme.onTertiaryContainer,
+                            colors.tertiaryContainer,
+                            colors.onTertiaryContainer,
                             "Zpoždění ${j.delay} min"
                         )
+
                         else -> Triple(
-                            MaterialTheme.colorScheme.secondaryContainer,
-                            MaterialTheme.colorScheme.onSecondaryContainer,
+                            colors.secondaryContainer,
+                            colors.onSecondaryContainer,
                             "Bez zpoždění"
                         )
                     }
-                    Surface(shape = RoundedCornerShape(8.dp), color = bg, contentColor = fg) {
-                        Text(label, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), fontWeight = FontWeight.Medium)
+
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = bg,
+                        contentColor = fg
+                    ) {
+                        Text(
+                            label,
+                            modifier = Modifier.padding(
+                                horizontal = 9.dp,
+                                vertical = 4.dp
+                            ),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
             }
-            if (j.isTransfer) {
-                Text(
-                    "Přestup: ${j.transferAt ?: "mezi spoji"} · čekání ${j.transferWait ?: "?"} min",
-                    color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium
-                )
-            } else {
-                Text("${j.stopsCount ?: "—"} zastávek · přímý spoj", style = MaterialTheme.typography.bodyMedium)
+
+            // 3. Chůze k zastávce
+            if (walk != null) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.DirectionsWalk,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = colors.tertiary
+                    )
+
+                    Text(
+                        "${walk.minutes} min chůze k zastávce · ${fmtDist(walk.distanceM)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.tertiary
+                    )
+                }
             }
-            if (j.destination.isNotBlank()) Text(
-                "Směr ${j.destination}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall
+
+            HorizontalDivider(
+                color = colors.outlineVariant.copy(alpha = 0.35f)
             )
-            if (j.agency.isNotBlank()) Text(
-                j.agency, style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+
+            // 4. Detaily spoje
+            Column(
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                if (j.isTransfer) {
+                    Text(
+                        "Přestup: ${
+                            j.transferAt
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { stopLabel(it) }
+                                ?: "mezi spoji"
+                        } · čekání ${j.transferWait ?: "?"} min",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                } else {
+                    Text(
+                        "${j.stopsCount ?: "—"} zastávek · přímý spoj",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+
+                if (j.destination.isNotBlank()) {
+                    Text(
+                        "Směr ${splitStopName(j.destination).first}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant
+                    )
+                }
+
+                if (j.agency.isNotBlank()) {
+                    Text(
+                        j.agency,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }

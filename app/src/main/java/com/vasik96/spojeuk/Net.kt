@@ -1,6 +1,7 @@
 package com.vasik96.spojeuk
 
 import android.database.sqlite.SQLiteDatabase
+import android.util.Log
 import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -162,6 +163,7 @@ class Net(val tt: Timetable, val day: LocalDate) {
                 val stops = pattern.stops
                 var trip = -1
                 var board = -1
+                var boardPrev = INF   // příjezd 1. spoje na zastávku nástupu (menší = dřívější přestup)
 
                 for (i in start until stops.size) {
                     val s = stops[i]
@@ -178,9 +180,10 @@ class Net(val tt: Timetable, val day: LocalDate) {
                     if (p != null) {
                         val col = pattern.cols[i]
                         val j = binarySearchLeft(col, p + mt)
-                        if (j < col.size && (trip < 0 || j < trip)) {
+                        if (j < col.size && (trip < 0 || j < trip || (j == trip && p < boardPrev))) {
                             trip = j
                             board = i
+                            boardPrev = p
                         }
                     }
                 }
@@ -269,6 +272,8 @@ class Net(val tt: Timetable, val day: LocalDate) {
                 }
             }
         }
+
+
 
         val rides = legs.filter { it.kind == "ride" }
         val firstRide = rides.first()

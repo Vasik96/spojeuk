@@ -187,6 +187,7 @@ internal fun SpojeApp() {
                                         appState.focusedTripRef = ref
                                         appState.tripRoute = emptyList()
                                         appState.fullRoute = emptyList()
+                                        appState.tripStops = emptyList()
                                         appState.routeLoading = true
                                         appState.vehiclesLoaded = false
                                         appState.focusTrip = ref
@@ -195,8 +196,10 @@ internal fun SpojeApp() {
                                         scope.launch {
                                             val points = api.journeyGeometry(journey)
                                             val full = api.firstLegFullRoute(journey)
+                                            val stops = api.firstLegStopLocations(journey)
                                             appState.tripRoute = points.map { LatLng(it.first, it.second) }
                                             appState.fullRoute = full.map { LatLng(it.first, it.second) }
+                                            appState.tripStops = stops.map { LatLng(it.first, it.second) }
                                             appState.routeLoading = false
                                         }
                                     }

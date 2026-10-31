@@ -223,3 +223,131 @@ internal fun createRouteArrows(route: List<LatLng>, spacingMeters: Float = 300f)
 
     return arrows
 }
+
+// ───────────────────────── kruhy pro začátek, konec a zastávky ─────────────────────────
+
+private var startDesc: BitmapDescriptor? = null
+private var endDesc: BitmapDescriptor? = null
+private var stopDesc: BitmapDescriptor? = null
+
+/** Kruh pro začátek trasy (zelený s bílým okrajem a bodem). */
+internal fun routeStartDescriptor(ctx: Context): BitmapDescriptor {
+    startDesc?.let { return it }
+    val density = ctx.resources.displayMetrics.density
+    val sizePx = (24 * density).toInt()
+    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    val strokePx = 3f * density
+    val center = sizePx / 2f
+    val radius = (sizePx - strokePx) / 2f
+
+    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x40000000.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = strokePx + 2f
+    }
+    canvas.drawCircle(center, center, radius, shadowPaint)
+
+    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFFFFF.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = strokePx
+    }
+    canvas.drawCircle(center, center, radius, borderPaint)
+
+    val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF2E7D32.toInt() // Zelená (start)
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(center, center, radius - strokePx / 2f, fillPaint)
+
+    val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFFFFF.toInt()
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(center, center, 3.5f * density, dotPaint)
+
+    val desc = BitmapDescriptorFactory.fromBitmap(bitmap)
+    startDesc = desc
+    return desc
+}
+
+/** Kruh pro konec trasy (červený s bílým okrajem a bodem). */
+internal fun routeEndDescriptor(ctx: Context): BitmapDescriptor {
+    endDesc?.let { return it }
+    val density = ctx.resources.displayMetrics.density
+    val sizePx = (24 * density).toInt()
+    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    val strokePx = 3f * density
+    val center = sizePx / 2f
+    val radius = (sizePx - strokePx) / 2f
+
+    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x40000000.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = strokePx + 2f
+    }
+    canvas.drawCircle(center, center, radius, shadowPaint)
+
+    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFFFFF.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = strokePx
+    }
+    canvas.drawCircle(center, center, radius, borderPaint)
+
+    val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFC62828.toInt() // Červená (konec)
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(center, center, radius - strokePx / 2f, fillPaint)
+
+    val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFFFFF.toInt()
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(center, center, 3.5f * density, dotPaint)
+
+    val desc = BitmapDescriptorFactory.fromBitmap(bitmap)
+    endDesc = desc
+    return desc
+}
+
+/** Kruh pro mezilehlé zastávky na trase (bílý s modrým okrajem a bodem). */
+internal fun routeStopDescriptor(ctx: Context): BitmapDescriptor {
+    stopDesc?.let { return it }
+    val density = ctx.resources.displayMetrics.density
+    val sizePx = (16 * density).toInt()
+    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    val strokePx = 2.5f * density
+    val center = sizePx / 2f
+    val radius = (sizePx - strokePx) / 2f
+
+    val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFFFFF.toInt()
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(center, center, radius, bgPaint)
+
+    val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF0277BD.toInt() // Modrá pro zastávky
+        style = Paint.Style.STROKE
+        strokeWidth = strokePx
+    }
+    canvas.drawCircle(center, center, radius, strokePaint)
+
+    val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF0277BD.toInt()
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(center, center, 2.5f * density, dotPaint)
+
+    val desc = BitmapDescriptorFactory.fromBitmap(bitmap)
+    stopDesc = desc
+    return desc
+}

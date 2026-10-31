@@ -28,7 +28,7 @@ private const val KEY_MATCH_M = 500f
 
 private const val STOP_BELOW_M = 50.0
 private const val SLOW_BELOW_M = 100.0
-private const val SLOW_SPEED_FACTOR = 0.5
+private const val SLOW_SPEED_FACTOR = 0.65
 
 private fun haversineMeters(a: LatLng, b: LatLng): Double {
     val p1 = Math.toRadians(a.latitude)

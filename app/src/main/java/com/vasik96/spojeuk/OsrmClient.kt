@@ -126,4 +126,44 @@ class OsrmClient(private val cacheDir: File) {
         }
         return count
     }
+
+
+    /** Pěší trasa z bodu `from` do bodu `to`. null při chybě. Blokující, volat mimo main vlákno. */
+    fun walkRoute(from: Pair<Double, Double>, to: Pair<Double, Double>): WalkRoute? {
+        return try {
+            val coords = String.format(
+                Locale.US, "%.6f,%.6f;%.6f,%.6f",
+                from.second, from.first, to.second, to.first
+            )
+            val url = "https://routing.openstreetmap.de/routed-foot/route/v1/foot/$coords" +
+                    "?overview=full&geometries=geojson"
+            val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val body = resp.body?.string() ?: return null
+                val routes = JSONObject(body).optJSONArray("routes") ?: return null
+                if (routes.length() == 0) return null
+                val r = routes.getJSONObject(0)
+                val dist = r.getDouble("distance")
+                val coordsArr = r.optJSONObject("geometry")?.optJSONArray("coordinates") ?: return null
+                val pts = ArrayList<Pair<Double, Double>>()
+                for (i in 0 until coordsArr.length()) {
+                    val p = coordsArr.getJSONArray(i)
+                    pts.add(p.getDouble(1) to p.getDouble(0))
+                }
+                // ~4,8 km/h = 80 m/min (duration z OSRM foot serveru bývá nespolehlivá)
+                val min = maxOf(1, Math.ceil(dist / 80.0).toInt())
+                WalkRoute(pts, dist, min)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
 }
+
+data class WalkRoute(
+    val points: List<Pair<Double, Double>>,
+    val distanceM: Double,
+    val minutes: Int
+)
+

@@ -161,14 +161,15 @@ class VehicleHub(
             recent && medianAgeOk(r, f) -> Health.LIVE
             else -> Health.STALE
         }
+        val watched = if (f.watchedSegments.isNotEmpty()) f.watchedSegments else s.segments
         val staleSegments: Set<Segment> = when (health) {
             Health.DOWN -> emptySet()
             Health.STALE -> s.segments
-            Health.LIVE -> f.watchedSegments.filterTo(HashSet()) { seg ->
-                s.inOutage || mostlyStale(r.raw.filter { it.segment == seg }, now, f.staleVehicleSec)
+            Health.LIVE -> watched.filterTo(HashSet()) { seg ->
+                s.inOutage || isSegmentStale(r.raw.filter { it.segment == seg }, now, f.staleVehicleSec)
             }
         }
-        return SourceReport(s.id, s.name, s.priority, s.segments, health, staleSegments, s.heldCount)
+        return SourceReport(s.id, s.name, s.priority, s.segments, health, staleSegments, s.heldCount, vehicleCount = r.raw.size)
     }
 
     private fun medianAgeOk(r: Runner, f: Freshness): Boolean {
@@ -177,8 +178,11 @@ class VehicleHub(
         return ages.isEmpty() || ages[ages.size / 2] <= limit
     }
 
-    private fun mostlyStale(vehicles: List<Vehicle>, now: Long, limitSec: Long): Boolean =
-        vehicles.isNotEmpty() && vehicles.count { it.ageSec(now) > limitSec } * 2 > vehicles.size
+    private fun isSegmentStale(vehicles: List<Vehicle>, now: Long, limitSec: Long): Boolean {
+        if (vehicles.isEmpty()) return true
+        val freshCount = vehicles.count { it.ageSec(now) <= limitSec }
+        return freshCount == 0 || freshCount * 2 < vehicles.size
+    }
 
     /** Držené polohy se nehlásí, když jejich zastaralé segmenty čerstvě pokrývá jiný zdroj. */
     private fun warningCount(reports: List<SourceReport>): Int = reports.sumOf { r ->

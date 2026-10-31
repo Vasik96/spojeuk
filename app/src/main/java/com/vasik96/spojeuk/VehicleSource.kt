@@ -74,4 +74,5 @@ data class SourceReport(
     /** Segmenty, u kterých jsou data zastaralá. */
     val staleSegments: Set<Segment> = emptySet(),
     val heldCount: Int = 0,
+    val vehicleCount: Int = 0,
 )

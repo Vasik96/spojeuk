@@ -100,11 +100,12 @@ class VehicleFusion(
 
 /** Skládá text "Zdroj: …" ze stavu zdrojů. */
 object SourceLabel {
-    private const val NONE = "žádný zdroj"
+    const val NONE = "žádný"
 
     fun build(reports: List<SourceReport>): String {
         val ordered = reports.sortedBy { it.priority }
-        val live = ordered.filter { it.health == Health.LIVE }
+        val active = ordered.filter { it.vehicleCount > 0 }
+        val live = active.filter { it.health == Health.LIVE }
         if (live.isNotEmpty()) {
             return live.joinToString(", ") { r ->
                 // zastaralý segment se hlásí jen tehdy, když ho čerstvě nepokrývá jiný živý zdroj
@@ -114,7 +115,7 @@ object SourceLabel {
                 r.name + staleNote(r, uncovered)
             }
         }
-        val stale = ordered.firstOrNull { it.health == Health.STALE } ?: return NONE
+        val stale = active.firstOrNull { it.health == Health.STALE } ?: return NONE
         return stale.name + staleNote(stale, stale.staleSegments)
     }
 

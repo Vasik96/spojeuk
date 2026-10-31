@@ -35,7 +35,10 @@ class PortaboSource(
     override val name = "DÚK"
     override val priority = 1
     override val segments = setOf(Segment.CITY, Segment.REGIONAL)
-    override val freshness = Freshness(maxFetchAgeMs = 15_000, watchedSegments = setOf(Segment.CITY))
+    override val freshness = Freshness(
+        maxFetchAgeMs = 15_000,
+        watchedSegments = setOf(Segment.CITY, Segment.REGIONAL),
+    )
     override val tripMatcher = TripMatchers.byCisNumber
     override val adoptsTimetableLine = true
 
