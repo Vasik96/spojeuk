@@ -75,9 +75,9 @@ class TransitRepository(context: Context? = null) {
         }
 
     fun clearOsrmCache(log: (String) -> Unit = {}): Int {
-        log("Čistím keš OSRM tras…")
+        log("Čistím cache OSRM tras…")
         val count = osrm.clearCache()
-        log("Keš tras vyčištěna ($count souborů smazáno).")
+        log("Cache tras vyčištěna ($count souborů smazáno).")
         return count
     }
 
@@ -97,7 +97,7 @@ class TransitRepository(context: Context? = null) {
             progress(0.8f)
             updateRealtime(log = { log("3/4: $it") })
 
-            log("4/4: Čistím keš tras OSRM…")
+            log("4/4: Čistím cache tras OSRM…")
             progress(0.95f)
             clearOsrmCache(log = { log("4/4: $it") })
 

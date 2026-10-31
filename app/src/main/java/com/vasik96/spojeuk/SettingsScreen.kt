@@ -253,7 +253,7 @@ private fun SettingsMain(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Stahování jízdních řádů GTFS, tvarů tras (Shapes), živých dat a vyčištění keše tras OSRM.",
+                        "Stahování jízdních řádů GTFS, tvarů tras (Shapes), živých dat a vyčištění cache tras OSRM.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -428,7 +428,7 @@ private fun DataUpdatesScreen(
                             color = MaterialTheme.colorScheme.onSecondaryContainer
                         )
                         Text(
-                            "Kompletní aktualizace: Jízdní řády GTFS, trasy linek Shapes, živá poloha vozidel a vyčištění keše tras.",
+                            "Kompletní aktualizace: Jízdní řády GTFS, trasy linek Shapes, živá poloha vozidel a vyčištění cache tras.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
                         )
@@ -491,11 +491,11 @@ private fun DataUpdatesScreen(
         )
 
         SettingUpdateItemCard(
-            title = "Keš pěších a silničních tras (OSRM)",
+            title = "Cache pěších a silničních tras (OSRM)",
             description = "Vymazat a obnovit uložené trasy OSRM v zařízení.",
             infoBadge = null,
             icon = Icons.Default.DeleteSweep,
-            buttonText = "Vyčistit keš",
+            buttonText = "Vyčistit cache",
             enabled = !appState.isUpdatingData,
             onClick = { appState.performClearOsrmCache(api, scope) }
         )
