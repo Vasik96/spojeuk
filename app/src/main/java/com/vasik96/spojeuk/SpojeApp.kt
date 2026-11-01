@@ -48,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
@@ -146,7 +147,8 @@ internal fun SpojeApp() {
                         TopAppBar(
                             title = {
                                 Column {
-                                    Text("Spoje UK", style = MaterialTheme.typography.titleLarge,
+                                    Text(
+                                        stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge,
                                         fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                                     Text("Doprava Ústeckého kraje", style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)

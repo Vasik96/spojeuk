@@ -25,8 +25,8 @@ class VehicleFusion(
         val ordered = inputs.sortedBy { it.report.priority }
         val byId = ordered.associateBy { it.report.id }
         val out = ArrayList<Vehicle>()
-        for (segment in Segment.values()) {
-            for (group in group(ordered, segment)) {
+        for (segment in Segment.entries) {
+            for (group in group(ordered, segment, nowMs)) {
                 if (group.size > 1) out.add(resolve(group, progress, nowMs))
                 else if (!isGhost(group[0], byId, ordered, nowMs)) out.add(group[0])
             }
@@ -34,13 +34,13 @@ class VehicleFusion(
         return out
     }
 
-    private fun group(ordered: List<SourceInput>, segment: Segment): List<List<Vehicle>> {
+    private fun group(ordered: List<SourceInput>, segment: Segment, nowMs: Long): List<List<Vehicle>> {
         val groups = ArrayList<MutableList<Vehicle>>()
         for (input in ordered) {
             for (v in input.vehicles) {
                 if (v.segment != segment) continue
                 val target = groups
-                    .filter { g -> g.none { it.source == v.source } && sameVehicle(g[0], v) }
+                    .filter { g -> g.none { it.source == v.source } && sameVehicle(g[0], v, nowMs) }
                     .minByOrNull { g -> Geo.distanceM(g[0].lat, g[0].lng, v.lat, v.lng) }
                 if (target != null) target.add(v) else groups.add(mutableListOf(v))
             }
@@ -48,19 +48,18 @@ class VehicleFusion(
         return groups
     }
 
-    private fun sameVehicle(a: Vehicle, b: Vehicle): Boolean {
+    private fun sameVehicle(a: Vehicle, b: Vehicle, nowMs: Long): Boolean {
+        if (a.tid != 0 && b.tid != 0 && a.tid == b.tid) return true
+
+        if (normLine(a.line) != normLine(b.line)) return false
+
         val distance = Geo.distanceM(a.lat, a.lng, b.lat, b.lng)
-
-        // Stejný identifikátor spoje.
-        if (a.tid != 0 && b.tid != 0 && a.tid == b.tid) {
-            return true
-        }
-
-        // Různé zdroje mohou přiřadit rozdílné tid.
-        // V takovém případě rozhoduje shoda linky a blízkost polohy.
-        return normLine(a.line) == normLine(b.line) &&
-                distance <= sameSpotM
+        val ageDiffSec = abs(a.ageSec(nowMs) - b.ageSec(nowMs)).coerceAtMost(120)
+        // autobus za rozdíl stáří ujede až ~15 m/s
+        val allowed = sameSpotM + ageDiffSec * 15.0
+        return distance <= allowed
     }
+
 
     private fun resolve(group: List<Vehicle>, progress: TripProgress?, nowMs: Long): Vehicle {
         val tid = group.firstOrNull { it.tid != 0 }?.tid ?: 0
@@ -91,9 +90,9 @@ class VehicleFusion(
         if (v.ageSec(nowMs) <= own.staleVehicleSec) return false
         return all.any { o ->
             o.report.priority < own.report.priority &&
-                o.report.health == Health.LIVE &&
-                v.segment in o.report.segments &&
-                v.segment !in o.report.staleSegments
+                    o.report.health == Health.LIVE &&
+                    v.segment in o.report.segments &&
+                    v.segment !in o.report.staleSegments
         }
     }
 }

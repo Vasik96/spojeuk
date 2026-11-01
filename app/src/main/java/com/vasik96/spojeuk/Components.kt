@@ -11,6 +11,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularWavyProgressIndicator
@@ -29,10 +31,13 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ProgressIndicatorDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.WavyProgressIndicatorDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,13 +47,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.google.android.gms.maps3d.model.Spacer
 
 @Composable
 internal fun Wavy(size: Dp, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.primary) {
@@ -122,39 +133,117 @@ private fun LogoChip(@DrawableRes res: Int, description: String) {
 
 @Composable
 internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> Unit) {
+    // Plynulá animace hodnoty progress baru (včetně dojezdu při dokončování)
+    val animatedProgress by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = progress,
+        animationSpec = androidx.compose.animation.core.tween(
+            durationMillis = 300,
+            easing = androidx.compose.animation.core.FastOutSlowInEasing
+        ),
+        label = "ProgressAnimation"
+    )
+
     Surface(
-        modifier = Modifier.fillMaxSize().pointerInput(Unit) {},   // blokuje dotyky na mapu pod ním
+        modifier = Modifier.fillMaxSize().pointerInput(Unit) {},
         color = MaterialTheme.colorScheme.background
     ) {
         Column(
-            modifier = Modifier.fillMaxSize().systemBarsPadding().padding(32.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .systemBarsPadding()
+                .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            Wavy(64.dp)
-            Spacer(Modifier.height(24.dp))
-            Text("Stahování zastávek", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
+            // --- SEKCE LOGA A NÁZVU ---
+            Box(
+                modifier = Modifier
+                    .size(100.dp)
+                    .clip(RoundedCornerShape(24.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    painter = painterResource(id = R.mipmap.ic_launcher_background),
+                    contentDescription = null,
+                    modifier = Modifier.matchParentSize()
+                )
+                Image(
+                    painter = painterResource(id = R.mipmap.ic_launcher_foreground),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .matchParentSize()
+                        .graphicsLayer(scaleX = 1.5f, scaleY = 1.5f)
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
             Text(
-                message.ifBlank { "Připravuji jízdní řády…" },
+                text = stringResource(R.string.app_name),
+                style = MaterialTheme.typography.titleMediumEmphasized,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Text(
+                text = "Doprava Ústeckého kraje",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(Modifier.height(40.dp))
+
+            // --- SEKCE PROBÍHAJÍCÍ AKCE / SPINNER ---
+            CircularWavyProgressIndicator(
+                modifier = Modifier.size(56.dp),
+                stroke = Stroke(
+                    width = 14f,
+                    cap = WavyProgressIndicatorDefaults.circularIndicatorStroke.cap
+                ),
+                trackStroke = Stroke(
+                    width = 14f,
+                    cap = WavyProgressIndicatorDefaults.circularTrackStroke.cap
+                )
+            )
+
+            Spacer(Modifier.height(20.dp))
+
+            Text(
+                text = "Stahování zastávek",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(Modifier.height(6.dp))
+
+            Text(
+                text = message.ifBlank { "Připravuji jízdní řády…" },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
+
             if (progress > 0f) {
-                Spacer(Modifier.height(16.dp))
-                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(20.dp))
+                // Vlnkovitý lineární progress indicator s plynulým animovaným postupem
+                LinearWavyProgressIndicator(
+                    progress = { animatedProgress },
+                    modifier = Modifier
+                        .fillMaxWidth(0.8f)
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                )
             }
-            Spacer(Modifier.height(8.dp))
+
+            Spacer(Modifier.height(24.dp))
+
             Text(
-                "Při prvním spuštění se stahují jízdní řády (~20 MB). Toto může trvat 30s.",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
+                text = "Při prvním spuštění se stahují jízdní řády (~20 MB). Toto může trvat 30s.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 16.dp)
             )
-            // commented out due to instability, keep it here
-            //Spacer(Modifier.height(24.dp))
-            //TextButton(onClick = onBackground) { Text("Stahovat na pozadí") }
         }
     }
 }
