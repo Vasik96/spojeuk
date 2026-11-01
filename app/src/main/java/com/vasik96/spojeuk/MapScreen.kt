@@ -1,0 +1,586 @@
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+
+package com.vasik96.spojeuk
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.foundation.isSystemInDarkTheme
+import com.google.android.gms.maps.model.Dot
+import com.google.android.gms.maps.model.Gap
+import com.google.android.gms.maps.model.MapStyleOptions
+import com.google.maps.android.compose.MapType
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.JointType
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.RoundCap
+import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.MapProperties
+import com.google.maps.android.compose.MapUiSettings
+import com.google.maps.android.compose.Marker
+import com.google.maps.android.compose.MarkerState
+import com.google.maps.android.compose.Polyline
+import com.google.maps.android.compose.rememberCameraPositionState
+import com.google.maps.android.compose.rememberUpdatedMarkerState
+import androidx.compose.runtime.key
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.geometry.Offset
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
+
+
+@SuppressLint("MissingPermission")
+@Composable
+internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, api: TransitRepository, active: Boolean) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var showFullRoute by remember { mutableStateOf(false) }
+
+    // polling poloh
+    LaunchedEffect(active) {
+        if (!active) return@LaunchedEffect
+        if (appState.vehicles.isEmpty()) appState.vehiclesLoaded = false
+        while (true) {
+            runCatching { api.vehiclePositions() }
+                .onSuccess {
+                    appState.updateVehicles(it)
+                    appState.heldCount = api.heldCount()
+                    appState.vehicleSource = api.sourceLabel()
+                    appState.mapError = null
+                }
+                .onFailure {
+                    if (it is CancellationException) throw it
+                    appState.mapError = "Polohy vozidel se nepodařilo načíst"
+                }
+            appState.vehiclesLoaded = true
+            delay(6_000)
+        }
+    }
+
+    val cameraPositionState = rememberCameraPositionState {
+        position = CameraPosition.fromLatLngZoom(appState.mapCenter, appState.mapZoom)
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            appState.mapCenter = cameraPositionState.position.target
+            appState.mapZoom = cameraPositionState.position.zoom
+        }
+    }
+
+    var hasLocationPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.ACCESS_COARSE_LOCATION
+                    ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { p ->
+        hasLocationPermission = p[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                p[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+    }
+    LaunchedEffect(Unit) {
+        if (!hasLocationPermission) permissionLauncher.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            )
+        )
+    }
+
+    // zvýraznění markeru
+    LaunchedEffect(appState.highlightedTrip, appState.vehiclesLoaded, appState.routeLoading) {
+        if (appState.highlightedTrip == null) {
+            appState.pulsePhase = 0; return@LaunchedEffect
+        }
+        if (!appState.vehiclesLoaded || appState.routeLoading) return@LaunchedEffect
+        repeat(6) { i -> appState.pulsePhase = if (i % 2 == 0) 1 else 2; delay(400.milliseconds) }
+        appState.pulsePhase = 0
+        appState.highlightedTrip = null
+    }
+
+    // přiblížení po kliknutí na "Mapa"
+    LaunchedEffect(appState.focusTrip, appState.vehiclesLoaded, appState.routeLoading) {
+        val ref = appState.focusTrip ?: return@LaunchedEffect
+
+        if (!appState.vehiclesLoaded || appState.routeLoading) return@LaunchedEffect
+        val route = appState.tripRoute
+        val searchRoute = appState.fullRoute.ifEmpty { route }
+        val match = findVehicle(appState.vehicles, ref, searchRoute)
+        val v = match?.vehicle
+        if (v != null) {
+            appState.focusedTripVehicle = v
+            appState.focusedTripRef = ref
+            if (match.approximate) {
+                android.widget.Toast.makeText(
+                    context,
+                    "ID spoje nenalezeno. Zobrazen nejbližší bus linky ${ref.line}, může být jiný.",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+            cameraPositionState.animate(
+                CameraUpdateFactory.newLatLngZoom(
+                    LatLng(v.lat, v.lng),
+                    16f
+                ), 700
+            )
+        } else {
+            appState.focusedTripVehicle = null
+            val msg = if (appState.mapError != null)
+                "Polohy vozidel se nepodařilo načíst"
+            else
+                "Autobus tohoto spoje teď není na mapě, možná ještě nevyjel"
+            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
+            if (route.isNotEmpty()) {
+                val lats = route.map { it.latitude }
+                val lons = route.map { it.longitude }
+                val span = maxOf(lats.max() - lats.min(), lons.max() - lons.min())
+                val zoom =
+                    if (span > 0.3) 10f else if (span > 0.15) 11f else if (span > 0.07) 12f else 13f
+                cameraPositionState.animate(
+                    CameraUpdateFactory.newLatLngZoom(
+                        LatLng((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), zoom
+                    ), 700
+                )
+            }
+        }
+        appState.focusTrip = null
+    }
+
+    val phase = appState.pulsePhase
+    val allVehicles = appState.vehicles
+
+    val locked: Vehicle? = appState.focusedTripVehicle
+
+    // Sledování běží, dokud existuje ref spoje NEBO se právě něco zvýrazňuje
+    val strictMode = appState.focusedTripRef != null
+            || appState.highlightedTrip != null
+            || appState.focusTrip != null
+            || phase != 0
+
+    val target = locked ?: appState.selectedVehicle
+
+
+
+    val focused = appState.focusedTripVehicle
+    val trackingTrip = appState.focusedTripRef != null
+    val keyer = remember { VehicleKeyer() }
+    val routes = remember(api) { VehicleRoutes(api) }
+    val keyed = remember(allVehicles) { keyer.assign(allVehicles) }
+
+    val activeVehicles: List<Pair<String, Vehicle>> =
+        if (strictMode && appState.hideOtherVehiclesOnMap) {
+            // STRIKTNĚ max. 1 vůz, a vždy ten zamčený. Nic jiného se nekreslí.
+            if (locked != null) {
+                val match = keyed.firstOrNull { it.second.uid == locked.uid }
+                listOf(match ?: ("locked_${locked.uid}" to locked))
+            } else emptyList()
+        } else {
+            keyed.filter { (_, x) ->
+                (target != null && x.uid == target.uid) ||
+                        (x.lat in 50.35..50.95 && x.lng in 13.55..14.60)
+            }
+        }
+
+    LaunchedEffect(allVehicles) {
+        android.util.Log.d("Motion", "id0=${allVehicles.count { it.id == 0 }} / ${allVehicles.size}")
+    }
+
+    val systemDark = isSystemInDarkTheme()
+    val useDarkMap = when (appState.appTheme) {
+        AppTheme.SYSTEM -> systemDark
+        AppTheme.LIGHT -> false
+        AppTheme.DARK -> true
+    }
+
+    val mapStyleOptions = remember(useDarkMap) {
+        if (useDarkMap) {
+            MapStyleOptions(DARK_NIGHT_MAP_STYLE_JSON)
+        } else {
+            MapStyleOptions(LIGHT_MAP_STYLE_JSON)
+        }
+    }
+
+    val mapProperties = remember(hasLocationPermission, mapStyleOptions) {
+        MapProperties(
+            isMyLocationEnabled = hasLocationPermission,
+            mapType = MapType.NORMAL,
+            mapStyleOptions = mapStyleOptions
+        )
+    }
+
+    Box(modifier = modifier.fillMaxSize()) {
+        GoogleMap(
+            modifier = Modifier.fillMaxSize(),
+            cameraPositionState = cameraPositionState,
+            properties = mapProperties,
+            uiSettings = MapUiSettings(
+                zoomControlsEnabled = false,
+                myLocationButtonEnabled = false,
+                mapToolbarEnabled = false
+            )
+        ) {
+            val primaryColor = MaterialTheme.colorScheme.primary
+            val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
+
+            val arrowScale by remember { derivedStateOf { arrowSizeForZoom(cameraPositionState.position.zoom) } }
+            val arrowSpacing by remember { derivedStateOf { arrowSpacingForZoom(cameraPositionState.position.zoom) } }
+
+            val arrowIcon = remember(arrowArgb, arrowScale) {
+                routeArrowDescriptor(primaryColor = arrowArgb, scale = arrowScale)
+            }
+
+            val walk = appState.walkRoute
+            if (walk != null && appState.tripRoute.isNotEmpty()) {
+                val walkPoints = remember(walk) { walk.points.map { LatLng(it.first, it.second) } }
+                Polyline(
+                    points = walkPoints,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    width = 14f,
+                    zIndex = 0.2f,
+                    pattern = listOf(Dot(), Gap(14f)),
+                    startCap = RoundCap(),
+                    endCap = RoundCap(),
+                    jointType = JointType.ROUND
+                )
+            }
+
+            if (appState.tripRoute.isNotEmpty()) {
+                val full = appState.fullRoute
+                val line = if (showFullRoute && full.size >= 2) full else appState.tripRoute
+                Polyline(
+                    points = line,
+                    color = primaryColor,
+                    width = 12f,
+                    zIndex = 0f,
+                    startCap = RoundCap(),
+                    endCap = RoundCap(),
+                    jointType = JointType.ROUND
+                )
+            }
+
+            if (appState.tripRoute.size >= 2) {
+                val route = appState.tripRoute
+                val stops = appState.tripStops
+
+                val arrows = remember(route, arrowSpacing) {
+                    createRouteArrows(route = route, spacingMeters = arrowSpacing)
+                }
+
+                arrows.forEachIndexed { index, arrow ->
+                    key("arrow_$index") {
+                        Marker(
+                            state = rememberUpdatedMarkerState(position = arrow.position),
+                            icon = arrowIcon,
+                            anchor = Offset(0.5f, 0.5f),
+                            flat = true,
+                            rotation = arrow.bearing,
+                            zIndex = 1f,
+                            onClick = { true }
+                        )
+                    }
+                }
+
+                val full = appState.fullRoute
+                val useFull = showFullRoute && full.size >= 2
+                val startPos = if (useFull) full.first() else route.first()
+                val endPos = if (useFull) full.last() else route.last()
+
+
+                val startIcon = remember(context) { routeStartDescriptor(context) }
+                val endIcon = remember(context) { routeEndDescriptor(context) }
+
+                // Začátek trasy (zelený kruh)
+                Marker(
+                    state = rememberUpdatedMarkerState(position = startPos),
+                    icon = startIcon,
+                    anchor = Offset(0.5f, 0.5f),
+                    zIndex = 0.5f,
+                    onClick = { true }
+                )
+
+                // Konec trasy (červený kruh)
+                Marker(
+                    state = rememberUpdatedMarkerState(position = endPos),
+                    icon = endIcon,
+                    anchor = Offset(0.5f, 0.5f),
+                    zIndex = 0.5f,
+                    onClick = { true }
+                )
+            }
+            for ((vkey, v) in activeVehicles) {
+                key(vkey) {
+                    val motion = remember { VehicleMotion(v.lat, v.lng, v.observedAtMs) }
+                    val markerState = remember { MarkerState(LatLng(v.lat, v.lng)) }
+                    val predict = appState.predictVehiclePositions
+
+                    // trasa spoje tohoto vozidla (jen při zapnuté predikci)
+                    var route by remember { mutableStateOf<PathMeasure?>(null) }
+                    val sig = "${v.tid}|${v.cis}|${v.trip}"
+                    LaunchedEffect(sig, predict) {
+                        route = null
+                        if (!predict) return@LaunchedEffect
+                        var tries = 0
+                        while (tries < 4) {
+                            val r = routes.get(v)
+                            if (r != null) { route = r; break }
+                            tries++
+                            delay(20_000)
+                        }
+                    }
+
+                    val lat = v.lat
+                    val lng = v.lng
+                    val obs = v.observedAtMs
+                    LaunchedEffect(lat, lng, route, predict) {
+                        motion.setRoute(if (predict) route else null)
+                        motion.onFix(lat, lng, obs)
+                        motion.animate(markerState, predict)
+                    }
+
+                    val iconPhase = if (target != null && v.uid == target.uid) phase else 0
+                    Marker(
+                        state = markerState,
+                        icon = markerDescriptor(context, v.line, v.train, v.delay, iconPhase),
+                        anchor = androidx.compose.ui.geometry.Offset(0.5f, 0.5f),
+                        zIndex = if (iconPhase != 0) 3f else 2f,
+                        onClick = { appState.selectedVehicle = v; true }
+                    )
+                }
+            }
+        }
+
+        var showHeldInfo by remember { mutableStateOf(false) }
+
+        ElevatedCard(
+            modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Row(Modifier.padding(start = 14.dp, top = 14.dp, bottom = 14.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Map, null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Mapa vozidel", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "${appState.vehicles.size} poloh · aktualizace po 6s",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (appState.vehicleSource.isNotBlank()) {
+                        Text(
+                            "Zdroj: ${appState.vehicleSource}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if ("zastaralé" in appState.vehicleSource || appState.vehicleSource == SourceLabel.NONE)
+                                MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                if (appState.routeLoading) { Wavy(24.dp); Spacer(Modifier.width(8.dp)) }
+                if (appState.mapError != null) {
+                    Text("Offline", color = MaterialTheme.colorScheme.error)
+                }
+                if (appState.heldCount > OUTAGE_MIN) {
+                    IconButton(onClick = { showHeldInfo = true }) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = "Upozornění na zdroj dat",
+                        )
+                    }
+                }
+            }
+        }
+
+        if (active && showHeldInfo) {
+            AlertDialog(
+                onDismissRequest = { showHeldInfo = false },
+                icon = { Icon(Icons.Default.Warning, null) },
+                title = { Text("API nespolehlivé") },
+                text = {
+                    Text(
+                        "Zdroj dat (Portabo) dočasně nedodává ${appState.heldCount} vozidel, " +
+                                "většinou MHD/DPMUL. U nich zobrazuji poslední známou polohu, může být zastaralá. " +
+                                "Detail konkrétního vozidla ukáže, jak stará poloha je."
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { showHeldInfo = false }) { Text("Rozumím") }
+                }
+            )
+        }
+
+        // logo Google je vlevo dole, proto odsazení
+        // tlacitko X (vykrizkovani)
+        if (appState.tripRoute.isNotEmpty()) {
+            SmallFloatingActionButton(
+                onClick = {
+                    appState.tripRoute = emptyList()
+                    appState.fullRoute = emptyList()
+                    appState.tripStops = emptyList()
+                    appState.focusedTripVehicle = null
+                    appState.focusedTripRef = null
+                    appState.highlightedTrip = null
+                    appState.focusTrip = null
+                    appState.walkRoute = null
+                },
+                modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 52.dp)
+            ) { Icon(Icons.Default.Close, contentDescription = "Skrýt trasu") }
+        }
+
+        FloatingActionButton(
+            onClick = {
+                if (!hasLocationPermission) {
+                    permissionLauncher.launch(
+                        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+                    )
+                } else {
+                    LocationServices.getFusedLocationProviderClient(context).lastLocation
+                        .addOnSuccessListener { loc ->
+                            if (loc != null) scope.launch {
+                                cameraPositionState.animate(
+                                    CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 14f), 700
+                                )
+                            }
+                        }
+                }
+            },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
+        ) { Icon(Icons.Default.MyLocation, contentDescription = "Moje poloha") }
+
+        if (active) {
+            appState.selectedVehicle?.let { v ->
+                VehicleDetailBottomSheet(v, api, appState) { appState.selectedVehicle = null }
+            }
+        }
+
+    }
+}
+
+private fun closestPointOnRoute(
+    point: LatLng,
+    route: List<LatLng>
+): LatLng {
+    if (route.isEmpty()) return point
+
+    if (route.size == 1) return route.first()
+
+    var closest = route.first()
+    var minDistance = Double.MAX_VALUE
+
+    for (i in 0 until route.lastIndex) {
+        val a = route[i]
+        val b = route[i + 1]
+
+        val dx = b.longitude - a.longitude
+        val dy = b.latitude - a.latitude
+
+        val lengthSquared = dx * dx + dy * dy
+
+        val t = if (lengthSquared == 0.0) {
+            0.0
+        } else {
+            (
+                    ((point.longitude - a.longitude) * dx +
+                            (point.latitude - a.latitude) * dy) / lengthSquared
+                    ).coerceIn(0.0, 1.0)
+        }
+
+        val projected = LatLng(
+            a.latitude + t * dy,
+            a.longitude + t * dx
+        )
+
+        val distance =
+            (point.latitude - projected.latitude) *
+                    (point.latitude - projected.latitude) +
+                    (point.longitude - projected.longitude) *
+                    (point.longitude - projected.longitude)
+
+        if (distance < minDistance) {
+            minDistance = distance
+            closest = projected
+        }
+    }
+
+    return closest
+}
+
+private const val DARK_NIGHT_MAP_STYLE_JSON = """
+[
+  {"elementType": "geometry", "stylers": [{"color": "#242f3e"}]},
+  {"elementType": "labels.text.fill", "stylers": [{"color": "#746855"}]},
+  {"elementType": "labels.text.stroke", "stylers": [{"color": "#242f3e"}]},
+  {"featureType": "administrative.locality", "elementType": "labels.text.fill", "stylers": [{"color": "#d59563"}]},
+  {"featureType": "poi", "elementType": "labels.text.fill", "stylers": [{"color": "#d59563"}]},
+  {"featureType": "poi.park", "elementType": "geometry", "stylers": [{"color": "#263c3f"}]},
+  {"featureType": "poi.park", "elementType": "labels.text.fill", "stylers": [{"color": "#6b9a76"}]},
+  {"featureType": "road", "elementType": "geometry", "stylers": [{"color": "#38414e"}]},
+  {"featureType": "road", "elementType": "geometry.stroke", "stylers": [{"color": "#212a37"}]},
+  {"featureType": "road", "elementType": "labels.text.fill", "stylers": [{"color": "#9ca5b3"}]},
+  {"featureType": "road.highway", "elementType": "geometry", "stylers": [{"color": "#746855"}]},
+  {"featureType": "road.highway", "elementType": "geometry.stroke", "stylers": [{"color": "#1f2835"}]},
+  {"featureType": "road.highway", "elementType": "labels.text.fill", "stylers": [{"color": "#f3d19c"}]},
+  {"featureType": "transit", "elementType": "geometry", "stylers": [{"color": "#2f3948"}]},
+  {"featureType": "transit.station", "elementType": "labels.text.fill", "stylers": [{"color": "#d59563"}]},
+  {"featureType": "water", "elementType": "geometry", "stylers": [{"color": "#17263c"}]},
+  {"featureType": "water", "elementType": "labels.text.fill", "stylers": [{"color": "#515c6d"}]},
+  {"featureType": "water", "elementType": "labels.text.stroke", "stylers": [{"color": "#17263c"}]}
+]
+"""
+
+private const val LIGHT_MAP_STYLE_JSON = "[]"
