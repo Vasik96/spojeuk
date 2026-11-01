@@ -28,6 +28,11 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["MAPS_API_KEY"] = localProperties.getProperty("MAPS_API_KEY") ?: ""
+        buildConfigField(
+            "String",
+            "CARTO_API_KEY",
+            "\"${localProperties.getProperty("CARTO_API_KEY") ?: ""}\""
+        )
     }
 
     testOptions {
@@ -37,9 +42,9 @@ android {
     signingConfigs {
         create("release") {
             storeFile = rootProject.file("local-key.jks")
-            storePassword = "password123"
-            keyAlias = "my-alias"
-            keyPassword = "password123"
+            storePassword = localProperties.getProperty("KEYSTORE_PASSWORD") ?: ""
+            keyAlias = localProperties.getProperty("KEY_ALIAS") ?: "my-alias"
+            keyPassword = localProperties.getProperty("KEY_PASSWORD") ?: ""
         }
     }
 
@@ -47,8 +52,7 @@ android {
         release {
             signingConfig = signingConfigs.getByName("release")
             optimization {
-
-                enable = false
+                enable = true
             }
         }
     }
@@ -58,6 +62,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -90,4 +95,5 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.5.0-beta02")
 
     implementation("androidx.core:core-splashscreen:1.2.0")
+    implementation("org.maplibre.gl:android-sdk:13.7.1")
 }

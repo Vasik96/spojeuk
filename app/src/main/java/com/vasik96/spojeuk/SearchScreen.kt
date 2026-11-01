@@ -13,6 +13,9 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import android.content.res.Configuration
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -547,141 +550,138 @@ internal fun SearchScreen(
         if (nearEnd && appState.searched) loadMore()
     }
 
-    Column(modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    val searchCard: @Composable () -> Unit = {
+        ElevatedCard(
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainer
+            )
         ) {
-            ElevatedCard(
-                shape = RoundedCornerShape(28.dp),
-                colors = CardDefaults.elevatedCardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                StopField(
+                    label = "Odkud",
+                    externalText = { appState.fromQuery },
+                    onTextChange = { t ->
+                        appState.fromQuery = t
+                        if (appState.from?.name != t) appState.from = null
+                    },
+                    onPick = {
+                        appState.from = it
+                        appState.fromQuery = stopLabel(it.name)
+                    },
+                    indexedStops = appState.indexedStops,
+                    originLat = origin.first,
+                    originLng = origin.second,
+                    stopsLoading = appState.stopsLoading || locatingTarget == "from",
+                    onRemoveUsed = { removeUsed(it) },
+                    onMyLocation = {
+                        useMyLocation("from") { s -> appState.from = s; appState.fromQuery = myLocLabel(s.name) }
+                    }
                 )
-            ) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StopField(
-                        label = "Odkud",
-                        externalText = { appState.fromQuery },
-                        onTextChange = { t ->
-                            appState.fromQuery = t
-                            if (appState.from?.name != t) appState.from = null
-                        },
-                        onPick = {
-                            appState.from = it
-                            appState.fromQuery = stopLabel(it.name)
-                        },
-                        indexedStops = appState.indexedStops,
-                        originLat = origin.first,
-                        originLng = origin.second,
-                        stopsLoading = appState.stopsLoading || locatingTarget == "from",
-                        onRemoveUsed = { removeUsed(it) },
-                        onMyLocation = {
-                            useMyLocation("from") { s -> appState.from = s; appState.fromQuery = myLocLabel(s.name) }
-                        }
-                    )
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        HorizontalDivider(Modifier.weight(1f))
-                        IconButton(onClick = {
-                            val f = appState.from
-                            appState.from = appState.to
-                            appState.to = f
-                            val q = appState.fromQuery
-                            appState.fromQuery = appState.toQuery
-                            appState.toQuery = q
-                        }) {
-                            Icon(Icons.Default.SwapVert, "Prohodit zastávky")
-                        }
-                        HorizontalDivider(Modifier.weight(1f))
-                    }
-
-                    StopField(
-                        label = "Kam",
-                        externalText = { appState.toQuery },
-                        onTextChange = { t ->
-                            appState.toQuery = t
-                            if (appState.to?.name != t) appState.to = null
-                        },
-                        onPick = {
-                            appState.to = it
-                            appState.toQuery = stopLabel(it.name)
-                        },
-                        indexedStops = appState.indexedStops,
-                        stopsLoading = appState.stopsLoading || locatingTarget == "to",
-                        originLat = origin.first,
-                        originLng = origin.second,
-                        onRemoveUsed = { removeUsed(it) },
-                        onMyLocation = {
-                            useMyLocation("to") { s -> appState.to = s; appState.toQuery = myLocLabel(s.name) }
-                        }
-                    )
-
-                    Spacer(Modifier.width(8.dp))
-
-                    Button(
-                        onClick = { runSearch() },
-                        enabled = appState.from != null && appState.to != null &&
-                                appState.from?.name != appState.to?.name && !appState.searchLoading,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 54.dp),
-                        //shape = RoundedCornerShape(20.dp)
-                    ) {
-                        if (appState.searchLoading) {
-                            CircularWavyProgressIndicator(
-                                modifier = Modifier.size(24.dp),
-                                color = MaterialTheme.colorScheme.primary,
-                                wavelength = 8.dp,
-                                amplitude = 1.5f
-                            )
-                        } else {
-                            Icon(Icons.Default.Search, contentDescription = null)
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (appState.searchLoading) "Hledám spoje…" else "Najít spojení")
-                    }
-                }
-            }
-
-            appState.searchError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-
-
-            if (appState.searched && !appState.searchLoading) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Výsledky", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                    if (appState.hasEarlier) {
-                        TextButton(
-                            onClick = { loadEarlier() },
-                            enabled = !appState.loadingEarlier
-                        ) {
-                            if (appState.loadingEarlier) {
-                                Wavy(24.dp)
-                                Spacer(Modifier.width(4.dp))
-                                Text("Načítám…")
-                            } else {
-                                Icon(
-                                    Icons.Default.ArrowUpward,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text("Dřívější")
-                            }
-                        }
+                    HorizontalDivider(Modifier.weight(1f))
+                    IconButton(onClick = {
+                        val f = appState.from
+                        appState.from = appState.to
+                        appState.to = f
+                        val q = appState.fromQuery
+                        appState.fromQuery = appState.toQuery
+                        appState.toQuery = q
+                    }) {
+                        Icon(Icons.Default.SwapVert, "Prohodit zastávky")
                     }
-                    Text(
-                        "${appState.journeys.size} nalezeno",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    HorizontalDivider(Modifier.weight(1f))
+                }
+
+                StopField(
+                    label = "Kam",
+                    externalText = { appState.toQuery },
+                    onTextChange = { t ->
+                        appState.toQuery = t
+                        if (appState.to?.name != t) appState.to = null
+                    },
+                    onPick = {
+                        appState.to = it
+                        appState.toQuery = stopLabel(it.name)
+                    },
+                    indexedStops = appState.indexedStops,
+                    stopsLoading = appState.stopsLoading || locatingTarget == "to",
+                    originLat = origin.first,
+                    originLng = origin.second,
+                    onRemoveUsed = { removeUsed(it) },
+                    onMyLocation = {
+                        useMyLocation("to") { s -> appState.to = s; appState.toQuery = myLocLabel(s.name) }
+                    }
+                )
+
+                Spacer(Modifier.width(8.dp))
+
+                Button(
+                    onClick = { runSearch() },
+                    enabled = appState.from != null && appState.to != null &&
+                            appState.from?.name != appState.to?.name && !appState.searchLoading,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 54.dp),
+                ) {
+                    if (appState.searchLoading) {
+                        CircularWavyProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            wavelength = 8.dp,
+                            amplitude = 1.5f
+                        )
+                    } else {
+                        Icon(Icons.Default.Search, contentDescription = null)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (appState.searchLoading) "Hledám spoje…" else "Najít spojení")
                 }
             }
         }
 
+        appState.searchError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    }
+
+    val resultsHeader: @Composable () -> Unit = {
+        if (appState.searched && !appState.searchLoading) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Výsledky", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                if (appState.hasEarlier) {
+                    TextButton(
+                        onClick = { loadEarlier() },
+                        enabled = !appState.loadingEarlier
+                    ) {
+                        if (appState.loadingEarlier) {
+                            Wavy(24.dp)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Načítám…")
+                        } else {
+                            Icon(
+                                Icons.Default.ArrowUpward,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("Dřívější")
+                        }
+                    }
+                }
+                Text(
+                    "${appState.journeys.size} nalezeno",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+
+    val resultsBody: @Composable (Modifier) -> Unit = { mod ->
         if (!appState.searched) {
-            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            Box(mod.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.Default.DirectionsBus, null, Modifier.size(44.dp), tint = MaterialTheme.colorScheme.primary)
                     Text("Kam dnes vyrazíš?", style = MaterialTheme.typography.headlineSmall)
@@ -689,9 +689,8 @@ internal fun SearchScreen(
                 }
             }
         } else if (appState.searchLoading && appState.journeys.isEmpty()) {
-            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            Box(mod.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 val strokeWidth = with(LocalDensity.current) { 8.dp.toPx() }
-
                 CircularWavyProgressIndicator(
                     modifier = Modifier.size(56.dp),
                     color = MaterialTheme.colorScheme.primary,
@@ -704,7 +703,7 @@ internal fun SearchScreen(
             PullToRefreshBox(
                 isRefreshing = appState.refreshing,
                 onRefresh = { refresh() },
-                modifier = Modifier.weight(1f).fillMaxWidth()
+                modifier = mod.fillMaxWidth()
             ) {
                 LazyColumn(
                     state = listState,
@@ -734,6 +733,47 @@ internal fun SearchScreen(
                     }
                 }
             }
+        }
+    }
+
+    if (isLandscape) {
+        Row(modifier.fillMaxSize()) {
+            // vlevo formulář (scrolluje se, aby tlačítko bylo vždy dostupné)
+            Column(
+                modifier = Modifier
+                    .weight(0.42f)
+                    .fillMaxHeight()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                searchCard()
+            }
+
+            // vpravo výsledky
+            Column(
+                modifier = Modifier
+                    .weight(0.58f)
+                    .fillMaxHeight()
+            ) {
+                Box(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    resultsHeader()
+                }
+                resultsBody(Modifier.weight(1f))
+            }
+        }
+    } else {
+        Column(modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                searchCard()
+                resultsHeader()
+            }
+            resultsBody(Modifier.weight(1f))
         }
     }
 }

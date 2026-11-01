@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <application
+        android:name=".SpojeApplication"
         android:allowBackup="true"
         android:largeHeap="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -27,7 +28,9 @@
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.SpojeUK"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            >
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

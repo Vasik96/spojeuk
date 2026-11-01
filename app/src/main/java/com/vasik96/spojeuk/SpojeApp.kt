@@ -2,6 +2,9 @@
 
 package com.vasik96.spojeuk
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -35,6 +38,7 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,13 +47,23 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
+
+
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 /** Kořen aplikace: téma, spodní navigace a tři záložky (Spoje, Mapa, Nastavení). */
 @Composable
@@ -106,9 +120,23 @@ internal fun SpojeApp() {
         AppTheme.LIGHT -> false
         AppTheme.DARK -> true
     }
+
     val scheme = if (Build.VERSION.SDK_INT >= 31) {
         if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     } else if (dark) darkColorScheme() else lightColorScheme()
+
+
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = context.findActivity()?.window
+            if (window != null) {
+                val controller = WindowCompat.getInsetsController(window, view)
+                controller.isAppearanceLightStatusBars = !dark
+                controller.isAppearanceLightNavigationBars = !dark
+            }
+        }
+    }
 
     MaterialTheme(colorScheme = scheme) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {

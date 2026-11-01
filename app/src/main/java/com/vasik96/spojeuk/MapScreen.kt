@@ -7,9 +7,13 @@ import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import org.maplibre.geojson.Feature
+import org.maplibre.geojson.FeatureCollection
+import org.maplibre.android.style.expressions.Expression
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,13 +25,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.foundation.isSystemInDarkTheme
-import com.google.android.gms.maps.model.Dot
-import com.google.android.gms.maps.model.Gap
-import com.google.android.gms.maps.model.MapStyleOptions
-import com.google.maps.android.compose.MapType
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
+import org.maplibre.android.annotations.Annotation as MapLibreAnnotation
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FloatingActionButton
@@ -36,47 +36,86 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import org.maplibre.android.style.layers.Property
+import org.maplibre.android.style.layers.SymbolLayer
+import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.geojson.LineString
+import org.maplibre.geojson.Point
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
+import org.maplibre.android.location.LocationComponentActivationOptions
+import org.maplibre.android.location.modes.CameraMode
+import org.maplibre.android.location.modes.RenderMode
+import org.maplibre.android.style.layers.BackgroundLayer
+import org.maplibre.android.style.layers.FillLayer
+import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.PropertyFactory
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearOutSlowInEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.Dot
+import com.google.android.gms.maps.model.Gap
 import com.google.android.gms.maps.model.JointType
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.RoundCap
+import com.google.maps.android.compose.ComposeMapColorScheme
+import org.maplibre.android.style.layers.Layer
 import com.google.maps.android.compose.GoogleMap
-import com.google.maps.android.compose.MapProperties
 import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.google.maps.android.compose.rememberUpdatedMarkerState
-import androidx.compose.runtime.key
-import androidx.compose.runtime.withFrameNanos
-import androidx.compose.ui.geometry.Offset
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.maplibre.android.annotations.IconFactory
+import org.maplibre.android.annotations.MarkerOptions
+import org.maplibre.android.annotations.PolylineOptions
+import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.Style
 import kotlin.time.Duration.Companion.milliseconds
+import org.maplibre.android.annotations.Marker as MapLibreMarker
+import org.maplibre.android.camera.CameraPosition as MapLibreCameraPosition
+import org.maplibre.android.camera.CameraUpdateFactory as MapLibreCameraUpdateFactory
+import org.maplibre.android.geometry.LatLng as MapLibreLatLng
+import org.maplibre.android.maps.MapView as MapLibreMapView
+import androidx.core.graphics.createBitmap
+import com.google.maps.android.compose.MapProperties
+import kotlin.text.toInt
+import kotlin.times
 
 
 @SuppressLint("MissingPermission")
@@ -112,8 +151,10 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     }
     DisposableEffect(Unit) {
         onDispose {
-            appState.mapCenter = cameraPositionState.position.target
-            appState.mapZoom = cameraPositionState.position.zoom
+            if (appState.mapProvider == MapProvider.GOOGLE) {
+                appState.mapCenter = cameraPositionState.position.target
+                appState.mapZoom = cameraPositionState.position.zoom
+            }
         }
     }
 
@@ -155,6 +196,24 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         appState.highlightedTrip = null
     }
 
+    var maplibreMapRef by remember { mutableStateOf<MapLibreMap?>(null) }
+
+    val animateCameraTo: suspend (LatLng, Float) -> Unit = { targetLatLng, targetZoom ->
+        if (appState.mapProvider == MapProvider.GOOGLE) {
+            cameraPositionState.animate(
+                CameraUpdateFactory.newLatLngZoom(targetLatLng, targetZoom), 700
+            )
+        } else {
+            maplibreMapRef?.animateCamera(
+                MapLibreCameraUpdateFactory.newLatLngZoom(
+                    MapLibreLatLng(targetLatLng.latitude, targetLatLng.longitude),
+                    targetZoom.toDouble() - 1.0
+                ),
+                700
+            )
+        }
+    }
+
     // přiblížení po kliknutí na "Mapa"
     LaunchedEffect(appState.focusTrip, appState.vehiclesLoaded, appState.routeLoading) {
         val ref = appState.focusTrip ?: return@LaunchedEffect
@@ -174,12 +233,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     android.widget.Toast.LENGTH_LONG
                 ).show()
             }
-            cameraPositionState.animate(
-                CameraUpdateFactory.newLatLngZoom(
-                    LatLng(v.lat, v.lng),
-                    16f
-                ), 700
-            )
+            animateCameraTo(LatLng(v.lat, v.lng), 16f)
         } else {
             appState.focusedTripVehicle = null
             val msg = if (appState.mapError != null)
@@ -193,10 +247,8 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 val span = maxOf(lats.max() - lats.min(), lons.max() - lons.min())
                 val zoom =
                     if (span > 0.3) 10f else if (span > 0.15) 11f else if (span > 0.07) 12f else 13f
-                cameraPositionState.animate(
-                    CameraUpdateFactory.newLatLngZoom(
-                        LatLng((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), zoom
-                    ), 700
+                animateCameraTo(
+                    LatLng((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), zoom
                 )
             }
         }
@@ -243,167 +295,176 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     }
 
     val systemDark = isSystemInDarkTheme()
-    val useDarkMap = when (appState.appTheme) {
+    val appDark = when (appState.appTheme) {
         AppTheme.SYSTEM -> systemDark
         AppTheme.LIGHT -> false
         AppTheme.DARK -> true
     }
-
-    val mapStyleOptions = remember(useDarkMap) {
-        if (useDarkMap) {
-            MapStyleOptions(DARK_NIGHT_MAP_STYLE_JSON)
-        } else {
-            MapStyleOptions(LIGHT_MAP_STYLE_JSON)
-        }
+    val useDarkMap = when (appState.mapTheme) {
+        MapTheme.APP -> appDark
+        MapTheme.LIGHT -> false
+        MapTheme.DARK -> true
     }
 
-    val mapProperties = remember(hasLocationPermission, mapStyleOptions) {
-        MapProperties(
-            isMyLocationEnabled = hasLocationPermission,
-            mapType = MapType.NORMAL,
-            mapStyleOptions = mapStyleOptions
-        )
-    }
+    val scheme = if (useDarkMap) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT
 
     Box(modifier = modifier.fillMaxSize()) {
-        GoogleMap(
-            modifier = Modifier.fillMaxSize(),
-            cameraPositionState = cameraPositionState,
-            properties = mapProperties,
-            uiSettings = MapUiSettings(
-                zoomControlsEnabled = false,
-                myLocationButtonEnabled = false,
-                mapToolbarEnabled = false
-            )
-        ) {
-            val primaryColor = MaterialTheme.colorScheme.primary
-            val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
-
-            val arrowScale by remember { derivedStateOf { arrowSizeForZoom(cameraPositionState.position.zoom) } }
-            val arrowSpacing by remember { derivedStateOf { arrowSpacingForZoom(cameraPositionState.position.zoom) } }
-
-            val arrowIcon = remember(arrowArgb, arrowScale) {
-                routeArrowDescriptor(primaryColor = arrowArgb, scale = arrowScale)
-            }
-
-            val walk = appState.walkRoute
-            if (walk != null && appState.tripRoute.isNotEmpty()) {
-                val walkPoints = remember(walk) { walk.points.map { LatLng(it.first, it.second) } }
-                Polyline(
-                    points = walkPoints,
-                    color = MaterialTheme.colorScheme.tertiary,
-                    width = 14f,
-                    zIndex = 0.2f,
-                    pattern = listOf(Dot(), Gap(14f)),
-                    startCap = RoundCap(),
-                    endCap = RoundCap(),
-                    jointType = JointType.ROUND
+        if (appState.mapProvider == MapProvider.GOOGLE) {
+            GoogleMap(
+                modifier = Modifier.fillMaxSize(),
+                cameraPositionState = cameraPositionState,
+                mapColorScheme = scheme,
+                properties = MapProperties(isMyLocationEnabled = hasLocationPermission),
+                uiSettings = MapUiSettings(
+                    zoomControlsEnabled = false,
+                    myLocationButtonEnabled = false,
+                    mapToolbarEnabled = false
                 )
-            }
+            ) {
+                val primaryColor = MaterialTheme.colorScheme.primary
+                val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
 
-            if (appState.tripRoute.isNotEmpty()) {
-                val full = appState.fullRoute
-                val line = if (showFullRoute && full.size >= 2) full else appState.tripRoute
-                Polyline(
-                    points = line,
-                    color = primaryColor,
-                    width = 12f,
-                    zIndex = 0f,
-                    startCap = RoundCap(),
-                    endCap = RoundCap(),
-                    jointType = JointType.ROUND
-                )
-            }
+                val arrowScale by remember { derivedStateOf { arrowSizeForZoom(cameraPositionState.position.zoom) } }
+                val arrowSpacing by remember { derivedStateOf { arrowSpacingForZoom(cameraPositionState.position.zoom) } }
 
-            if (appState.tripRoute.size >= 2) {
-                val route = appState.tripRoute
-                val stops = appState.tripStops
-
-                val arrows = remember(route, arrowSpacing) {
-                    createRouteArrows(route = route, spacingMeters = arrowSpacing)
+                val arrowIcon = remember(arrowArgb, arrowScale) {
+                    routeArrowDescriptor(primaryColor = arrowArgb, scale = arrowScale)
                 }
 
-                arrows.forEachIndexed { index, arrow ->
-                    key("arrow_$index") {
-                        Marker(
-                            state = rememberUpdatedMarkerState(position = arrow.position),
-                            icon = arrowIcon,
-                            anchor = Offset(0.5f, 0.5f),
-                            flat = true,
-                            rotation = arrow.bearing,
-                            zIndex = 1f,
-                            onClick = { true }
-                        )
+                val walk = appState.walkRoute
+                if (walk != null && appState.tripRoute.isNotEmpty()) {
+                    val walkPoints = remember(walk) { walk.points.map { LatLng(it.first, it.second) } }
+                    Polyline(
+                        points = walkPoints,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        width = 14f,
+                        zIndex = 0.2f,
+                        pattern = listOf(Dot(), Gap(14f)),
+                        startCap = RoundCap(),
+                        endCap = RoundCap(),
+                        jointType = JointType.ROUND
+                    )
+                }
+
+                if (appState.tripRoute.isNotEmpty()) {
+                    val full = appState.fullRoute
+                    val line = if (showFullRoute && full.size >= 2) full else appState.tripRoute
+                    Polyline(
+                        points = line,
+                        color = primaryColor,
+                        width = 12f,
+                        zIndex = 0f,
+                        startCap = RoundCap(),
+                        endCap = RoundCap(),
+                        jointType = JointType.ROUND
+                    )
+                }
+
+                if (appState.tripRoute.size >= 2) {
+                    val route = appState.tripRoute
+                    val stops = appState.tripStops
+
+                    val arrows = remember(route, arrowSpacing) {
+                        createRouteArrows(route = route, spacingMeters = arrowSpacing)
                     }
-                }
 
-                val full = appState.fullRoute
-                val useFull = showFullRoute && full.size >= 2
-                val startPos = if (useFull) full.first() else route.first()
-                val endPos = if (useFull) full.last() else route.last()
-
-
-                val startIcon = remember(context) { routeStartDescriptor(context) }
-                val endIcon = remember(context) { routeEndDescriptor(context) }
-
-                // Začátek trasy (zelený kruh)
-                Marker(
-                    state = rememberUpdatedMarkerState(position = startPos),
-                    icon = startIcon,
-                    anchor = Offset(0.5f, 0.5f),
-                    zIndex = 0.5f,
-                    onClick = { true }
-                )
-
-                // Konec trasy (červený kruh)
-                Marker(
-                    state = rememberUpdatedMarkerState(position = endPos),
-                    icon = endIcon,
-                    anchor = Offset(0.5f, 0.5f),
-                    zIndex = 0.5f,
-                    onClick = { true }
-                )
-            }
-            for ((vkey, v) in activeVehicles) {
-                key(vkey) {
-                    val motion = remember { VehicleMotion(v.lat, v.lng, v.observedAtMs) }
-                    val markerState = remember { MarkerState(LatLng(v.lat, v.lng)) }
-                    val predict = appState.predictVehiclePositions
-
-                    // trasa spoje tohoto vozidla (jen při zapnuté predikci)
-                    var route by remember { mutableStateOf<PathMeasure?>(null) }
-                    val sig = "${v.tid}|${v.cis}|${v.trip}"
-                    LaunchedEffect(sig, predict) {
-                        route = null
-                        if (!predict) return@LaunchedEffect
-                        var tries = 0
-                        while (tries < 4) {
-                            val r = routes.get(v)
-                            if (r != null) { route = r; break }
-                            tries++
-                            delay(20_000)
+                    arrows.forEachIndexed { index, arrow ->
+                        key("arrow_$index") {
+                            Marker(
+                                state = rememberUpdatedMarkerState(position = arrow.position),
+                                icon = arrowIcon,
+                                anchor = Offset(0.5f, 0.5f),
+                                flat = true,
+                                rotation = arrow.bearing,
+                                zIndex = 1f,
+                                onClick = { true }
+                            )
                         }
                     }
 
-                    val lat = v.lat
-                    val lng = v.lng
-                    val obs = v.observedAtMs
-                    LaunchedEffect(lat, lng, route, predict) {
-                        motion.setRoute(if (predict) route else null)
-                        motion.onFix(lat, lng, obs)
-                        motion.animate(markerState, predict)
-                    }
+                    val full = appState.fullRoute
+                    val useFull = showFullRoute && full.size >= 2
+                    val startPos = if (useFull) full.first() else route.first()
+                    val endPos = if (useFull) full.last() else route.last()
 
-                    val iconPhase = if (target != null && v.uid == target.uid) phase else 0
+
+                    val startIcon = remember(context) { routeStartDescriptor(context) }
+                    val endIcon = remember(context) { routeEndDescriptor(context) }
+
+                    // Začátek trasy (zelený kruh)
                     Marker(
-                        state = markerState,
-                        icon = markerDescriptor(context, v.line, v.train, v.delay, iconPhase),
-                        anchor = androidx.compose.ui.geometry.Offset(0.5f, 0.5f),
-                        zIndex = if (iconPhase != 0) 3f else 2f,
-                        onClick = { appState.selectedVehicle = v; true }
+                        state = rememberUpdatedMarkerState(position = startPos),
+                        icon = startIcon,
+                        anchor = Offset(0.5f, 0.5f),
+                        zIndex = 0.5f,
+                        onClick = { true }
+                    )
+
+                    // Konec trasy (červený kruh)
+                    Marker(
+                        state = rememberUpdatedMarkerState(position = endPos),
+                        icon = endIcon,
+                        anchor = Offset(0.5f, 0.5f),
+                        zIndex = 0.5f,
+                        onClick = { true }
                     )
                 }
+                for ((vkey, v) in activeVehicles) {
+                    key(vkey) {
+                        val motion = remember { VehicleMotion(v.lat, v.lng, v.observedAtMs) }
+                        val markerState = remember { MarkerState(LatLng(v.lat, v.lng)) }
+                        val predict = appState.predictVehiclePositions
+
+                        // trasa spoje tohoto vozidla (jen při zapnuté predikci)
+                        var route by remember { mutableStateOf<PathMeasure?>(null) }
+                        val sig = "${v.tid}|${v.cis}|${v.trip}"
+                        LaunchedEffect(sig, predict) {
+                            route = null
+                            if (!predict) return@LaunchedEffect
+                            var tries = 0
+                            while (tries < 4) {
+                                val r = routes.get(v)
+                                if (r != null) { route = r; break }
+                                tries++
+                                delay(20_000)
+                            }
+                        }
+
+                        val lat = v.lat
+                        val lng = v.lng
+                        val obs = v.observedAtMs
+                        LaunchedEffect(lat, lng, route, predict) {
+                            motion.setRoute(if (predict) route else null)
+                            motion.onFix(lat, lng, obs)
+                            motion.animate(markerState, predict)
+                        }
+
+                        val iconPhase = if (target != null && v.uid == target.uid) phase else 0
+                        Marker(
+                            state = markerState,
+                            icon = markerDescriptor(context, v.line, v.train, v.delay, iconPhase),
+                            anchor = Offset(0.5f, 0.5f),
+                            zIndex = if (iconPhase != 0) 3f else 2f,
+                            onClick = { appState.selectedVehicle = v; true }
+                        )
+                    }
+                }
             }
+        } else {
+            MapLibreScreenContent(
+                modifier = Modifier.fillMaxSize(),
+                appState = appState,
+                useDarkMap = useDarkMap,
+                activeVehicles = activeVehicles,
+                primaryColor = MaterialTheme.colorScheme.primary,
+                showFullRoute = showFullRoute,
+                phase = phase,
+                target = target,
+                onMapReady = { maplibreMapRef = it },
+                hasLocationPermission = hasLocationPermission,
+                tertiaryColor = MaterialTheme.colorScheme.tertiary,
+                arrowColor = MaterialTheme.colorScheme.onBackground,
+            )
         }
 
         var showHeldInfo by remember { mutableStateOf(false) }
@@ -424,10 +485,12 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     )
                     if (appState.vehicleSource.isNotBlank()) {
                         Text(
-                            "Zdroj: ${appState.vehicleSource}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if ("zastaralé" in appState.vehicleSource || appState.vehicleSource == SourceLabel.NONE)
-                                MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                            sourceLabelText(
+                                appState.vehicleSource,
+                                normal = MaterialTheme.colorScheme.onSurfaceVariant,
+                                bad = MaterialTheme.colorScheme.error
+                            ),
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
                 }
@@ -492,9 +555,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     LocationServices.getFusedLocationProviderClient(context).lastLocation
                         .addOnSuccessListener { loc ->
                             if (loc != null) scope.launch {
-                                cameraPositionState.animate(
-                                    CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 14f), 700
-                                )
+                                animateCameraTo(LatLng(loc.latitude, loc.longitude), 14f)
                             }
                         }
                 }
@@ -560,27 +621,426 @@ private fun closestPointOnRoute(
     return closest
 }
 
-private const val DARK_NIGHT_MAP_STYLE_JSON = """
-[
-  {"elementType": "geometry", "stylers": [{"color": "#242f3e"}]},
-  {"elementType": "labels.text.fill", "stylers": [{"color": "#746855"}]},
-  {"elementType": "labels.text.stroke", "stylers": [{"color": "#242f3e"}]},
-  {"featureType": "administrative.locality", "elementType": "labels.text.fill", "stylers": [{"color": "#d59563"}]},
-  {"featureType": "poi", "elementType": "labels.text.fill", "stylers": [{"color": "#d59563"}]},
-  {"featureType": "poi.park", "elementType": "geometry", "stylers": [{"color": "#263c3f"}]},
-  {"featureType": "poi.park", "elementType": "labels.text.fill", "stylers": [{"color": "#6b9a76"}]},
-  {"featureType": "road", "elementType": "geometry", "stylers": [{"color": "#38414e"}]},
-  {"featureType": "road", "elementType": "geometry.stroke", "stylers": [{"color": "#212a37"}]},
-  {"featureType": "road", "elementType": "labels.text.fill", "stylers": [{"color": "#9ca5b3"}]},
-  {"featureType": "road.highway", "elementType": "geometry", "stylers": [{"color": "#746855"}]},
-  {"featureType": "road.highway", "elementType": "geometry.stroke", "stylers": [{"color": "#1f2835"}]},
-  {"featureType": "road.highway", "elementType": "labels.text.fill", "stylers": [{"color": "#f3d19c"}]},
-  {"featureType": "transit", "elementType": "geometry", "stylers": [{"color": "#2f3948"}]},
-  {"featureType": "transit.station", "elementType": "labels.text.fill", "stylers": [{"color": "#d59563"}]},
-  {"featureType": "water", "elementType": "geometry", "stylers": [{"color": "#17263c"}]},
-  {"featureType": "water", "elementType": "labels.text.fill", "stylers": [{"color": "#515c6d"}]},
-  {"featureType": "water", "elementType": "labels.text.stroke", "stylers": [{"color": "#17263c"}]}
-]
-"""
 
-private const val LIGHT_MAP_STYLE_JSON = "[]"
+private fun cartoStyleUrl(dark: Boolean): String {
+    val name = if (dark) "dark-matter-gl-style" else "voyager-gl-style"
+    return "https://basemaps.cartocdn.com/gl/$name/style.json?key=${BuildConfig.CARTO_API_KEY}"
+}
+
+
+
+@SuppressLint("MissingPermission")
+@Suppress("DEPRECATION")
+@Composable
+private fun MapLibreScreenContent(
+    modifier: Modifier = Modifier,
+    appState: SpojeAppState,
+    useDarkMap: Boolean,
+    activeVehicles: List<Pair<String, Vehicle>>,
+    primaryColor: Color,
+    showFullRoute: Boolean,
+    phase: Int,
+    target: Vehicle?,
+    hasLocationPermission: Boolean,
+    onMapReady: (MapLibreMap) -> Unit,
+    tertiaryColor: Color,
+    arrowColor: Color,
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    val mapView = remember(context) {
+        MapLibreMapView(context)
+    }
+
+    DisposableEffect(lifecycleOwner, mapView) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_CREATE -> mapView.onCreate(null)
+                Lifecycle.Event.ON_START -> mapView.onStart()
+                Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                Lifecycle.Event.ON_STOP -> mapView.onStop()
+                Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            runCatching { mapView.onDestroy() }
+        }
+    }
+
+    var map by remember { mutableStateOf<MapLibreMap?>(null) }
+    var styleVersion by remember { mutableIntStateOf(0) }
+    var appliedDark by remember { mutableStateOf<Boolean?>(null) }
+
+    // co je aktuálně na mapě (aby se nekreslilo vše znovu)
+    val routeAnnotations = remember { mutableListOf<MapLibreAnnotation>() }
+    val vehicleMarkers = remember { mutableMapOf<String, MapLibreMarker>() }
+    val vehicleLook = remember { mutableMapOf<String, String>() }
+    val latestVehicles by rememberUpdatedState(activeVehicles)
+
+    val density = context.resources.displayMetrics.density
+    var googleZoom by remember { mutableFloatStateOf(appState.mapZoom) }
+    val arrowScale by remember { derivedStateOf { arrowSizeForZoom(googleZoom) } }
+    val arrowSpacing by remember { derivedStateOf { arrowSpacingForZoom(googleZoom) } }
+    val dotBucket by remember { derivedStateOf { (googleZoom * 4f).toInt() } }
+
+    AndroidView(
+        factory = {
+            mapView.apply {
+                getMapAsync { m ->
+                    // kamera hned, ne až po načtení stylu
+                    m.cameraPosition = MapLibreCameraPosition.Builder()
+                        .target(MapLibreLatLng(appState.mapCenter.latitude, appState.mapCenter.longitude))
+                        .zoom(appState.mapZoom.toDouble() - 1.0)
+                        .build()
+                    m.uiSettings.isAttributionEnabled = false
+                    m.uiSettings.isLogoEnabled = false
+                    m.uiSettings.isCompassEnabled = false
+                    m.addOnCameraMoveListener {
+                        m.cameraPosition.target?.let {
+                            appState.mapCenter = LatLng(it.latitude, it.longitude)
+                            val z = m.cameraPosition.zoom.toFloat() + 1f
+                            appState.mapZoom = z
+                            googleZoom = z
+                        }
+                    }
+                    map = m
+                    onMapReady(m)
+                }
+            }
+        },
+        modifier = modifier
+    )
+
+    // styl se nastavuje jen jednou a jen při změně tématu
+    LaunchedEffect(useDarkMap, map) {
+        val m = map ?: return@LaunchedEffect
+        if (appliedDark == useDarkMap) return@LaunchedEffect
+        appliedDark = useDarkMap
+        m.setStyle(Style.Builder().fromUri(cartoStyleUrl(useDarkMap))) { style ->
+            if (useDarkMap) softenDark(style)
+            m.clear()
+            routeAnnotations.clear()
+            vehicleMarkers.clear()
+            vehicleLook.clear()
+            styleVersion++
+        }
+    }
+
+    // modrý bod polohy
+    LaunchedEffect(map, hasLocationPermission, styleVersion) {
+        val m = map ?: return@LaunchedEffect
+        val style = m.style ?: return@LaunchedEffect
+        if (!hasLocationPermission || !style.isFullyLoaded) return@LaunchedEffect
+        runCatching {
+            m.locationComponent.apply {
+                activateLocationComponent(
+                    LocationComponentActivationOptions.builder(context, style).build()
+                )
+                isLocationComponentEnabled = true
+                cameraMode = CameraMode.NONE
+                renderMode = RenderMode.COMPASS
+            }
+        }
+    }
+
+    val primaryColorArgb = primaryColor.toArgb()
+    val tertiaryArgb = tertiaryColor.toArgb()
+    val arrowArgb = arrowColor.toArgb()
+    val walk = appState.walkRoute
+    val tripRoute = appState.tripRoute
+    val fullRoute = appState.fullRoute
+
+    // TRASY
+    LaunchedEffect(map, tripRoute, fullRoute, walk, showFullRoute, primaryColorArgb, tertiaryArgb, arrowArgb, arrowScale, arrowSpacing, dotBucket, styleVersion) {
+        val m = map ?: return@LaunchedEffect
+        val style = m.style ?: return@LaunchedEffect
+        if (!style.isFullyLoaded) return@LaunchedEffect
+
+        routeAnnotations.forEach { m.removeAnnotation(it) }
+        routeAnnotations.clear()
+        removeRouteLayers(style)
+
+        if (tripRoute.size >= 2) {
+            val line = if (showFullRoute && fullRoute.size >= 2) fullRoute else tripRoute
+
+            // hlavní trasa
+            style.addSource(GeoJsonSource("route-src", line.toLineString()))
+            addBelowMarkers(
+                style,
+                LineLayer("route-line", "route-src").withProperties(
+                    PropertyFactory.lineColor(primaryColorArgb),
+                    PropertyFactory.lineWidth(12f / density),
+                    PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                    PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
+                )
+            )
+
+            // pěší trasa: tečky (Google: Dot 14 px + Gap 14 px => perioda 28 px fyzických)
+            if (walk != null && walk.points.size >= 2) {
+                val pts = walk.points.map { LatLng(it.first, it.second) }
+                val zoom = dotBucket / 4f
+                val mpp = metersPerPixel(zoom, pts.first().latitude)      // metry na dp
+                val totalMeters = routeLength(pts)
+
+                val wantedDp = 28f / density                              // rozestup jako u Google
+                val minDots = 14
+                // rozestup se zmenší, pokud by tečky nevyšly aspoň minDots
+                val spacingDp = minOf(wantedDp.toDouble(), totalMeters / mpp / minDots).coerceAtLeast(3.0)
+                val ratio = (spacingDp / wantedDp).coerceIn(0.0, 1.0).toFloat()
+                val dotDp = (14f / density) * ratio.coerceAtLeast(0.35f)  // tečky se zmenší spolu s rozestupem
+
+                val dots = dotsAlong(pts, spacingDp * mpp)
+                if (dots.isNotEmpty()) {
+                    val features = dots.map { Feature.fromGeometry(Point.fromLngLat(it.longitude, it.latitude)) }
+                    style.addSource(GeoJsonSource("walk-src", FeatureCollection.fromFeatures(features)))
+                    style.addImage("walk-dot", walkDotBitmap(tertiaryArgb))
+                    addBelowMarkers(
+                        style,
+                        SymbolLayer("walk-dots", "walk-src").withProperties(
+                            PropertyFactory.iconImage("walk-dot"),
+                            PropertyFactory.iconSize(dotDp / 32f),
+                            PropertyFactory.iconAllowOverlap(true),
+                            PropertyFactory.iconIgnorePlacement(true)
+                        )
+                    )
+                }
+            }
+
+            // šipky
+            val arrows = createRouteArrows(route = tripRoute, spacingMeters = arrowSpacing)
+            if (arrows.isNotEmpty()) {
+                val features = arrows.map { a ->
+                    Feature.fromGeometry(Point.fromLngLat(a.position.longitude, a.position.latitude)).also {
+                        it.addNumberProperty("bearing", a.bearing)
+                    }
+                }
+                style.addSource(GeoJsonSource("arrows-src", FeatureCollection.fromFeatures(features)))
+                style.addImage("route-arrow", routeArrowBitmap(arrowArgb))
+                val iconPx = (96f * arrowScale).coerceAtLeast(18f)
+                addBelowMarkers(
+                    style,
+                    SymbolLayer("route-arrows", "arrows-src").withProperties(
+                        PropertyFactory.iconImage("route-arrow"),
+                        PropertyFactory.iconSize(iconPx / 96f / density),
+                        PropertyFactory.iconRotate(Expression.get("bearing")),
+                        PropertyFactory.iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+                        PropertyFactory.iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_MAP),
+                        PropertyFactory.iconAllowOverlap(true),
+                        PropertyFactory.iconIgnorePlacement(true)
+                    )
+                )
+            }
+
+            // začátek a konec jako vrstva (pod autobusy)
+            val s = line.first()
+            val e = line.last()
+            val ends = FeatureCollection.fromFeatures(
+                listOf(
+                    Feature.fromGeometry(Point.fromLngLat(s.longitude, s.latitude)).also { it.addStringProperty("img", "route-start") },
+                    Feature.fromGeometry(Point.fromLngLat(e.longitude, e.latitude)).also { it.addStringProperty("img", "route-end") }
+                )
+            )
+            style.addSource(GeoJsonSource("ends-src", ends))
+            style.addImage("route-start", routeStartBitmap(context))
+            style.addImage("route-end", routeEndBitmap(context))
+            addBelowMarkers(
+                style,
+                SymbolLayer("route-ends", "ends-src").withProperties(
+                    PropertyFactory.iconImage(Expression.get("img")),
+                    PropertyFactory.iconAllowOverlap(true),
+                    PropertyFactory.iconIgnorePlacement(true)
+                )
+            )
+        }
+    }
+
+    // VOZIDLA: jen přesun existujících markerů, nový icon jen když se změnil vzhled
+    LaunchedEffect(map, activeVehicles, phase, target, styleVersion) {
+        val m = map ?: return@LaunchedEffect
+        if (m.style == null) return@LaunchedEffect
+        val iconFactory = IconFactory.getInstance(context)
+        val wanted = activeVehicles.toMap()
+
+        (vehicleMarkers.keys - wanted.keys).toList().forEach { k ->
+            vehicleMarkers.remove(k)?.let { m.removeMarker(it) }
+            vehicleLook.remove(k)
+        }
+
+        for ((k, v) in wanted) {
+            val iconPhase = if (target != null && v.uid == target.uid) phase else 0
+            val look = "${v.line}|${v.train}|${v.delay}|$iconPhase"
+            val pos = MapLibreLatLng(v.lat, v.lng)
+            val existing = vehicleMarkers[k]
+            if (existing == null) {
+                vehicleMarkers[k] = m.addMarker(
+                    MarkerOptions()
+                        .position(pos)
+                        .icon(iconFactory.fromBitmap(markerBitmap(context, v.line, v.train, v.delay, iconPhase)))
+                )
+                vehicleLook[k] = look
+            } else {
+                existing.position = pos
+                existing.title = v.uid
+                if (vehicleLook[k] != look) {
+                    existing.icon = iconFactory.fromBitmap(markerBitmap(context, v.line, v.train, v.delay, iconPhase))
+                    vehicleLook[k] = look
+                }
+            }
+        }
+
+        m.setOnMarkerClickListener { marker ->
+            val key = vehicleMarkers.entries.firstOrNull { it.value == marker }?.key
+            val v = key?.let { k -> latestVehicles.firstOrNull { it.first == k }?.second }
+            if (v != null) appState.selectedVehicle = v
+            true // vždy true, jinak MapLibre ukáže info okno s titlem
+        }
+    }
+}
+
+private fun softenDark(style: Style) {
+    style.layers.forEach { layer ->
+        val id = layer.id
+        when {
+            layer is BackgroundLayer ->
+                layer.setProperties(PropertyFactory.backgroundColor("#2a2f3a"))
+            layer is FillLayer && id.contains("water") ->
+                layer.setProperties(PropertyFactory.fillColor("#1d3144"))
+            layer is FillLayer && (id.contains("landcover") || id.contains("landuse")) ->
+                layer.setProperties(PropertyFactory.fillColor("#323845"))
+            layer is FillLayer && id.contains("building") ->
+                layer.setProperties(PropertyFactory.fillColor("#3a4150"))
+            layer is LineLayer && id.contains("road") && !id.contains("casing") ->
+                layer.setProperties(PropertyFactory.lineColor("#5b6475"))
+        }
+    }
+}
+
+private fun routeArrowBitmap(color: Int): Bitmap {
+    val size = 96
+    val bitmap = createBitmap(size, size)
+    bitmap.density = android.util.DisplayMetrics.DENSITY_DEFAULT
+    val canvas = Canvas(bitmap)
+    canvas.scale(size / 72f, size / 72f)
+
+    val path = Path().apply {
+        moveTo(13f, 43f)
+        lineTo(36f, 15f)
+        lineTo(59f, 43f)
+    }
+    canvas.drawPath(path, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = android.graphics.Color.BLACK
+        style = Paint.Style.STROKE
+        strokeWidth = 18f
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+    })
+    canvas.drawPath(path, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = color
+        style = Paint.Style.STROKE
+        strokeWidth = 11f
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+    })
+    return bitmap
+}
+
+private fun walkDotBitmap(color: Int): Bitmap {
+    val size = 32
+    val bitmap = createBitmap(size, size)
+    bitmap.density = android.util.DisplayMetrics.DENSITY_DEFAULT
+    Canvas(bitmap).drawCircle(
+        size / 2f, size / 2f, size / 2f - 1f,
+        Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.FILL }
+    )
+    return bitmap
+}
+
+private fun removeRouteLayers(style: Style) {
+    listOf("route-ends", "route-arrows", "walk-dots", "route-line").forEach { style.removeLayer(it) }
+    listOf("ends-src", "arrows-src", "walk-src", "route-src").forEach { style.removeSource(it) }
+    listOf("route-arrow", "walk-dot", "route-start", "route-end").forEach { style.removeImage(it) }
+}
+
+// vrstvy trasy vždy POD legacy markery (vozidla), jejichž vrstva je "com.mapbox.annotations.points"
+private fun addBelowMarkers(style: Style, layer: Layer) {
+    val ref = style.layers.firstOrNull { it.id.contains("annotation", ignoreCase = true) }?.id
+    if (ref != null) style.addLayerBelow(layer, ref) else style.addLayer(layer)
+}
+
+private fun metersPerPixel(zoom: Float, lat: Double): Double =
+    156543.03392 * Math.cos(Math.toRadians(lat)) / Math.pow(2.0, zoom.toDouble())
+
+private fun dotsAlong(route: List<LatLng>, spacing: Double): List<LatLng> {
+    val out = mutableListOf<LatLng>()
+    if (route.size < 2 || spacing <= 0.0) return out
+    var travelled = 0.0
+    var next = spacing / 2
+    for (i in 0 until route.lastIndex) {
+        val a = route[i]
+        val b = route[i + 1]
+        val dx = (b.longitude - a.longitude) * Math.cos(Math.toRadians(a.latitude)) * 111_320.0
+        val dy = (b.latitude - a.latitude) * 110_540.0
+        val len = Math.hypot(dx, dy)
+        if (len <= 0.0) continue
+        while (next <= travelled + len) {
+            val t = (next - travelled) / len
+            out += LatLng(
+                a.latitude + (b.latitude - a.latitude) * t,
+                a.longitude + (b.longitude - a.longitude) * t
+            )
+            next += spacing
+            if (out.size > 4000) return out
+        }
+        travelled += len
+    }
+    return out
+}
+
+private fun routeLength(route: List<LatLng>): Double {
+    var sum = 0.0
+    for (i in 0 until route.lastIndex) {
+        val a = route[i]; val b = route[i + 1]
+        val dx = (b.longitude - a.longitude) * Math.cos(Math.toRadians(a.latitude)) * 111_320.0
+        val dy = (b.latitude - a.latitude) * 110_540.0
+        sum += Math.hypot(dx, dy)
+    }
+    return sum
+}
+
+private fun List<LatLng>.toLineString() =
+    LineString.fromLngLats(map { Point.fromLngLat(it.longitude, it.latitude) })
+
+
+private fun splitSources(label: String): List<String> {
+    val parts = mutableListOf<String>()
+    val sb = StringBuilder()
+    var depth = 0
+    for (ch in label) {
+        when {
+            ch == '(' -> { depth++; sb.append(ch) }
+            ch == ')' -> { depth = (depth - 1).coerceAtLeast(0); sb.append(ch) }
+            ch == ',' && depth == 0 -> { parts += sb.toString().trim(); sb.clear() }
+            else -> sb.append(ch)
+        }
+    }
+    if (sb.isNotBlank()) parts += sb.toString().trim()
+    return parts.filter { it.isNotEmpty() }
+}
+
+private fun sourceLabelText(label: String, normal: Color, bad: Color) = buildAnnotatedString {
+    withStyle(SpanStyle(color = normal)) { append("Zdroj: ") }
+    if (label == SourceLabel.NONE) {
+        withStyle(SpanStyle(color = bad)) { append(label) }
+        return@buildAnnotatedString
+    }
+    splitSources(label).forEachIndexed { i, part ->
+        if (i > 0) withStyle(SpanStyle(color = normal)) { append(", ") }
+        val stale = "zastaral" in part.lowercase()
+        withStyle(SpanStyle(color = if (stale) bad else normal)) { append(part) }
+    }
+}
