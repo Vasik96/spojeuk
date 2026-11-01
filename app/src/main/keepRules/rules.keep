@@ -10,3 +10,14 @@
 #-keepclassmembers class fqcn.of.javascript.interface.for.webview {
 #   public *;
 #}
+
+-keepclasseswithmembers class org.maplibre.android.** {
+    native <methods>;
+}
+-keep class org.maplibre.android.maps.renderer.** { *; }
+-keep class org.maplibre.android.http.** { *; }
+-keep class org.maplibre.android.offline.** { *; }
+-keep class org.maplibre.android.storage.** { *; }
+-keep class org.maplibre.android.style.sources.** { *; }
+-keep class org.maplibre.geojson.** { *; }
+-dontwarn org.maplibre.**

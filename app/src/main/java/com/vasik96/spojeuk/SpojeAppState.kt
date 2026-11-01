@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.core.content.edit
 
 internal val UstiCenter = LatLng(50.6606, 14.0323)
 
@@ -39,6 +40,18 @@ enum class AppTheme(val label: String) {
     SYSTEM("Podle systému"),
     LIGHT("Světlý"),
     DARK("Tmavý")
+}
+
+enum class MapTheme(val label: String) {
+    APP("Podle motivu aplikace"),
+    LIGHT("Světlá"),
+    DARK("Tmavá")
+}
+
+enum class MapProvider(val label: String) {
+    MAPLIBRE("MapLibre (OpenStreetMap)"),
+    GOOGLE("Google Maps")
+
 }
 
 enum class SettingsSubscreen {
@@ -140,7 +153,26 @@ class SpojeAppState(
 
     fun updateAppTheme(theme: AppTheme) {
         appTheme = theme
-        settingsPrefs.edit().putString("app_theme", theme.name).apply()
+        settingsPrefs.edit { putString("app_theme", theme.name) }
+    }
+
+    var mapTheme by mutableStateOf(
+        runCatching { MapTheme.valueOf(settingsPrefs.getString("map_theme", "APP") ?: "APP") }
+            .getOrDefault(MapTheme.APP)
+    )
+
+    fun updateMapTheme(theme: MapTheme) {
+        mapTheme = theme
+        settingsPrefs.edit { putString("map_theme", theme.name) }
+    }
+
+    var mapProvider by mutableStateOf(
+        runCatching { MapProvider.valueOf(settingsPrefs.getString("map_provider", "MAPLIBRE") ?: "MAPLIBRE") }.getOrDefault(MapProvider.MAPLIBRE)
+    )
+
+    fun updateMapProvider(provider: MapProvider) {
+        mapProvider = provider
+        settingsPrefs.edit { putString("map_provider", provider.name) }
     }
 
     var focusedTripVehicle by mutableStateOf<Vehicle?>(null)

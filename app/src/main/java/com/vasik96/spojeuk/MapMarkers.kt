@@ -25,6 +25,9 @@ internal fun markerDescriptor(ctx: Context, line: String, train: Boolean, delay:
         )
     }
 
+internal fun markerBitmap(ctx: Context, line: String, train: Boolean, delay: Int, phase: Int): Bitmap =
+    createLineMarkerDrawable(ctx, line, train, delay, phase).bitmap
+
 /** phase: 0 = normální, 1 = zvýraznění A (žlutá, velká), 2 = zvýraznění B (oranžová, menší). */
 private fun createLineMarkerDrawable(
     context: Context, line: String, isTrain: Boolean, delay: Int, phase: Int
@@ -229,10 +232,19 @@ internal fun createRouteArrows(route: List<LatLng>, spacingMeters: Float = 300f)
 private var startDesc: BitmapDescriptor? = null
 private var endDesc: BitmapDescriptor? = null
 private var stopDesc: BitmapDescriptor? = null
+private var cachedStartBitmap: Bitmap? = null
+private var cachedEndBitmap: Bitmap? = null
 
 /** Kruh pro začátek trasy (zelený s bílým okrajem a bodem). */
 internal fun routeStartDescriptor(ctx: Context): BitmapDescriptor {
     startDesc?.let { return it }
+    val desc = BitmapDescriptorFactory.fromBitmap(routeStartBitmap(ctx))
+    startDesc = desc
+    return desc
+}
+
+internal fun routeStartBitmap(ctx: Context): Bitmap {
+    cachedStartBitmap?.let { return it }
     val density = ctx.resources.displayMetrics.density
     val sizePx = (24 * density).toInt()
     val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
@@ -268,14 +280,20 @@ internal fun routeStartDescriptor(ctx: Context): BitmapDescriptor {
     }
     canvas.drawCircle(center, center, 3.5f * density, dotPaint)
 
-    val desc = BitmapDescriptorFactory.fromBitmap(bitmap)
-    startDesc = desc
-    return desc
+    cachedStartBitmap = bitmap
+    return bitmap
 }
 
 /** Kruh pro konec trasy (červený s bílým okrajem a bodem). */
 internal fun routeEndDescriptor(ctx: Context): BitmapDescriptor {
     endDesc?.let { return it }
+    val desc = BitmapDescriptorFactory.fromBitmap(routeEndBitmap(ctx))
+    endDesc = desc
+    return desc
+}
+
+internal fun routeEndBitmap(ctx: Context): Bitmap {
+    cachedEndBitmap?.let { return it }
     val density = ctx.resources.displayMetrics.density
     val sizePx = (24 * density).toInt()
     val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
@@ -311,9 +329,8 @@ internal fun routeEndDescriptor(ctx: Context): BitmapDescriptor {
     }
     canvas.drawCircle(center, center, 3.5f * density, dotPaint)
 
-    val desc = BitmapDescriptorFactory.fromBitmap(bitmap)
-    endDesc = desc
-    return desc
+    cachedEndBitmap = bitmap
+    return bitmap
 }
 
 /** Kruh pro mezilehlé zastávky na trase (bílý s modrým okrajem a bodem). */

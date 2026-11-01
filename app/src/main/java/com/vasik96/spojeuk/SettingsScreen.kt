@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -124,6 +125,8 @@ private fun SettingsMain(
 ) {
     val scope = rememberCoroutineScope()
     var showThemeDialog by remember { mutableStateOf(false) }
+    var showMapProviderDialog by remember { mutableStateOf(false) }
+    var showMapThemeDialog by remember { mutableStateOf(false) }
 
     if (showThemeDialog) {
         AlertDialog(
@@ -168,6 +171,93 @@ private fun SettingsMain(
         )
     }
 
+    if (showMapProviderDialog) {
+        AlertDialog(
+            onDismissRequest = { showMapProviderDialog = false },
+            icon = {
+                Icon(Icons.Default.Map, contentDescription = null)
+            },
+            title = {
+                Text("Poskytovatel mapy")
+            },
+            text = {
+                Column {
+                    MapProvider.entries.forEach { provider ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = (appState.mapProvider == provider),
+                                    onClick = {
+                                        appState.updateMapProvider(provider)
+                                        showMapProviderDialog = false
+                                    },
+                                    role = Role.RadioButton
+                                )
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = (appState.mapProvider == provider),
+                                onClick = null
+                            )
+
+                            Spacer(Modifier.width(12.dp))
+
+                            Text(
+                                text = provider.label,
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { showMapProviderDialog = false }
+                ) {
+                    Text("Zavřít")
+                }
+            }
+        )
+    }
+
+    if (showMapThemeDialog) {
+        AlertDialog(
+            onDismissRequest = { showMapThemeDialog = false },
+            icon = { Icon(Icons.Default.Palette, contentDescription = null) },
+            title = { Text("Motiv mapy") },
+            text = {
+                Column {
+                    MapTheme.entries.forEach { theme ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = (appState.mapTheme == theme),
+                                    onClick = {
+                                        appState.updateMapTheme(theme)
+                                        showMapThemeDialog = false
+                                    },
+                                    role = Role.RadioButton
+                                )
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = (appState.mapTheme == theme), onClick = null)
+                            Spacer(Modifier.width(12.dp))
+                            Text(theme.label, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showMapThemeDialog = false }) { Text("Zavřít") }
+            }
+        )
+    }
+
+
     Column(
         modifier = modifier
             .verticalScroll(rememberScrollState())
@@ -189,7 +279,7 @@ private fun SettingsMain(
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Icon(
-                    imageVector = Icons.Default.Palette,
+                    imageVector = Icons.Default.DarkMode,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary
                 )
@@ -208,6 +298,74 @@ private fun SettingsMain(
                 }
             }
         }
+
+        // 2. motiv mapy
+        OutlinedCard(
+            onClick = { showMapThemeDialog = true },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Palette,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Motiv mapy",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        appState.mapTheme.label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        // 3. Poskytovatel mapy (Dialog)
+        OutlinedCard(
+            onClick = { showMapProviderDialog = true },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Map,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Poskytovatel mapy",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        appState.mapProvider.label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+
 
         val checked = appState.hideOtherVehiclesOnMap
 
