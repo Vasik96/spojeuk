@@ -1223,6 +1223,40 @@ private fun JourneyCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant
                         )
+
+                        // zpoždění:
+                        if (j.realtime && j.delay > 0) {
+                            val (bg, fg, label) = when {
+                                j.delay > 3 -> Triple(
+                                    colors.errorContainer,
+                                    colors.onErrorContainer,
+                                    "Zpoždění ${j.delay} min"
+                                )
+                                else -> Triple(
+                                    colors.tertiaryContainer,
+                                    colors.onTertiaryContainer,
+                                    "Zpoždění ${j.delay} min"
+                                )
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = bg,
+                                contentColor = fg
+                            ) {
+                                Text(
+                                    label,
+                                    modifier = Modifier.padding(
+                                        horizontal = 9.dp,
+                                        vertical = 4.dp
+                                    ),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+
+
                     }
                 }
 
@@ -1288,44 +1322,6 @@ private fun JourneyCard(
                             ),
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                if (j.realtime) {
-                    val (bg, fg, label) = when {
-                        j.delay > 3 -> Triple(
-                            colors.errorContainer,
-                            colors.onErrorContainer,
-                            "Zpoždění ${j.delay} min"
-                        )
-
-                        j.delay > 0 -> Triple(
-                            colors.tertiaryContainer,
-                            colors.onTertiaryContainer,
-                            "Zpoždění ${j.delay} min"
-                        )
-
-                        else -> Triple(
-                            colors.secondaryContainer,
-                            colors.onSecondaryContainer,
-                            "Bez zpoždění"
-                        )
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = bg,
-                        contentColor = fg
-                    ) {
-                        Text(
-                            label,
-                            modifier = Modifier.padding(
-                                horizontal = 9.dp,
-                                vertical = 4.dp
-                            ),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Medium
                         )
                     }
                 }

@@ -541,7 +541,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     appState.focusTrip = null
                     appState.walkRoute = null
                 },
-                modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 52.dp)
+                modifier = Modifier.align(Alignment.BottomStart).padding(start = 18.dp, bottom = 18.dp)
             ) { Icon(Icons.Default.Close, contentDescription = "Skrýt trasu") }
         }
 
