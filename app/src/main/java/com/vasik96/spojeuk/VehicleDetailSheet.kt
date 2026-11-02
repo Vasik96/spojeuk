@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Accessible
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.Accessible
 import androidx.compose.material.icons.filled.DirectionsBus
@@ -195,7 +196,7 @@ internal fun VehicleDetailBottomSheet(
             }
 
             if (vehicle.agency.isNotBlank()) {
-                Text("Dopravce: ${vehicle.agency}", style = MaterialTheme.typography.bodyMedium)
+                Text("Dopravce: ${cleanAgencyName(vehicle.agency)}", style = MaterialTheme.typography.bodyMedium)
             }
 
             if (vehicle.airConditioned == true || vehicle.accessible == true) {
@@ -204,7 +205,7 @@ internal fun VehicleDetailBottomSheet(
                         FeatureChip(Icons.Default.AcUnit, "Klimatizace")
                     }
                     if (vehicle.accessible == true) {
-                        FeatureChip(Icons.Default.Accessible, "Bezbariérový")
+                        FeatureChip(Icons.AutoMirrored.Filled.Accessible, "Bezbariérový")
                     }
                 }
             }

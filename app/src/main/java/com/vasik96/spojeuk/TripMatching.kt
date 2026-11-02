@@ -34,6 +34,11 @@ object TripEnricher {
         var out = v.copy(tid = m.tid, tripMatch = if (m.exact) TripMatch.EXACT else TripMatch.HEURISTIC)
         if (!m.exact) out = out.copy(cis = trip.cis.ifBlank { v.cis }, trip = trip.num.ifBlank { v.trip })
         if (source.adoptsTimetableLine && trip.line.isNotBlank() && trip.line != "?") out = out.copy(line = trip.line)
+
+        if (v.agency.isBlank() && trip.agency.isNotBlank()) {
+            out = out.copy(agency = trip.agency)
+        }
+
         return out
     }
 }
