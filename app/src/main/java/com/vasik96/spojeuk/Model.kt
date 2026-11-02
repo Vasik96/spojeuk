@@ -142,12 +142,12 @@ data class Vehicle(
     fun ageSec(nowMs: Long = System.currentTimeMillis()): Long = maxOf(0L, (nowMs - observedAtMs) / 1000)
 }
 
-/** Vrací základní číslo ústeckého vozu bez předpony '3' a nul (např. 300451 -> 451, 301212 -> 1212, 451 -> 451). */
+/** Vrací základní číslo ústeckého vozu bez předpony '30' a nul (např. 300451 -> 451, 301212 -> 1212, 451 -> 451). */
 fun baseVehicleId(id: Int): Int {
     if (id <= 0) return 0
     val s = id.toString()
     if (s.length >= 4 && s[0] == '3' && s[1] == '0') {
-        val rest = s.substring(1).dropWhile { it == '0' }
+        val rest = s.substring(2).dropWhile { it == '0' } // substring(2): 3 -> 30
         if (rest.isNotEmpty()) {
             val base = rest.toIntOrNull()
             if (base != null && base > 0) return base
@@ -156,7 +156,7 @@ fun baseVehicleId(id: Int): Int {
     return id
 }
 
-/** Porovná dvě ID vozidel s ohledem na možný kód ústeckého regionu DÚK (předpona 3). */
+/** Porovná dvě ID vozidel s ohledem na možný kód ústeckého MHD DÚK (předpona 30). */
 fun sameVehicleId(id1: Int, id2: Int): Boolean {
     if (id1 <= 0 || id2 <= 0) return false
     if (id1 == id2) return true
