@@ -44,6 +44,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -54,8 +55,11 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.time.Duration.Companion.milliseconds
 
 
@@ -97,6 +101,22 @@ internal fun SpojeApp() {
             appState.stopsLoading = false
         }
     }
+
+    val autoUpdate = remember { AutoUpdatePolicy(context) }
+
+    LaunchedEffect(Unit) {
+        // počkat, až doběhne první načtení zastávek (jinak by se dvě stažení pralo)
+        snapshotFlow { appState.stopsLoading to appState.stops.isNotEmpty() }
+            .first { (loading, hasStops) -> !loading && hasStops }
+
+        if (autoUpdate.isDue() && autoUpdate.isOnUnmeteredNetwork()) {
+            // NonCancellable: blokující import se stejně nedá přerušit, a po otočení/zavření
+            // by se jinak nezapsal čas úspěchu a stahovalo by se znovu
+            val ok = withContext(NonCancellable) { api.autoUpdate() }
+            if (ok) autoUpdate.lastSuccessMs = System.currentTimeMillis()
+        }
+    }
+
 
     // mapa se vytvoří až při první návštěvě a pak zůstane naživu
     var mapVisited by remember { mutableStateOf(false) }

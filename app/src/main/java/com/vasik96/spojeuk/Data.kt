@@ -3,14 +3,16 @@ package com.vasik96.spojeuk
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteStatement
 import java.io.BufferedInputStream
+import java.io.Closeable
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
-import java.util.zip.ZipInputStream
+import java.util.zip.ZipFile
 
 // Import statických jízdních řádů: stažený tar → gtfs.zip → SQLite (static.sqlite).
-// Konstanty (BBOX_LAT, ...) jsou v Config.kt, pomocné funkce (parseTsec, intArrayToBytes, nowPrague) v Util.kt.
+// Konstanty (BBOX_LAT, ...) jsou v Config.kt, pomocné funkce (intArrayToBytes, nowPrague) v Util.kt.
+// parseTsec už se nepoužívá, časy se parsují přímo z bajtů (parseTimeSec níže).
 
 // ───────────────────────── Tar ─────────────────────────
 
@@ -65,78 +67,277 @@ object TarUtils {
     }
 }
 
+// ───────────────────────── Rychlé CSV (bez alokací na řádek) ─────────────────────────
+
+private const val NL: Byte = 10
+private const val CR: Byte = 13
+private const val COMMA: Byte = 44
+private const val QUOTE: Byte = 34
+
+private val WS = Regex("\\s+")
+
+/** Soubory z GTFS, které opravdu potřebujeme (shapes.txt apod. se vůbec nerozbalují). */
+private val NEEDED_FILES = setOf(
+    "stops.txt", "agency.txt", "routes.txt", "trips.txt",
+    "stop_times.txt", "calendar.txt", "calendar_dates.txt"
+)
+
+/** Čte soubor po řádcích přímo z bajtů; žádný String na řádek. */
+private class ByteLineReader(file: File, bufSize: Int = 1 shl 18) : Closeable {
+    private val input = FileInputStream(file)
+    var buf = ByteArray(bufSize)
+        private set
+    private var pos = 0
+    private var end = 0
+    private var eof = false
+    var lineStart = 0
+        private set
+    var lineEnd = 0
+        private set
+    var bytesRead = 0L
+        private set
+
+    fun next(): Boolean {
+        while (true) {
+            var i = pos
+            while (i < end && buf[i] != NL) i++
+            if (i < end) {
+                lineStart = pos
+                lineEnd = if (i > pos && buf[i - 1] == CR) i - 1 else i
+                pos = i + 1
+                return true
+            }
+            if (eof) {
+                if (pos < end) {
+                    lineStart = pos
+                    lineEnd = if (end > pos && buf[end - 1] == CR) end - 1 else end
+                    pos = end
+                    return true
+                }
+                return false
+            }
+            if (pos > 0) {
+                System.arraycopy(buf, pos, buf, 0, end - pos)
+                end -= pos
+                pos = 0
+            } else if (end == buf.size) {
+                buf = buf.copyOf(buf.size * 2)
+            }
+            val r = input.read(buf, end, buf.size - end)
+            if (r < 0) eof = true else { end += r; bytesRead += r }
+        }
+    }
+
+    override fun close() = input.close()
+}
+
+/**
+ * Najde požadované sloupce podle hlavičky a pro každý řádek jen vyplní offsety (fs/fe) do bufferu.
+ * Řetězce se vytvářejí jen na požádání přes [str].
+ */
+private class CsvScanner(file: File, private val wanted: Array<String>) : Closeable {
+    private val rd = ByteLineReader(file)
+    private val idx = IntArray(wanted.size) { -1 }
+    private var maxCol = -1
+    private var cs = IntArray(0)
+    private var ce = IntArray(0)
+    private var valid = false
+    val fs = IntArray(wanted.size)
+    val fe = IntArray(wanted.size)
+
+    val buf: ByteArray get() = rd.buf
+    val bytesRead: Long get() = rd.bytesRead
+
+    init {
+        if (rd.next()) {
+            var header = String(rd.buf, rd.lineStart, rd.lineEnd - rd.lineStart, Charsets.UTF_8)
+            if (header.startsWith("\uFEFF")) header = header.substring(1)
+            val names = header.split(',').map { it.trim().trim('"') }
+            for (k in wanted.indices) idx[k] = names.indexOf(wanted[k])
+            maxCol = idx.maxOrNull() ?: -1
+            cs = IntArray(maxCol + 1)
+            ce = IntArray(maxCol + 1)
+            valid = maxCol >= 0
+        }
+    }
+
+    fun has(k: Int) = idx[k] >= 0
+
+    fun nextRow(): Boolean {
+        if (!valid) return false
+        while (true) {
+            if (!rd.next()) return false
+            val ls = rd.lineStart
+            val le = rd.lineEnd
+            if (le <= ls) continue
+            val b = rd.buf
+
+            var p = ls
+            var col = 0
+            while (col <= maxCol && p <= le) {
+                if (p < le && b[p] == QUOTE) {
+                    val s = p + 1
+                    var q = s
+                    while (q < le) {
+                        if (b[q] == QUOTE) {
+                            if (q + 1 < le && b[q + 1] == QUOTE) q += 2 else break
+                        } else q++
+                    }
+                    cs[col] = s; ce[col] = q
+                    var c = q + 1
+                    while (c < le && b[c] != COMMA) c++
+                    p = c + 1
+                } else {
+                    var c = p
+                    while (c < le && b[c] != COMMA) c++
+                    cs[col] = p; ce[col] = c
+                    p = c + 1
+                }
+                col++
+            }
+            while (col <= maxCol) { cs[col] = 0; ce[col] = 0; col++ }
+
+            for (k in wanted.indices) {
+                val i = idx[k]
+                if (i < 0) { fs[k] = 0; fe[k] = 0 } else { fs[k] = cs[i]; fe[k] = ce[i] }
+            }
+            return true
+        }
+    }
+
+    fun str(k: Int): String {
+        val s = fs[k]
+        val e = fe[k]
+        if (e <= s) return ""
+        val r = String(rd.buf, s, e - s, Charsets.UTF_8)
+        return if (r.indexOf('"') >= 0) r.replace("\"\"", "\"") else r
+    }
+
+    fun strOr(k: Int, default: String): String = if (has(k)) str(k) else default
+
+    override fun close() = rd.close()
+}
+
+private inline fun readCsv(file: File, wanted: Array<String>, block: (CsvScanner) -> Unit) {
+    if (!file.exists()) return
+    CsvScanner(file, wanted).use { sc ->
+        while (sc.nextRow()) block(sc)
+    }
+}
+
+/** "HH:MM:SS" (HH i >24) → sekundy; -1 když chybí/je neplatné. */
+private fun parseTimeSec(b: ByteArray, s: Int, e: Int): Int {
+    var total = 0
+    var cur = 0
+    var digits = 0
+    var colons = 0
+    var i = s
+    while (i < e) {
+        val c = b[i].toInt()
+        when {
+            c in 48..57 -> { cur = cur * 10 + (c - 48); digits++ }
+            c == 58 -> {
+                if (digits == 0) return -1
+                total = total * 60 + cur
+                cur = 0; digits = 0; colons++
+            }
+            c == 32 -> {}
+            else -> return -1
+        }
+        i++
+    }
+    if (digits == 0 || colons == 0) return -1
+    total = total * 60 + cur
+    return if (colons == 1) total * 60 else total
+}
+
+private fun parseIntBytes(b: ByteArray, s: Int, e: Int): Int {
+    var i = s
+    var neg = false
+    if (i < e && b[i] == 45.toByte()) { neg = true; i++ }
+    var r = 0
+    while (i < e) {
+        val d = b[i] - 48
+        if (d < 0 || d > 9) return 0
+        r = r * 10 + d
+        i++
+    }
+    return if (neg) -r else r
+}
+
+/** Growable primitive buffery pro jeden trip (žádný boxing, žádný objekt na řádek). */
+private class TripBuffer {
+    var n = 0
+    var hasRegion = false
+    var code = IntArray(64)
+    var seq = IntArray(64)
+    var arr = IntArray(64)
+    var dep = IntArray(64)
+
+    fun add(c: Int, s: Int, a: Int, d: Int) {
+        if (n == code.size) {
+            val m = n * 2
+            code = code.copyOf(m); seq = seq.copyOf(m); arr = arr.copyOf(m); dep = dep.copyOf(m)
+        }
+        code[n] = c; seq[n] = s; arr[n] = a; dep[n] = d
+        n++
+    }
+
+    fun clear() { n = 0; hasRegion = false }
+}
+
+/** Mapuje stop_id → malé int "code" (pro rychlé porovnávání) a code → ID v DB. */
+private class StopInterner(private val region: Set<String>, expected: Int) {
+    private val map = HashMap<String, Int>(expected * 2 + 16)
+    val names = ArrayList<String>()
+    var isRegion = BooleanArray(expected + 16)
+        private set
+    private var dbId = IntArray(expected + 16)
+    val order = ArrayList<Int>()      // pořadí přidělení DB ID (dbId = index + 1)
+
+    fun code(name: String): Int {
+        val existing = map[name]
+        if (existing != null) return existing
+        val c = names.size
+        names.add(name)
+        map[name] = c
+        if (c >= isRegion.size) {
+            isRegion = isRegion.copyOf(c * 2)
+            dbId = dbId.copyOf(c * 2)
+        }
+        isRegion[c] = name in region
+        return c
+    }
+
+    fun dbIdFor(code: Int): Int {
+        var id = dbId[code]
+        if (id == 0) {
+            order.add(code)
+            id = order.size
+            dbId[code] = id
+        }
+        return id
+    }
+}
+
 // ───────────────────────── GTFS → SQLite ─────────────────────────
 
 class GtfsImporter(private val dbFile: File) {
 
-    private fun parseCsvLine(line: String): List<String> {
-        if (line.indexOf('"') < 0) return line.split(',')
-        val result = ArrayList<String>()
-        val sb = java.lang.StringBuilder()
-        var inQuotes = false
-        var i = 0
-        while (i < line.length) {
-            val c = line[i]
-            if (c == '"') {
-                if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
-                    sb.append('"')
-                    i++
-                } else {
-                    inQuotes = !inQuotes
-                }
-            } else if (c == ',' && !inQuotes) {
-                result.add(sb.toString())
-                sb.clear()
-            } else {
-                sb.append(c)
-            }
-            i++
-        }
-        result.add(sb.toString())
-        return result
-    }
-
+    /** Rozbalí jen potřebné soubory (ZipFile = náhodný přístup, shapes.txt se vůbec nečte). */
     private fun unzipToDirectory(zipFile: File, destDir: File) {
         destDir.deleteRecursively()
         destDir.mkdirs()
-        val buffer = ByteArray(32768)
-        ZipInputStream(BufferedInputStream(FileInputStream(zipFile), 32768)).use { zis ->
-            var entry = zis.nextEntry
-            while (entry != null) {
+        ZipFile(zipFile).use { zf ->
+            val entries = zf.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                if (entry.isDirectory) continue
                 val name = entry.name.substringAfterLast('/')
-                if (!entry.isDirectory && name.isNotBlank()) {
-                    val file = File(destDir, name)
-                    FileOutputStream(file).use { fos ->
-                        var r = zis.read(buffer)
-                        while (r > 0) {
-                            fos.write(buffer, 0, r)
-                            r = zis.read(buffer)
-                        }
-                    }
+                if (name !in NEEDED_FILES) continue
+                zf.getInputStream(entry).use { ins ->
+                    FileOutputStream(File(destDir, name)).use { out -> ins.copyTo(out, 65536) }
                 }
-                zis.closeEntry()
-                entry = zis.nextEntry
-            }
-        }
-    }
-
-    private fun readCsvFromFile(
-        file: File,
-        block: (headers: Map<String, Int>, row: List<String>) -> Unit
-    ) {
-        if (!file.exists()) return
-        file.bufferedReader(Charsets.UTF_8, 32768).use { reader ->
-            val headerLine = reader.readLine() ?: return
-            val cleanHeader = if (headerLine.startsWith("\uFEFF")) headerLine.substring(1) else headerLine
-            val headers = parseCsvLine(cleanHeader).mapIndexed { idx, h -> h to idx }.toMap()
-
-            var line = reader.readLine()
-            while (line != null) {
-                if (line.isNotBlank()) {
-                    val row = parseCsvLine(line)
-                    block(headers, row)
-                }
-                line = reader.readLine()
             }
         }
     }
@@ -152,6 +353,7 @@ class GtfsImporter(private val dbFile: File) {
         val tempDir = File(dbFile.parentFile, "gtfs_temp")
         unzipToDirectory(gtfsZipFile, tempDir)
 
+
         try {
             log("Čtu zastávky…")
             progress(0.2f)
@@ -162,13 +364,17 @@ class GtfsImporter(private val dbFile: File) {
             val stations = HashMap<String, StationData>()
             val posts = HashMap<String, PostData>()
 
-            readCsvFromFile(File(tempDir, "stops.txt")) { h, r ->
-                val stopId = r.getOrNull(h["stop_id"] ?: -1) ?: return@readCsvFromFile
-                val name = r.getOrNull(h["stop_name"] ?: -1) ?: ""
-                val lat = r.getOrNull(h["stop_lat"] ?: -1)?.toDoubleOrNull()
-                val lon = r.getOrNull(h["stop_lon"] ?: -1)?.toDoubleOrNull()
-                val locType = r.getOrNull(h["location_type"] ?: -1) ?: "0"
-                val parent = r.getOrNull(h["parent_station"] ?: -1) ?: ""
+            readCsv(
+                File(tempDir, "stops.txt"),
+                arrayOf("stop_id", "stop_name", "stop_lat", "stop_lon", "location_type", "parent_station")
+            ) { sc ->
+                val stopId = sc.str(0)
+                if (stopId.isEmpty()) return@readCsv
+                val name = sc.str(1)
+                val lat = sc.str(2).toDoubleOrNull()
+                val lon = sc.str(3).toDoubleOrNull()
+                val locType = sc.strOr(4, "0")
+                val parent = sc.str(5)
 
                 if (locType == "1") {
                     stations[stopId] = StationData(name, lat, lon)
@@ -194,32 +400,39 @@ class GtfsImporter(private val dbFile: File) {
             progress(0.3f)
 
             val agencies = HashMap<String, String>()
-            readCsvFromFile(File(tempDir, "agency.txt")) { h, r ->
-                val id = r.getOrNull(h["agency_id"] ?: -1) ?: ""
-                val name = r.getOrNull(h["agency_name"] ?: -1) ?: ""
-                agencies[id] = name
+            readCsv(File(tempDir, "agency.txt"), arrayOf("agency_id", "agency_name")) { sc ->
+                agencies[sc.str(0)] = sc.str(1)
             }
 
             data class RouteData(val shortName: String, val agency: String)
             val routes = HashMap<String, RouteData>()
-            readCsvFromFile(File(tempDir, "routes.txt")) { h, r ->
-                val id = r.getOrNull(h["route_id"] ?: -1) ?: return@readCsvFromFile
-                val short = r.getOrNull(h["route_short_name"] ?: -1) ?: "?"
-                val agId = r.getOrNull(h["agency_id"] ?: -1) ?: ""
-                routes[id] = RouteData(short, agencies[agId] ?: "")
+            readCsv(File(tempDir, "routes.txt"), arrayOf("route_id", "route_short_name", "agency_id")) { sc ->
+                val id = sc.str(0)
+                if (id.isEmpty()) return@readCsv
+                routes[id] = RouteData(sc.strOr(1, "?"), agencies[sc.str(2)] ?: "")
             }
 
-            data class TripMeta(val routeId: String, val serviceId: String, val headsign: String, val shortName: String, val wheel: String, val shapeId: String)
+            data class TripMeta(
+                val routeId: String,
+                val serviceId: String,
+                val headsign: String,
+                val shortName: String,
+                val wheel: Int
+            )
             val tripsMeta = HashMap<String, TripMeta>()
-            readCsvFromFile(File(tempDir, "trips.txt")) { h, r ->
-                val tripId = r.getOrNull(h["trip_id"] ?: -1) ?: return@readCsvFromFile
-                val routeId = r.getOrNull(h["route_id"] ?: -1) ?: ""
-                val svcId = r.getOrNull(h["service_id"] ?: -1) ?: ""
-                val head = r.getOrNull(h["trip_headsign"] ?: -1) ?: ""
-                val short = r.getOrNull(h["trip_short_name"] ?: -1) ?: ""
-                val wheel = r.getOrNull(h["wheelchair_accessible"] ?: -1) ?: "0"
-                val shapeId = r.getOrNull(h["shape_id"] ?: -1) ?: ""
-                tripsMeta[tripId] = TripMeta(routeId, svcId, head, short, wheel, shapeId)
+            readCsv(
+                File(tempDir, "trips.txt"),
+                arrayOf("trip_id", "route_id", "service_id", "trip_headsign", "trip_short_name", "wheelchair_accessible")
+            ) { sc ->
+                val tripId = sc.str(0)
+                if (tripId.isEmpty()) return@readCsv
+                tripsMeta[tripId] = TripMeta(
+                    routeId = sc.str(1),
+                    serviceId = sc.str(2),
+                    headsign = sc.str(3),
+                    shortName = sc.str(4),
+                    wheel = sc.str(5).toIntOrNull() ?: 0
+                )
             }
 
             log("Zpracovávám jízdní řády…")
@@ -233,135 +446,190 @@ class GtfsImporter(private val dbFile: File) {
             db.rawQuery("PRAGMA journal_mode = MEMORY;", null).close()
             db.rawQuery("PRAGMA temp_store = MEMORY;", null).close()
 
-            db.execSQL("CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);")
-            db.execSQL("CREATE TABLE stop(id INTEGER PRIMARY KEY, name TEXT, place TEXT, lat REAL, lon REAL, inreg INTEGER);")
-            db.execSQL("CREATE TABLE trip(id INTEGER PRIMARY KEY, line TEXT, agency TEXT, cis TEXT, num TEXT, head TEXT, svc INTEGER, wheel INTEGER, t0 INTEGER, t1 INTEGER, gid TEXT DEFAULT '');")
-            db.execSQL("CREATE TABLE trip_times(trip INTEGER PRIMARY KEY, stops BLOB, arr BLOB, dep BLOB);")
-            db.execSQL("CREATE TABLE svc(id INTEGER PRIMARY KEY, dow TEXT, d0 TEXT, d1 TEXT);")
-            db.execSQL("CREATE TABLE svc_date(svc INTEGER, d TEXT, type INTEGER);")
-
-            val tripIndexMap = HashMap<String, Int>()
-            val stopIndexMap = HashMap<String, Int>()
             val svcIndexMap = HashMap<String, Int>()
-
-            data class StopTimeRow(val stopId: String, val seq: Int, val arr: Int?, val dep: Int?)
-
-            fun processTripStopTimes(
-                rows: List<StopTimeRow>,
-                tripId: String,
-                stmtTrip: SQLiteStatement,
-                stmtTimes: SQLiteStatement
-            ): Boolean {
-                if (!rows.any { it.stopId in region }) return false
-                val sortedRows = rows.sortedBy { it.seq }
-
-                val st = ArrayList<Int>()
-                val ar = ArrayList<Int>()
-                val de = ArrayList<Int>()
-
-                for (r in sortedRows) {
-                    val a = r.arr
-                    val d = r.dep
-                    if (a == null && d == null) continue
-                    val sid = stopIndexMap.getOrPut(r.stopId) { stopIndexMap.size + 1 }
-                    st.add(sid)
-                    ar.add(a ?: d ?: 0)
-                    de.add(d ?: a ?: 0)
-                }
-
-                if (st.size < 2) return false
-
-                val tid = tripIndexMap.size + 1
-                tripIndexMap[tripId] = tid
-                val meta = tripsMeta[tripId] ?: return false
-
-                val sn = meta.shortName.split(Regex("\\s+"))
-                val cis: String
-                val num: String
-                if (sn.size == 2 && sn[0].all { it.isDigit() }) {
-                    cis = sn[0].padStart(6, '0')
-                    num = sn[1]
-                } else {
-                    val p = tripId.split(":")
-                    if (p.size >= 5) {
-                        cis = p[2].padStart(6, '0')
-                        num = p.last()
-                    } else {
-                        cis = ""
-                        num = ""
-                    }
-                }
-
-                val route = routes[meta.routeId] ?: RouteData("?", "")
-                val svcId = svcIndexMap.getOrPut(meta.serviceId) { svcIndexMap.size + 1 }
-
-                stmtTrip.bindLong(1, tid.toLong())
-                stmtTrip.bindString(2, route.shortName)
-                stmtTrip.bindString(3, route.agency)
-                stmtTrip.bindString(4, cis)
-                stmtTrip.bindString(5, num)
-                stmtTrip.bindString(6, meta.headsign)
-                stmtTrip.bindLong(7, svcId.toLong())
-                stmtTrip.bindLong(8, (meta.wheel.toIntOrNull() ?: 0).toLong())
-                stmtTrip.bindLong(9, de[0].toLong())
-                stmtTrip.bindLong(10, ar.last().toLong())
-                stmtTrip.bindString(11, tripId)
-                stmtTrip.executeInsert()
-
-                stmtTimes.bindLong(1, tid.toLong())
-                stmtTimes.bindBlob(2, intArrayToBytes(st.toIntArray()))
-                stmtTimes.bindBlob(3, intArrayToBytes(ar.toIntArray()))
-                stmtTimes.bindBlob(4, intArrayToBytes(de.toIntArray()))
-                stmtTimes.executeInsert()
-
-                return true
-            }
-
+            val stops = StopInterner(region, posts.size)
             var countTrips = 0
+
             db.beginTransaction()
             try {
+                db.execSQL("CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);")
+                db.execSQL("CREATE TABLE stop(id INTEGER PRIMARY KEY, name TEXT, place TEXT, lat REAL, lon REAL, inreg INTEGER);")
+                db.execSQL("CREATE TABLE trip(id INTEGER PRIMARY KEY, line TEXT, agency TEXT, cis TEXT, num TEXT, head TEXT, svc INTEGER, wheel INTEGER, t0 INTEGER, t1 INTEGER, gid TEXT DEFAULT '');")
+                db.execSQL("CREATE TABLE trip_times(trip INTEGER PRIMARY KEY, stops BLOB, arr BLOB, dep BLOB);")
+                db.execSQL("CREATE TABLE svc(id INTEGER PRIMARY KEY, dow TEXT, d0 TEXT, d1 TEXT);")
+                db.execSQL("CREATE TABLE svc_date(svc INTEGER, d TEXT, type INTEGER);")
+
                 val stmtTrip = db.compileStatement("INSERT INTO trip VALUES(?,?,?,?,?,?,?,?,?,?,?)")
                 val stmtTimes = db.compileStatement("INSERT INTO trip_times VALUES(?,?,?,?)")
 
-                var currentTripId: String? = null
-                val currentRows = ArrayList<StopTimeRow>()
+                /** Uloží trip, pokud projíždí regionem. Vrací true při uložení. */
+                fun processTrip(
+                    tripId: String,
+                    meta: TripMeta,
+                    tb: TripBuffer,
+                    stmtTrip: SQLiteStatement,
+                    stmtTimes: SQLiteStatement
+                ): Boolean {
+                    val n = tb.n
+                    if (!tb.hasRegion || n < 2) return false
 
-                readCsvFromFile(File(tempDir, "stop_times.txt")) { h, r ->
-                    val tripId = r.getOrNull(h["trip_id"] ?: -1) ?: return@readCsvFromFile
-                    if (tripId !in tripsMeta) return@readCsvFromFile
+                    // většinou už je seřazeno podle stop_sequence → řazení jen když je potřeba
+                    var sorted = true
+                    for (i in 1 until n) if (tb.seq[i] < tb.seq[i - 1]) { sorted = false; break }
+                    val order: IntArray? =
+                        if (sorted) null else (0 until n).sortedBy { tb.seq[it] }.toIntArray()
 
-                    val stopId = r.getOrNull(h["stop_id"] ?: -1) ?: return@readCsvFromFile
-                    val seq = r.getOrNull(h["stop_sequence"] ?: -1)?.toIntOrNull() ?: 0
-                    val arr = parseTsec(r.getOrNull(h["arrival_time"] ?: -1))
-                    val dep = parseTsec(r.getOrNull(h["departure_time"] ?: -1))
+                    var m = 0
+                    for (i in 0 until n) if (tb.arr[i] >= 0 || tb.dep[i] >= 0) m++
+                    if (m < 2) return false
 
-                    val cId = currentTripId
-                    if (cId != null && tripId != cId) {
-                        if (processTripStopTimes(currentRows, cId, stmtTrip, stmtTimes)) {
-                            countTrips++
+                    val st = IntArray(m)
+                    val ar = IntArray(m)
+                    val de = IntArray(m)
+                    var j = 0
+                    for (k in 0 until n) {
+                        val i = order?.get(k) ?: k
+                        val a = tb.arr[i]
+                        val d = tb.dep[i]
+                        if (a < 0 && d < 0) continue
+                        st[j] = stops.dbIdFor(tb.code[i])
+                        ar[j] = if (a >= 0) a else d
+                        de[j] = if (d >= 0) d else a
+                        j++
+                    }
+
+                    val tid = countTrips + 1
+
+                    val sn = meta.shortName.split(WS)
+                    val cis: String
+                    val num: String
+                    if (sn.size == 2 && sn[0].all { it.isDigit() }) {
+                        cis = sn[0].padStart(6, '0')
+                        num = sn[1]
+                    } else {
+                        val p = tripId.split(":")
+                        if (p.size >= 5) {
+                            cis = p[2].padStart(6, '0')
+                            num = p.last()
+                        } else {
+                            cis = ""
+                            num = ""
                         }
-                        currentRows.clear()
                     }
-                    currentTripId = tripId
-                    currentRows.add(StopTimeRow(stopId, seq, arr, dep))
+
+                    val route = routes[meta.routeId] ?: RouteData("?", "")
+                    val svcId = svcIndexMap.getOrPut(meta.serviceId) { svcIndexMap.size + 1 }
+
+                    stmtTrip.bindLong(1, tid.toLong())
+                    stmtTrip.bindString(2, route.shortName)
+                    stmtTrip.bindString(3, route.agency)
+                    stmtTrip.bindString(4, cis)
+                    stmtTrip.bindString(5, num)
+                    stmtTrip.bindString(6, meta.headsign)
+                    stmtTrip.bindLong(7, svcId.toLong())
+                    stmtTrip.bindLong(8, meta.wheel.toLong())
+                    stmtTrip.bindLong(9, de[0].toLong())
+                    stmtTrip.bindLong(10, ar[m - 1].toLong())
+                    stmtTrip.bindString(11, tripId)
+                    stmtTrip.executeInsert()
+
+                    stmtTimes.bindLong(1, tid.toLong())
+                    stmtTimes.bindBlob(2, intArrayToBytes(st))
+                    stmtTimes.bindBlob(3, intArrayToBytes(ar))
+                    stmtTimes.bindBlob(4, intArrayToBytes(de))
+                    stmtTimes.executeInsert()
+
+                    return true
                 }
 
-                val finalId = currentTripId
-                if (finalId != null && currentRows.isNotEmpty()) {
-                    if (processTripStopTimes(currentRows, finalId, stmtTrip, stmtTimes)) {
-                        countTrips++
+
+                // ───── stop_times.txt: hlavní úzké hrdlo, jeden průchod nad bajty ─────
+                val stopTimesFile = File(tempDir, "stop_times.txt")
+                if (stopTimesFile.exists()) {
+                    val total = stopTimesFile.length().coerceAtLeast(1L).toFloat()
+                    val sc = CsvScanner(
+                        stopTimesFile,
+                        arrayOf("trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time")
+                    )
+                    sc.use {
+                        val tb = TripBuffer()
+
+                        fun save(id: String, m: TripMeta): Boolean {
+                            val saved = processTrip(id, m, tb, stmtTrip, stmtTimes)
+                            return saved
+                        }
+
+                        var curBuf = ByteArray(128)
+                        var curLen = -1
+                        var curId = ""
+                        var curMeta: TripMeta? = null
+                        var rows = 0
+                        var lastReported = 0.5f
+
+                        while (sc.nextRow()) {
+                            val b = sc.buf
+                            val ts = sc.fs[0]
+                            val tl = sc.fe[0] - ts
+                            val ss = sc.fs[1]
+                            val sl = sc.fe[1] - ss
+                            if (tl <= 0 || sl <= 0) continue
+
+                            // stejný trip jako minule? porovnání bajtů bez alokace
+                            var same = tl == curLen
+                            if (same) {
+                                var i = 0
+                                while (i < tl) {
+                                    if (b[ts + i] != curBuf[i]) { same = false; break }
+                                    i++
+                                }
+                            }
+                            if (!same) {
+                                val prev = curMeta
+                                if (prev != null && save(curId, prev)) countTrips++
+                                tb.clear()
+                                if (tl > curBuf.size) curBuf = ByteArray(tl * 2)
+                                System.arraycopy(b, ts, curBuf, 0, tl)
+                                curLen = tl
+                                curId = String(b, ts, tl, Charsets.UTF_8)
+                                curMeta = tripsMeta[curId]   // 1 lookup na trip, ne na řádek
+                            }
+                            if (curMeta == null) continue
+
+                            val code = stops.code(String(b, ss, sl, Charsets.UTF_8))
+                            if (stops.isRegion[code]) tb.hasRegion = true
+                            tb.add(
+                                code,
+                                parseIntBytes(b, sc.fs[2], sc.fe[2]),
+                                parseTimeSec(b, sc.fs[3], sc.fe[3]),
+                                parseTimeSec(b, sc.fs[4], sc.fe[4])
+                            )
+
+                            if ((++rows and 0x7FFF) == 0) {
+                                val p = 0.5f + 0.4f * (sc.bytesRead / total)
+                                if (p - lastReported >= 0.01f) {
+                                    lastReported = p
+                                    progress(p)
+                                }
+                            }
+                        }
+
+                        val last = curMeta
+                        if (last != null && save(curId, last)) countTrips++
                     }
                 }
+                progress(0.92f)
 
+                // ───── zastávky, které se skutečně použily ─────
                 val stmtStop = db.compileStatement("INSERT INTO stop VALUES(?,?,?,?,?,?)")
-                for ((g, sid) in stopIndexMap) {
+                for ((i, code) in stops.order.withIndex()) {
+                    val g = stops.names[code]
                     val post = posts[g]
                     val parentName = if (post != null) stations[post.parent]?.name else null
                     val name = post?.name ?: g
                     val place = if (!parentName.isNullOrEmpty()) parentName else name
                     val (la, lo) = coords(g)
 
-                    stmtStop.bindLong(1, sid.toLong())
+                    stmtStop.bindLong(1, (i + 1).toLong())
                     stmtStop.bindString(2, name)
                     stmtStop.bindString(3, place)
                     if (la != null) stmtStop.bindDouble(4, la) else stmtStop.bindNull(4)
@@ -371,37 +639,34 @@ class GtfsImporter(private val dbFile: File) {
                 }
 
                 val stmtSvc = db.compileStatement("INSERT INTO svc VALUES(?,?,?,?)")
-                readCsvFromFile(File(tempDir, "calendar.txt")) { h, r ->
-                    val serviceId = r.getOrNull(h["service_id"] ?: -1) ?: return@readCsvFromFile
-                    if (serviceId in svcIndexMap) {
-                        val dow = ("monday,tuesday,wednesday,thursday,friday,saturday,sunday").split(",").joinToString("") {
-                            r.getOrNull(h[it] ?: -1) ?: "0"
-                        }
-                        val d0 = r.getOrNull(h["start_date"] ?: -1) ?: ""
-                        val d1 = r.getOrNull(h["end_date"] ?: -1) ?: ""
-                        val sid = svcIndexMap[serviceId]!!
+                readCsv(
+                    File(tempDir, "calendar.txt"),
+                    arrayOf(
+                        "service_id", "monday", "tuesday", "wednesday", "thursday",
+                        "friday", "saturday", "sunday", "start_date", "end_date"
+                    )
+                ) { sc ->
+                    val sid = svcIndexMap[sc.str(0)] ?: return@readCsv
+                    val dow = StringBuilder(7)
+                    for (k in 1..7) dow.append(sc.strOr(k, "0"))
 
-                        stmtSvc.bindLong(1, sid.toLong())
-                        stmtSvc.bindString(2, dow)
-                        stmtSvc.bindString(3, d0)
-                        stmtSvc.bindString(4, d1)
-                        stmtSvc.executeInsert()
-                    }
+                    stmtSvc.bindLong(1, sid.toLong())
+                    stmtSvc.bindString(2, dow.toString())
+                    stmtSvc.bindString(3, sc.str(8))
+                    stmtSvc.bindString(4, sc.str(9))
+                    stmtSvc.executeInsert()
                 }
 
                 val stmtSvcDate = db.compileStatement("INSERT INTO svc_date VALUES(?,?,?)")
-                readCsvFromFile(File(tempDir, "calendar_dates.txt")) { h, r ->
-                    val serviceId = r.getOrNull(h["service_id"] ?: -1) ?: return@readCsvFromFile
-                    if (serviceId in svcIndexMap) {
-                        val d = r.getOrNull(h["date"] ?: -1) ?: ""
-                        val type = r.getOrNull(h["exception_type"] ?: -1)?.toIntOrNull() ?: 1
-                        val sid = svcIndexMap[serviceId]!!
-
-                        stmtSvcDate.bindLong(1, sid.toLong())
-                        stmtSvcDate.bindString(2, d)
-                        stmtSvcDate.bindLong(3, type.toLong())
-                        stmtSvcDate.executeInsert()
-                    }
+                readCsv(
+                    File(tempDir, "calendar_dates.txt"),
+                    arrayOf("service_id", "date", "exception_type")
+                ) { sc ->
+                    val sid = svcIndexMap[sc.str(0)] ?: return@readCsv
+                    stmtSvcDate.bindLong(1, sid.toLong())
+                    stmtSvcDate.bindString(2, sc.str(1))
+                    stmtSvcDate.bindLong(3, (sc.str(2).toIntOrNull() ?: 1).toLong())
+                    stmtSvcDate.executeInsert()
                 }
 
                 val stmtMeta = db.compileStatement("INSERT INTO meta VALUES(?,?)")
@@ -415,16 +680,19 @@ class GtfsImporter(private val dbFile: File) {
                 db.close()
             }
 
+            progress(0.97f)
+
             // rename přepíše soubor atomicky; stará DB, kterou ještě někdo čte, nezmizí uprostřed
             if (!tmpDb.renameTo(dbFile)) {
                 dbFile.delete()
+                java.io.RandomAccessFile(tmpDb, "rw").use { it.fd.sync() }
                 tmpDb.renameTo(dbFile)
             }
+
             progress(1.0f)
             log("Hotovo! Importováno $countTrips spojů.")
         } finally {
             tempDir.deleteRecursively()
-            System.gc()
         }
     }
 }

@@ -50,6 +50,7 @@ internal fun Vehicle.sameAs(o: Vehicle): Boolean =
             (id != 0 && o.id != 0 && sameVehicleId(id, o.id)) ||
             (cis.isNotBlank() && trip.isNotBlank() && source == o.source && cis == o.cis && trip == o.trip)
 
+
 // ───────────────────────── trasa jako polyline ─────────────────────────
 
 internal class PathProjection(val s: Double, val offsetMeters: Double)

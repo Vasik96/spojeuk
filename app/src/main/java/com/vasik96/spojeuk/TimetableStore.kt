@@ -1,6 +1,7 @@
 package com.vasik96.spojeuk
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -26,16 +27,22 @@ class TimetableStore(
     private val onLoaded: (Timetable) -> Unit = {},
 ) {
     val dbFile: File by lazy {
-        val dir = File(context?.filesDir ?: File("/tmp"), "duk-direct")
+        val dir = File(context?.filesDir ?: File("/tmp"), "spojeuk")
         dir.mkdirs()
         File(dir, "static.sqlite")
     }
+
+
 
     @Volatile
     var current: TimetableBundle? = null
         private set
 
     private val loadLock = Mutex()
+    private val importLock = Mutex()
+
+    val pendingFile: File by lazy { File(dbFile.parentFile, "static.sqlite.new") }
+    fun hasPending() = pendingFile.exists()
 
     fun isFirstRun(): Boolean = !dbFile.exists() || dbFile.length() < MIN_DB_BYTES
 
@@ -49,19 +56,48 @@ class TimetableStore(
             current?.let { return@withContext it }
             loadLock.withLock {
                 current?.let { return@withLock it }
+
+                applyPendingIfAny()
+
                 if (isFirstRun()) {
                     log("Nahrávám výchozí jízdní řády…")
-                    if (!copyBundledDb()) downloadAndImport(log, progress)
+                    if (!copyBundledDb()) importLock.withLock { downloadAndImport(dbFile, log, progress) }
                 }
-                install(Timetable(dbFile)).also { onLoaded(it.timetable) }
+                val bundle = install(Timetable(dbFile))
+                onLoaded(bundle.timetable)
+                bundle
             }
         }
 
-    suspend fun update(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): TimetableBundle =
+    suspend fun stageUpdate(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}) =
         withContext(Dispatchers.IO) {
-            downloadAndImport(log, progress)
-            install(Timetable(dbFile))
+            importLock.withLock { downloadAndImport(pendingFile, log, progress) }
         }
+
+
+    private fun applyPendingIfAny() {
+        if (!importLock.tryLock()) return   // jiný import běží, nesahat na jeho soubory
+        try {
+            val dir = dbFile.parentFile
+            // zbytky po přerušeném importu
+            File(dir, "static.sqlite.new.tmp").delete()
+            File(dir, "static.sqlite.tmp").delete()
+            File(dir, "gtfs.zip").delete()
+            File(dir, "gtfs_temp").deleteRecursively()
+
+            val p = pendingFile
+            if (!p.exists()) return
+            fun trips(f: File) = runCatching { Timetable.readMeta(f)["trips"]?.toIntOrNull() }.getOrNull() ?: 0
+            val newTrips = trips(p)
+            val oldTrips = if (dbFile.exists()) trips(dbFile) else 0
+            // ochrana proti rozbitému buildu na GitHubu
+            if (newTrips > 0 && newTrips * 2 >= oldTrips) p.renameTo(dbFile) else p.delete()
+        } finally {
+            importLock.unlock()
+        }
+    }
+
+
 
     private fun install(tt: Timetable): TimetableBundle {
         val bundle = TimetableBundle(tt, Planner(tt))
@@ -81,12 +117,13 @@ class TimetableStore(
         return copied && !isFirstRun()
     }
 
-    private fun downloadAndImport(log: (String) -> Unit, progress: (Float) -> Unit) {
+    private fun downloadAndImport(target: File, log: (String) -> Unit, progress: (Float) -> Unit) {
         log("Zjišťuji nejnovější build z GitHubu…")
         val release = JSONObject(open(RELEASES_API).use { it.body?.string().orEmpty() })
         val tag = release.optString("tag_name", "latest")
         val assets = release.optJSONArray("assets") ?: JSONArray()
-        val asset = (0 until assets.length()).map { assets.getJSONObject(it) }
+        val asset = (0 until assets.length())
+            .map { assets.getJSONObject(it) }
             .firstOrNull { it.optString("name") == ASSET_NAME }
             ?: error("Release $tag neobsahuje asset $ASSET_NAME")
 
@@ -99,6 +136,7 @@ class TimetableStore(
                 error("V souboru $ASSET_NAME nebylo nalezeno gtfs.zip")
             }
         }
+
         try {
             GtfsImporter(dbFile).importGtfs(zip, tag, log, progress)
         } finally {
@@ -107,7 +145,9 @@ class TimetableStore(
     }
 
     private fun open(url: String): Response {
-        val resp = http.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build()).execute()
+        val resp = http.newCall(
+            Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
+        ).execute()
         if (!resp.isSuccessful) {
             val code = resp.code
             resp.close()
@@ -118,5 +158,6 @@ class TimetableStore(
 
     private companion object {
         const val MIN_DB_BYTES = 100_000L
+        const val TAG = "GtfsImport"
     }
 }

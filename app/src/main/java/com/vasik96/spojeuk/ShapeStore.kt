@@ -3,6 +3,8 @@ package com.vasik96.spojeuk
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -76,59 +78,71 @@ class ShapeStore(private val dir: File, private val context: Context? = null) {
      * Zkontroluje shapes.json na GitHubu (pár set bajtů) a když je novější, stáhne shapes.sqlite.
      * Vrací true, když se soubor vyměnil. Kontrola nejvýš jednou za 12 h, pokud není [force].
      */
-    suspend fun sync(http: OkHttpClient, force: Boolean = false, forceDownload: Boolean = false): Boolean = withContext(Dispatchers.IO) {
-        val now = System.currentTimeMillis()
-        if (!force && !forceDownload && dbFile.exists() && now - checkedFile.lastModified() < 12 * 3600_000L) return@withContext false
+    suspend fun sync(
+        http: OkHttpClient,
+        force: Boolean = false,
+        forceDownload: Boolean = false,
+    ): Boolean = withContext(Dispatchers.IO) {
+        syncLock.withLock {
+            val now = System.currentTimeMillis()
+            if (!force && !forceDownload && dbFile.exists() &&
+                now - checkedFile.lastModified() < 12 * 3600_000L
+            ) return@withLock false
 
-        val remote = JSONObject(httpGet(http, "$SHAPES_BASE_URL/shapes.json"))
-        val localBuilt = runCatching { JSONObject(metaFile.readText()).optString("built") }.getOrDefault("")
-        if (!forceDownload && dbFile.exists() && remote.optString("built") == localBuilt) {
-            checkedFile.writeText(now.toString())
-            return@withContext false
-        }
+            val remote = JSONObject(httpGet(http, "$SHAPES_BASE_URL/shapes.json"))
+            val localBuilt = runCatching { JSONObject(metaFile.readText()).optString("built") }.getOrDefault("")
+            if (!forceDownload && dbFile.exists() && remote.optString("built") == localBuilt) {
+                checkedFile.writeText(now.toString())
+                return@withLock false
+            }
 
-        val tmp = File(dir, "shapes.sqlite.tmp")
-        val md = MessageDigest.getInstance("SHA-256")
-        val req = Request.Builder().url("$SHAPES_BASE_URL/shapes.sqlite").header("User-Agent", USER_AGENT).build()
-        http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("shapes.sqlite HTTP ${resp.code}")
-            val body = resp.body ?: error("prázdná odpověď")
-            body.byteStream().use { input ->
-                FileOutputStream(tmp).use { out ->
-                    val buf = ByteArray(65536)
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        out.write(buf, 0, n)
-                        md.update(buf, 0, n)
+            val expected = remote.optInt("trips")
+            if (expected <= 0) error("shapes.json neobsahuje počet spojů")
+
+            val tmp = File(dir, "shapes.sqlite.tmp")
+            try {
+                val md = MessageDigest.getInstance("SHA-256")
+                val req = Request.Builder().url("$SHAPES_BASE_URL/shapes.sqlite").header("User-Agent", USER_AGENT).build()
+                http.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) error("shapes.sqlite HTTP ${resp.code}")
+                    val body = resp.body ?: error("prázdná odpověď")
+                    body.byteStream().use { input ->
+                        FileOutputStream(tmp).use { out ->
+                            val buf = ByteArray(65536)
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                out.write(buf, 0, n)
+                                md.update(buf, 0, n)
+                            }
+                        }
                     }
                 }
-            }
-        }
-        val sha = md.digest().joinToString("") { "%02x".format(it) }
-        if (sha != remote.optString("sha256")) {
-            tmp.delete()
-            error("sha256 nesedí (nahrává se nová verze?), zkusí se příště")
-        }
-        val expected = remote.optInt("trips")
-        val ok = runCatching {
-            SQLiteDatabase.openDatabase(tmp.path, null, SQLiteDatabase.OPEN_READONLY).use { d ->
-                d.rawQuery("SELECT count(*) FROM trip_shape", null).use { it.moveToFirst() && it.getInt(0) >= expected * 9 / 10 }
-            }
-        }.getOrDefault(false)
-        if (!ok) {
-            tmp.delete()
-            error("stažený shapes.sqlite je poškozený nebo neúplný")
-        }
+                val sha = md.digest().joinToString("") { "%02x".format(it) }
+                if (sha != remote.optString("sha256")) {
+                    error("sha256 nesedí (nahrává se nová verze?), zkusí se příště")
+                }
+                val ok = runCatching {
+                    SQLiteDatabase.openDatabase(tmp.path, null, SQLiteDatabase.OPEN_READONLY).use { d ->
+                        d.rawQuery("SELECT count(*) FROM trip_shape", null).use {
+                            it.moveToFirst() && it.getInt(0) >= expected * 9 / 10
+                        }
+                    }
+                }.getOrDefault(false)
+                if (!ok) error("stažený shapes.sqlite je poškozený nebo neúplný")
 
-        synchronized(this@ShapeStore) {
-            db?.close(); db = null; cache.clear()
-            if (!tmp.renameTo(dbFile)) { dbFile.delete(); tmp.renameTo(dbFile) }
-            metaFile.writeText(remote.toString())
+                synchronized(this@ShapeStore) {
+                    db?.close(); db = null; cache.clear()
+                    if (!tmp.renameTo(dbFile)) { dbFile.delete(); tmp.renameTo(dbFile) }
+                    metaFile.writeText(remote.toString())
+                }
+                checkedFile.writeText(now.toString())
+                android.util.Log.i("Shapes", "shapes.sqlite aktualizován: ${remote.optString("built")}, spojů $expected")
+                true
+            } finally {
+                tmp.delete() // po úspěšném renameTo už neexistuje, při chybě uklidí zbytek
+            }
         }
-        checkedFile.writeText(now.toString())
-        android.util.Log.i("Shapes", "shapes.sqlite aktualizován: ${remote.optString("built")}, spojů ${remote.optInt("trips")}")
-        true
     }
 
     private fun httpGet(http: OkHttpClient, url: String): String {
@@ -140,6 +154,8 @@ class ShapeStore(private val dir: File, private val context: Context? = null) {
     }
 
     companion object {
+        private val syncLock = Mutex()
+
         /** zlib( varint(počet) + zigzag-varint delty lat/lon v mikrostupních ), viz tools/build_shapes.py */
         fun decode(blob: ByteArray): List<Pair<Double, Double>> {
             val raw = InflaterInputStream(blob.inputStream()).use { it.readBytes() }
