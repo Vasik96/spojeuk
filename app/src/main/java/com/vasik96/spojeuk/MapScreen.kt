@@ -188,12 +188,13 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
     // zvýraznění markeru
     LaunchedEffect(appState.highlightedTrip, appState.vehiclesLoaded, appState.routeLoading) {
-        if (appState.highlightedTrip == null) {
-            appState.pulsePhase = 0; return@LaunchedEffect
-        }
+        if (appState.highlightedTrip == null) { appState.pulsePhase = 0; return@LaunchedEffect }
         if (!appState.vehiclesLoaded || appState.routeLoading) return@LaunchedEffect
-        repeat(6) { i -> appState.pulsePhase = if (i % 2 == 0) 1 else 2; delay(400.milliseconds) }
-        appState.pulsePhase = 0
+        try {
+            repeat(6) { i -> appState.pulsePhase = if (i % 2 == 0) 1 else 2; delay(400.milliseconds) }
+        } finally {
+            appState.pulsePhase = 0   // i při zrušení efektu (rychlé další kliknutí)
+        }
         appState.highlightedTrip = null
     }
 
@@ -220,6 +221,11 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         val ref = appState.focusTrip ?: return@LaunchedEffect
 
         if (!appState.vehiclesLoaded || appState.routeLoading) return@LaunchedEffect
+
+        // čistý začátek pro nové kliknutí – zahodí zbytky po předchozím
+        appState.pulsePhase = 0
+        appState.focusedTripVehicle = null
+
         val route = appState.tripRoute
         val searchRoute = appState.fullRoute.ifEmpty { route }
         val match = findVehicle(appState.vehicles, ref, searchRoute)
@@ -237,6 +243,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             animateCameraTo(LatLng(v.lat, v.lng), 16f)
         } else {
             appState.focusedTripVehicle = null
+            appState.focusedTripRef = null
+            appState.highlightedTrip = null
+            appState.pulsePhase = 0
             val msg = if (appState.mapError != null)
                 "Polohy vozidel se nepodařilo načíst"
             else
