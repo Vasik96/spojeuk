@@ -1438,9 +1438,10 @@ private fun JourneyCard(
                     )
                 }
 
-                if (j.agency.isNotBlank()) {
+                val cleanedAgency = cleanAgencyName(j.agency)
+                if (cleanedAgency.isNotBlank()) {
                     Text(
-                        j.agency,
+                        text = cleanedAgency,
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant
                     )
@@ -1448,4 +1449,16 @@ private fun JourneyCard(
             }
         }
     }
+}
+
+
+fun cleanAgencyName(name: String): String {
+    val regex = Regex(
+        pattern = """(?i)\b(a\.?\s*s\.?|s\.?\s*r\.?\s*o\.?|spol\.?\s*s\s*r\.?\s*o\.?|příspěvková\s+organizace|p\.o\.?|o\.p\.s\.?|v\.o\.s\.?|z\.s\.?|gmbh|inc\.?|ltd\.?)\b""",
+        option = RegexOption.IGNORE_CASE
+    )
+    return name
+        .replace(regex, "")
+        .replace(Regex("""[.,\s]+$"""), "") // Odstraní tečky, čárky i mezery na konci řetězce
+        .trim()
 }
