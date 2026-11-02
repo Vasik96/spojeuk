@@ -117,6 +117,9 @@ class TransitRepository(context: Context? = null) {
     ): List<Journey> = withContext(Dispatchers.IO) {
         val b = store.ensure()
         withLiveDelays(b.planner.find(fromName, toName, startTime, count))
+
+        val journeys = b.planner.find(fromName, toName, startTime, count)
+        withRouteStops(withLiveDelays(journeys))
     }
 
     suspend fun searchMoreLater(fromName: String, toName: String, current: List<Journey>): List<Journey> =
@@ -148,6 +151,46 @@ class TransitRepository(context: Context? = null) {
             }
         }
         return journeys
+    }
+
+
+    private suspend fun withRouteStops(
+        journeys: List<Journey>
+    ): List<Journey> {
+        val tt = store.ensure().timetable
+
+        for (journey in journeys) {
+            val rideLegs = journey.rawLegs.filter { it.kind == "ride" }
+
+            val stopIds = mutableListOf<Int>()
+
+            rideLegs.forEach { leg ->
+                // Přidáme pouze nástupní a výstupní zastávku daného úseku.
+                if (stopIds.lastOrNull() != leg.fromStop) {
+                    stopIds.add(leg.fromStop)
+                }
+
+                if (stopIds.lastOrNull() != leg.toStop) {
+                    stopIds.add(leg.toStop)
+                }
+            }
+
+            journey.routeStops = stopIds.mapNotNull { stopId ->
+                tt.stops[stopId]?.name?.let { prettyName(it) }
+            }
+        }
+
+        return journeys
+    }
+
+
+    /** pěší trasa po silnici **/
+    suspend fun boardWalk(j: Journey): WalkRoute? = withContext(Dispatchers.IO) {
+        val tt = store.ensure().timetable
+        val leg = j.rawLegs.firstOrNull()?.takeIf { it.kind == "walk" } ?: return@withContext null
+        val a = tt.stops[leg.fromStop]?.takeIf { it.hasCoords } ?: return@withContext null
+        val b = tt.stops[leg.toStop]?.takeIf { it.hasCoords } ?: return@withContext null
+        osrm.walkRoute(a.lat to a.lng, b.lat to b.lng)
     }
 
     // ───────────────────────── živé polohy ─────────────────────────

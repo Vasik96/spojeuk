@@ -332,7 +332,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     routeArrowDescriptor(primaryColor = arrowArgb, scale = arrowScale)
                 }
 
-                val walk = appState.walkRoute
+                val walk = appState.journeyWalk ?: appState.walkRoute
                 if (walk != null && appState.tripRoute.isNotEmpty()) {
                     val walkPoints = remember(walk) { walk.points.map { LatLng(it.first, it.second) } }
                     Polyline(
@@ -763,7 +763,7 @@ private fun MapLibreScreenContent(
     val primaryColorArgb = primaryColor.toArgb()
     val tertiaryArgb = tertiaryColor.toArgb()
     val arrowArgb = arrowColor.toArgb()
-    val walk = appState.walkRoute
+    val walk = appState.journeyWalk ?: appState.walkRoute
     val tripRoute = appState.tripRoute
     val fullRoute = appState.fullRoute
 

@@ -70,6 +70,10 @@ data class Journey(
     val rawLegs: List<Leg> = emptyList(),
     val transfers: Int = if (line2 != null) 1 else 0,
     val cis: String = "",
+    val boardWalkMin: Int? = null,      // chůze před prvním spojem
+    val boardStopName: String? = null,  // kam se jde pěšky
+    val transferWalkMin: Int? = null,   // chůze mezi spoji
+    var routeStops: List<String> = emptyList(),
 ) {
     val dep: Int get() = sortKey
     val arr: Int get() = sortKey + durationMinutes * 60

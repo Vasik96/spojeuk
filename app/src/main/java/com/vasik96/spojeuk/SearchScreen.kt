@@ -1147,6 +1147,7 @@ private fun StopPickerSheet(
 
 
 
+
 @Composable
 private fun JourneyCard(
     j: Journey,
@@ -1328,30 +1329,82 @@ private fun JourneyCard(
             }
 
             // 3. Chůze k zastávce
-            if (walk != null) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.DirectionsWalk,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = colors.tertiary
-                    )
-
-                    Text(
-                        "${walk.minutes} min chůze k zastávce · ${fmtDist(walk.distanceM)}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = colors.tertiary
-                    )
+            val walkText = when {
+                j.boardWalkMin != null ->
+                    "${j.boardWalkMin} min pěšky na ${splitStopName(j.boardStopName.orEmpty()).first}"
+                walk != null -> "${walk.minutes} min chůze k zastávce · ${fmtDist(walk.distanceM)}"
+                else -> null
+            }
+            if (walkText != null) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.AutoMirrored.Filled.DirectionsWalk, null, Modifier.size(16.dp), tint = colors.tertiary)
+                    Text(walkText, style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium, color = colors.tertiary)
                 }
             }
 
             HorizontalDivider(
                 color = colors.outlineVariant.copy(alpha = 0.35f)
             )
+
+            // Trasa spoje – pouze začátek, přestupy a cíl
+            if (j.routeStops.size >= 2) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Text(
+                        "Trasa spoje",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        itemVerticalAlignment = Alignment.CenterVertically
+                    ) {
+                        j.routeStops.forEachIndexed { index, stop ->
+                            Text(
+                                splitStopName(stop).first,
+                                style = if (
+                                    index == 0 || index == j.routeStops.lastIndex
+                                ) {
+                                    MaterialTheme.typography.bodyMedium
+                                } else {
+                                    MaterialTheme.typography.bodySmall
+                                },
+                                fontWeight = if (
+                                    index == 0 || index == j.routeStops.lastIndex
+                                ) {
+                                    FontWeight.Bold
+                                } else {
+                                    FontWeight.Normal
+                                },
+                                color = when (index) {
+                                    0 -> colors.primary
+                                    j.routeStops.lastIndex -> colors.tertiary
+                                    else -> colors.onSurfaceVariant
+                                }
+                            )
+
+                            if (index < j.routeStops.lastIndex) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                    tint = colors.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider(
+                    color = colors.outlineVariant.copy(alpha = 0.35f)
+                )
+            }
+
 
             // 4. Detaily spoje
             Column(
@@ -1364,7 +1417,8 @@ private fun JourneyCard(
                                 ?.takeIf { it.isNotBlank() }
                                 ?.let { stopLabel(it) }
                                 ?: "mezi spoji"
-                        } · čekání ${j.transferWait ?: "?"} min",
+                        } · čekání ${j.transferWait ?: "?"} min" +
+                                (j.transferWalkMin?.let { " · $it min pěšky" } ?: ""),
                         style = MaterialTheme.typography.bodyMedium
                     )
                 } else {
@@ -1373,6 +1427,8 @@ private fun JourneyCard(
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
+
+
 
                 if (j.destination.isNotBlank()) {
                     Text(
