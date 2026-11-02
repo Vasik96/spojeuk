@@ -76,11 +76,16 @@ class VehicleFusion(
 
     /** [a] má vyšší prioritu než [b] (skupina je řazená podle priority). */
     private fun aheadOf(a: Vehicle, b: Vehicle, tid: Int, progress: TripProgress?, nowMs: Long): Vehicle {
+        val ageA = a.ageSec(nowMs)
+        val ageB = b.ageSec(nowMs)
+        when {
+            ageA + freshnessSlackSec < ageB -> return a
+            ageB + freshnessSlackSec < ageA -> return b
+        }
         val pa = if (tid != 0) progress?.along(tid, a.lat, a.lng) else null
         val pb = if (tid != 0) progress?.along(tid, b.lat, b.lng) else null
         return when {
             pa != null && pb != null && abs(pa - pb) > tieM -> if (pa > pb) a else b
-            b.ageSec(nowMs) + freshnessSlackSec < a.ageSec(nowMs) -> b
             else -> a
         }
     }

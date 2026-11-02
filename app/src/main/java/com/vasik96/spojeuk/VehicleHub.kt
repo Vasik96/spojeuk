@@ -22,11 +22,13 @@ data class Fleet(
 ) {
     private val byTid: Map<Int, List<Vehicle>> by lazy { vehicles.filter { it.tid != 0 }.groupBy { it.tid } }
 
-    /** Vůz, který právě jede spoj [leg] (jen přesně přiřazené spoje, ne hádané). */
-    fun liveOn(leg: Leg, day: LocalDate): Vehicle? {
+    /** Vůz, který právě jede spoj [leg] (přednost má přesné přiřazení a čerstvé polohy). */
+    fun liveOn(leg: Leg, day: LocalDate, nowMs: Long = System.currentTimeMillis()): Vehicle? {
         val rel = secondsSinceMidnight(day)
         if (rel < leg.t0 - 3600 || rel > leg.t1 + 3600) return null
-        return byTid[leg.tid]?.firstOrNull { it.tripMatch == TripMatch.EXACT && it.state in 0..1 && it.delay > -30 }
+        val candidates = byTid[leg.tid]?.filter { it.state in 0..1 && it.delay > -30 && it.ageSec(nowMs) <= 180 } ?: return null
+        return candidates.firstOrNull { it.tripMatch == TripMatch.EXACT }
+            ?: candidates.firstOrNull { it.tripMatch == TripMatch.HEURISTIC }
     }
 
     companion object {
