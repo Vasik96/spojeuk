@@ -32,7 +32,7 @@ class DpmulSource(
     override val name = "DPMÚL"
     override val priority = 0
     override val segments = setOf(Segment.CITY)
-    override val freshness = Freshness(maxFetchAgeMs = 60_000, maxMedianAgeSec = 180)
+    override val freshness = Freshness(maxFetchAgeMs = 60_000, maxMedianAgeSec = 180, staleVehicleSec = 90)
     override val tripMatcher = TripMatchers.byPosition(DPMUL_AGENCY_KEYWORDS)
     override val awaitResult = false
     override val minIntervalMs = 5_000L

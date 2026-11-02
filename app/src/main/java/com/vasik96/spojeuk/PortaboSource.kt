@@ -113,6 +113,7 @@ class PortaboSource(
     private fun parse(data: JSONObject): List<Vehicle> {
         val arr = data.optJSONArray("VehicleList") ?: return emptyList()
         val out = ArrayList<Vehicle>(arr.length())
+        val nowMs = System.currentTimeMillis()
         for (i in 0 until arr.length()) {
             val e = arr.optJSONObject(i) ?: continue
             val lat = e.optDouble("Latitude", 0.0)
@@ -121,7 +122,15 @@ class PortaboSource(
             val id = e.optInt("ID", 0)
             val serverAgeSec = e.optInt("_ageSec", 0)
             if (state == 255 || lat == 0.0 || lon == 0.0) continue
-            if (serverAgeSec == 0 && isTooOld(e, id)) continue
+
+            val activityDt = runCatching { OffsetDateTime.parse(e.optStringClean("LastActivityDT", "")) }.getOrNull()
+            val ageSec = when {
+                serverAgeSec > 0 -> serverAgeSec.toLong()
+                activityDt != null -> maxOf(0L, Duration.between(activityDt.toInstant(), Instant.ofEpochMilli(nowMs)).seconds)
+                else -> 0L
+            }
+
+            if (isTooOld(activityDt, id, ageSec)) continue
 
             val agency = e.optStringClean("agency", e.optStringClean("agency_name", ""))
             val destination = e.optStringClean("headsign", e.optStringClean("destination", e.optStringClean("last_stop", "")))
@@ -137,8 +146,8 @@ class PortaboSource(
                         else -> e.optStringClean("qride_linename", e.optStringClean("LineID", "?")).trim()
                     },
                     delay = e.optInt("Delay", 0),
-                    // server může vůz držet; skutečné stáří poskytuje _ageSec
-                    observedAtMs = System.currentTimeMillis() - serverAgeSec * 1000L,
+                    // server může vůz držet; skutečné stáří poskytuje _ageSec nebo LastActivityDT
+                    observedAtMs = nowMs - ageSec * 1000L,
                     id = id,
                     trip = e.optStringClean("RouteID", ""),
                     cis = String.format(Locale.ROOT, "%06d", e.optInt("CISLineID", 0)),
@@ -157,10 +166,10 @@ class PortaboSource(
     private fun optBool(e: JSONObject, key: String): Boolean? =
         if (e.has(key) && !e.isNull(key)) e.optBoolean(key) else null
 
-    private fun isTooOld(e: JSONObject, id: Int): Boolean {
-        val at = runCatching { OffsetDateTime.parse(e.optStringClean("LastActivityDT", "")) }.getOrNull() ?: return false
+    private fun isTooOld(activityDt: OffsetDateTime?, id: Int, ageSec: Long): Boolean {
+        if (activityDt == null) return false
         val limitMin = if (id in MHD_IDS) 45L else 10L
-        return Duration.between(at.toInstant(), Instant.now()).abs().toMinutes() > limitMin
+        return ageSec > limitMin * 60L
     }
 
     private fun segmentOf(id: Int, agency: String): Segment {
