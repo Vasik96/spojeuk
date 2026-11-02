@@ -314,7 +314,7 @@ class SpojeAppState(
                     forceDownload = true
                 )
             }.onSuccess {
-                updateSuccess = "Trasy spojů (Shapes) byly úspěšně aktualizovány!"
+                updateSuccess = "Trasy spojů (Shapes) byly úspěšně aktualizovány! Změny se projeví po restartu."
                 updateStatusMessage = null
             }.onFailure {
                 if (it is CancellationException) throw it
