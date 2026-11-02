@@ -49,6 +49,10 @@ class VehicleFusion(
     }
 
     private fun sameVehicle(a: Vehicle, b: Vehicle, nowMs: Long): Boolean {
+        if (a.id != 0 && b.id != 0) {
+            return sameVehicleId(a.id, b.id)
+        }
+
         if (a.tid != 0 && b.tid != 0 && a.tid == b.tid) return true
 
         if (normLine(a.line) != normLine(b.line)) return false

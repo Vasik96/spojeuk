@@ -34,6 +34,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,10 +63,17 @@ internal fun VehicleDetailBottomSheet(
 
     var tripInfo by remember(vehicle.uid) { mutableStateOf<VehicleTripInfo?>(null) }
 
-    LaunchedEffect(vehicle.uid) {
-        tripInfo = runCatching { api.vehicleTripInfo(vehicle) }.getOrNull()
-    }
+    val currentVehicle by rememberUpdatedState(vehicle)
 
+
+    LaunchedEffect(vehicle.uid) {
+        while (true) {
+            runCatching { api.vehicleTripInfo(currentVehicle) }
+                .getOrNull()
+                ?.let { tripInfo = it }   // při chybě necháme poslední známou hodnotu
+            delay(10_000.milliseconds)
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -101,7 +109,7 @@ internal fun VehicleDetailBottomSheet(
             ) {
                 Text(
                     if (vehicle.id != 0) {
-                        "ID vozidla: ${vehicle.source}:${vehicle.id}"
+                        "ID vozidla: ${vehicle.uid}"
                     } else {
                         "ID vozidla: není dostupné"
                     },

@@ -47,6 +47,7 @@ private fun lerpLatLng(a: LatLng, b: LatLng, t: Double) = LatLng(
 /** Stejné vozidlo i když se mezi polly změnil objekt (a u id == 0 i uid). */
 internal fun Vehicle.sameAs(o: Vehicle): Boolean =
     this === o || uid == o.uid ||
+            (id != 0 && o.id != 0 && sameVehicleId(id, o.id)) ||
             (cis.isNotBlank() && trip.isNotBlank() && source == o.source && cis == o.cis && trip == o.trip)
 
 // ───────────────────────── trasa jako polyline ─────────────────────────
@@ -386,17 +387,17 @@ internal class VehicleKeyer {
             return key
         }
 
-        // 1. Zachování identity v rámci stejného zdroje.
+        // 1. Zachování identity v rámci stejného zdroje nebo přes stejné ID vozidla.
         for ((i, v) in list.withIndex()) {
             val pi = prev.indices.firstOrNull { p ->
                 if (p in usedPrev) return@firstOrNull false
 
                 val old = prev[p]
-                if (old.source != v.source) return@firstOrNull false
 
                 when {
-                    v.id != 0 -> old.id == v.id
-                    v.cis.isNotBlank() && v.trip.isNotBlank() ->
+                    v.id != 0 && old.id != 0 && sameVehicleId(v.id, old.id) -> true
+                    old.source == v.source && v.id != 0 -> old.id == v.id
+                    old.source == v.source && v.cis.isNotBlank() && v.trip.isNotBlank() ->
                         old.cis == v.cis && old.trip == v.trip
                     else -> false
                 }

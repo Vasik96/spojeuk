@@ -178,10 +178,11 @@ class SpojeAppState(
     var focusedTripVehicle by mutableStateOf<Vehicle?>(null)
     var focusedTripRef by mutableStateOf<TripRef?>(null)
 
-    /** Najde v novém seznamu stejný vůz jako [cur]. Primárně podle source + id (vehicleNumber). */
+    /** Najde v novém seznamu stejný vůz jako [cur]. Primárně podle source + id (vehicleNumber) nebo sameVehicleId. */
     private fun rematch(list: List<Vehicle>, cur: Vehicle): Vehicle? {
         if (cur.id != 0) {
             return list.firstOrNull { it.source == cur.source && it.id == cur.id }
+                ?: list.firstOrNull { it.id != 0 && sameVehicleId(it.id, cur.id) }
         }
         // jen záloha pro zdroje bez id: nejbližší vůz stejné linky a zdroje do 300 m
         return list
