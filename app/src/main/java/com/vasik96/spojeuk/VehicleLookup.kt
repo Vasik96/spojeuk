@@ -49,8 +49,19 @@ internal fun findVehicle(list: List<Vehicle>, ref: TripRef, route: List<LatLng>)
         }?.let { return VehicleMatch(it, approximate = false) }
     }
 
-    // U minulých odjezdů (past / earlier) netipujeme polohu vozu, pokud nemáme přesné ID
+    // U minulých odjezdů (past / earlier) netipujeme polohu vozu, pokud nemáme přesné ID - nedava smysl to tipovat v tomto pripade
     if (ref.isPast) return null
+
+    // Odhad polohy nepoužíváme, pokud do odjezdu zbývá více než 30 minut - nedava smysl to tipovat v tomto pripade
+    val departure = ref.departureTimeMillis
+    if (departure != null) {
+        val minutesUntilDeparture =
+            (departure - System.currentTimeMillis()) / 60_000
+
+        if (minutesUntilDeparture > 30) return null
+    }
+
+
 
     // 2) fallback: nejbližší autobus stejné linky PŘED nástupní zastávkou, správným směrem
     val bLat = ref.boardLat ?: return null

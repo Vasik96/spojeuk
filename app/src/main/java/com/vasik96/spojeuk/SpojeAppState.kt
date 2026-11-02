@@ -33,7 +33,8 @@ class TripRef(
     val boardLat: Double?,
     val boardLng: Double?,
     val destination: String = "",
-    val isPast: Boolean = false
+    val isPast: Boolean = false,
+    val departureTimeMillis: Long? = null
 )
 
 enum class AppTheme(val label: String) {

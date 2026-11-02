@@ -278,12 +278,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val keyed = remember(allVehicles) { keyer.assign(allVehicles) }
 
     val activeVehicles: List<Pair<String, Vehicle>> =
-        if (strictMode && appState.hideOtherVehiclesOnMap) {
-            // STRIKTNĚ max. 1 vůz, a vždy ten zamčený. Nic jiného se nekreslí.
-            if (locked != null) {
-                val match = keyed.firstOrNull { it.second.uid == locked.uid }
-                listOf(match ?: ("locked_${locked.uid}" to locked))
-            } else emptyList()
+        if (strictMode && appState.hideOtherVehiclesOnMap && locked != null) {
+            val match = keyed.firstOrNull { it.second.uid == locked.uid }
+            listOf(match ?: ("locked_${locked.uid}" to locked))
         } else {
             keyed.filter { (_, x) ->
                 (target != null && x.uid == target.uid) ||
