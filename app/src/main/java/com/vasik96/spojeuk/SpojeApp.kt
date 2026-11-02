@@ -232,6 +232,7 @@ internal fun SpojeApp() {
                                         appState.tripRoute = emptyList()
                                         appState.fullRoute = emptyList()
                                         appState.tripStops = emptyList()
+                                        appState.journeyWalk = null
                                         appState.routeLoading = true
                                         appState.vehiclesLoaded = false
                                         appState.focusTrip = ref
@@ -241,9 +242,11 @@ internal fun SpojeApp() {
                                             val points = api.journeyGeometry(journey)
                                             val full = api.firstLegFullRoute(journey)
                                             val stops = api.firstLegStopLocations(journey)
+                                            val walk = api.boardWalk(journey)  // nové
                                             appState.tripRoute = points.map { LatLng(it.first, it.second) }
                                             appState.fullRoute = full.map { LatLng(it.first, it.second) }
                                             appState.tripStops = stops.map { LatLng(it.first, it.second) }
+                                            appState.journeyWalk = walk        // nové
                                             appState.routeLoading = false
                                         }
                                     }

@@ -134,6 +134,8 @@ class SpojeAppState(
 
     var searchedFrom by mutableStateOf<Stop?>(null)
 
+    var journeyWalk by mutableStateOf<WalkRoute?>(null)
+
     // Settings & Preferences
     private val settingsPrefs = context.getSharedPreferences("app_settings_prefs", Context.MODE_PRIVATE)
 

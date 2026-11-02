@@ -277,8 +277,16 @@ class Net(val tt: Timetable, val day: LocalDate) {
 
         val rides = legs.filter { it.kind == "ride" }
         val firstRide = rides.first()
-        val dep = firstRide.dep
+        val firstWalk = legs.first().takeIf { it.kind == "walk" }
+        val dep = firstWalk?.dep ?: firstRide.dep          // odchod = začátek chůze
         val arr = legs.maxOf { it.arr }
+
+        fun walkMin(l: Leg) = (l.arr - l.dep + 59) / 60
+        val midWalk = if (rides.size > 1) {
+            val i0 = legs.indexOfFirst { it === rides[0] }
+            val i1 = legs.indexOfFirst { it === rides[1] }
+            legs.subList(i0 + 1, i1).firstOrNull { it.kind == "walk" }
+        } else null
 
         val line1 = tt.trips[firstRide.tid]?.line ?: "?"
         val line2 = if (rides.size > 1) tt.trips[rides[1].tid]?.line else null
@@ -310,7 +318,10 @@ class Net(val tt: Timetable, val day: LocalDate) {
             sortKey = dep,
             day = day,
             rawLegs = legs,
-            cis = tt.trips[firstRide.tid]?.cis ?: ""
+            cis = tt.trips[firstRide.tid]?.cis ?: "",
+            boardWalkMin = firstWalk?.let { walkMin(it) },
+            boardStopName = firstWalk?.let { tt.stops[it.toStop]?.name?.let { n -> prettyName(n) } },
+            transferWalkMin = midWalk?.let { walkMin(it) }
         )
     }
 }
