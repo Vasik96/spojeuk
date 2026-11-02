@@ -180,7 +180,8 @@ class DukDirectTest {
 
     @Test
     fun testFleetLiveOnRejectsStaleExactAndReturnsFreshHeuristic() {
-        val nowMs = 1_000_000_000L
+        val testDay = LocalDate.of(2026, 10, 23)
+        val nowMs = testDay.atTime(10, 5).atZone(PRAGUE_ZONE).toInstant().toEpochMilli()
         val leg = Leg(kind = "ride", fromStop = 1, toStop = 2, dep = 36000, arr = 36600, tid = 100, t0 = 36000, t1 = 36600)
 
         val vDukStale = Vehicle(
@@ -199,8 +200,106 @@ class DukDirectTest {
 
         val fleet = Fleet(vehicles = listOf(vDukStale, vDpmulFresh), reports = emptyList(), label = "", warningCount = 0)
 
-        val live = fleet.liveOn(leg, day = LocalDate.now(), nowMs = nowMs)
+        val live = fleet.liveOn(leg, day = testDay, nowMs = nowMs)
         assertEquals("dpmul", live?.source)
         assertEquals(2, live?.delay)
+    }
+
+    @Test
+    fun testVehicleIdNormalizationAndMatching() {
+        assertEquals(451, baseVehicleId(300451))
+        assertEquals(1212, baseVehicleId(301212))
+        assertEquals(1212, baseVehicleId(3001212))
+        assertEquals(400123, baseVehicleId(400123)) // Teplice se nesahá
+        assertEquals(451, baseVehicleId(451))
+        assertEquals(1212, baseVehicleId(1212))
+        assertEquals(300, baseVehicleId(300))
+        assertEquals(300, baseVehicleId(300300))
+
+        assertEquals(true, sameVehicleId(300451, 451))
+        assertEquals(true, sameVehicleId(301212, 1212))
+        assertEquals(false, sameVehicleId(400123, 123)) // Teplice se nepáruje s 123
+        assertEquals(true, sameVehicleId(300300, 300))
+        assertEquals(false, sameVehicleId(300451, 300452))
+        assertEquals(false, sameVehicleId(451, 452))
+        assertEquals(false, sameVehicleId(0, 451))
+    }
+
+    @Test
+    fun testVehicleFusionFusesByVehicleIdAcrossDukAndDpmul() {
+        val nowMs = 1_000_000_000L
+        val fusion = VehicleFusion()
+
+        val dpmulReport = SourceReport("dpmul", "DPMÚL", priority = 0, segments = setOf(Segment.CITY), health = Health.LIVE)
+        val dukReport = SourceReport("duk", "DÚK", priority = 1, segments = setOf(Segment.CITY), health = Health.LIVE)
+
+        val vDpmul = Vehicle(
+            source = "dpmul",
+            lat = 50.6600,
+            lng = 14.0400,
+            line = "11",
+            delay = 1,
+            observedAtMs = nowMs - 10_000L,
+            id = 451,
+            segment = Segment.CITY
+        )
+
+        val vDuk = Vehicle(
+            source = "duk",
+            lat = 50.6900, // třeba i geograficky dál kvůli zpoždění
+            lng = 14.0900,
+            line = "11",
+            delay = 1,
+            observedAtMs = nowMs - 10_000L,
+            id = 300451,
+            segment = Segment.CITY
+        )
+
+        val inputs = listOf(
+            SourceInput(dpmulReport, staleVehicleSec = 90, vehicles = listOf(vDpmul)),
+            SourceInput(dukReport, staleVehicleSec = 40, vehicles = listOf(vDuk))
+        )
+
+        val fused = fusion.fuse(inputs, progress = null, nowMs = nowMs)
+        assertEquals(1, fused.size)
+    }
+
+    @Test
+    fun testVehicleFusionDoesNotFuseDifferentVehicleIdsEvenIfClose() {
+        val nowMs = 1_000_000_000L
+        val fusion = VehicleFusion()
+
+        val dpmulReport = SourceReport("dpmul", "DPMÚL", priority = 0, segments = setOf(Segment.CITY), health = Health.LIVE)
+        val dukReport = SourceReport("duk", "DÚK", priority = 1, segments = setOf(Segment.CITY), health = Health.LIVE)
+
+        val vDpmul = Vehicle(
+            source = "dpmul",
+            lat = 50.6600,
+            lng = 14.0400,
+            line = "11",
+            delay = 1,
+            observedAtMs = nowMs - 10_000L,
+            id = 451,
+            segment = Segment.CITY
+        )
+
+        val vDukDifferent = Vehicle(
+            source = "duk",
+            lat = 50.6601, // velmi blízko (10m)
+            lng = 14.0401,
+            line = "11",
+            delay = 1,
+            observedAtMs = nowMs - 10_000L,
+            id = 300452, // jiné vozidlo
+            segment = Segment.CITY
+        )
+
+        val inputs = listOf(
+            SourceInput(dpmulReport, staleVehicleSec = 90, vehicles = listOf(vDpmul)),
+            SourceInput(dukReport, staleVehicleSec = 40, vehicles = listOf(vDukDifferent))
+        )
+
+        val fused = fusion.fuse(inputs, progress = null, nowMs = nowMs)
+        assertEquals(2, fused.size)
     }
 }
