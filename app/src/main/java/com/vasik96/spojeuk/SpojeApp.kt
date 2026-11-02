@@ -244,7 +244,11 @@ internal fun SpojeApp() {
                                             boardLat = bp?.first,
                                             boardLng = bp?.second,
                                             destination = journey.destination,
-                                            isPast = isPast
+                                            isPast = isPast,
+                                            departureTimeMillis = journey.depDt
+                                                .atZone(java.time.ZoneId.of("Europe/Prague"))
+                                                .toInstant()
+                                                .toEpochMilli()
                                         )
                                         appState.selectedVehicle = null
                                         appState.focusedTripVehicle = null
