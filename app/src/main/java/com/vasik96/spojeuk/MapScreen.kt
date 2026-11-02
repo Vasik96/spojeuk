@@ -66,6 +66,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -464,6 +465,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 hasLocationPermission = hasLocationPermission,
                 tertiaryColor = MaterialTheme.colorScheme.tertiary,
                 arrowColor = MaterialTheme.colorScheme.onBackground,
+                routes = routes
             )
         }
 
@@ -645,6 +647,7 @@ private fun MapLibreScreenContent(
     onMapReady: (MapLibreMap) -> Unit,
     tertiaryColor: Color,
     arrowColor: Color,
+    routes: VehicleRoutes,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -715,6 +718,15 @@ private fun MapLibreScreenContent(
         },
         modifier = modifier
     )
+
+    val predict = appState.predictVehiclePositions
+    for ((vkey, v) in activeVehicles) {
+        key(vkey) {
+            MapLibreVehicleMotion(v, routes, predict) { pos ->
+                vehicleMarkers[vkey]?.position = MapLibreLatLng(pos.latitude, pos.longitude)
+            }
+        }
+    }
 
     // styl se nastavuje jen jednou a jen při změně tématu
     LaunchedEffect(useDarkMap, map) {
@@ -884,7 +896,6 @@ private fun MapLibreScreenContent(
                 )
                 vehicleLook[k] = look
             } else {
-                existing.position = pos
                 existing.title = v.uid
                 if (vehicleLook[k] != look) {
                     existing.icon = iconFactory.fromBitmap(markerBitmap(context, v.line, v.train, v.delay, iconPhase))
@@ -901,6 +912,48 @@ private fun MapLibreScreenContent(
         }
     }
 }
+
+
+@Composable
+private fun MapLibreVehicleMotion(
+    v: Vehicle,
+    routes: VehicleRoutes,
+    predict: Boolean,
+    onPosition: (LatLng) -> Unit,
+) {
+    val motion = remember { VehicleMotion(v.lat, v.lng, v.observedAtMs) }
+    val markerState = remember { MarkerState(LatLng(v.lat, v.lng)) }
+    val onPos by rememberUpdatedState(onPosition)
+
+    var route by remember { mutableStateOf<PathMeasure?>(null) }
+    val sig = "${v.tid}|${v.cis}|${v.trip}"
+    LaunchedEffect(sig, predict) {
+        route = null
+        if (!predict) return@LaunchedEffect
+        var tries = 0
+        while (tries < 4) {
+            val r = routes.get(v)
+            if (r != null) { route = r; break }
+            tries++
+            delay(20_000)
+        }
+    }
+
+    val lat = v.lat
+    val lng = v.lng
+    val obs = v.observedAtMs
+    LaunchedEffect(lat, lng, route, predict) {
+        motion.setRoute(if (predict) route else null)
+        motion.onFix(lat, lng, obs)
+        motion.animate(markerState, predict)
+    }
+
+    // každou animovanou pozici přepošli do MapLibre markeru
+    LaunchedEffect(markerState) {
+        snapshotFlow { markerState.position }.collect { onPos(it) }
+    }
+}
+
 
 private fun softenDark(style: Style) {
     style.layers.forEach { layer ->
