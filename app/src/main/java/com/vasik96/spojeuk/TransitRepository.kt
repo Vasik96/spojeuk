@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.io.File
 import java.time.LocalDateTime
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Jediný vstup pro UI (nahrazuje DukApi). Sám nic nedělá, jen deleguje:
@@ -34,6 +35,8 @@ class TransitRepository(context: Context? = null) {
 
     @Volatile private var shapeUpgradeTried = false
 
+    private val autoPolicy = context?.let { AutoUpdatePolicy(it) }
+
     private fun onTimetableLoaded(tt: Timetable) {
         Log.i(TAG, "DB: hasGid=${tt.hasGid} trips=${tt.meta["trips"]} tag=${tt.meta["tag"]}")
         if (!tt.hasGid) scheduleShapeUpgrade()
@@ -47,7 +50,24 @@ class TransitRepository(context: Context? = null) {
         if (shapeUpgradeTried) return
         shapeUpgradeTried = true
         scope.launch {
-            runCatching { store.update() }.onFailure { Log.w(TAG, "aktualizace s trasami selhala: ${it.message}") }
+            runCatching { store.stageUpdate() }.onFailure { Log.w(TAG, "aktualizace s trasami selhala: ${it.message}") }
+        }
+    }
+
+    suspend fun autoUpdate(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val staged = store.hasPending() || autoPolicy?.timetableStagedRecently() == true
+            if (!staged) {
+                store.stageUpdate()
+                autoPolicy?.timetableStagedMs = System.currentTimeMillis()
+            }
+            shapes.sync(http, force = true)
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "auto-update selhal: ${e.message}")
+            false
         }
     }
 
@@ -63,8 +83,8 @@ class TransitRepository(context: Context? = null) {
     fun getTimetableMeta(): Map<String, String> = store.meta()
     fun getShapesMeta(): String? = shapes.getBuiltDate()
 
-    suspend fun updateTimetable(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): Timetable =
-        store.update(log, progress).timetable
+    suspend fun updateTimetable(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): Unit =
+        store.stageUpdate(log, progress)
 
     suspend fun updateShapes(log: (String) -> Unit = {}, forceDownload: Boolean = false): Boolean =
         withContext(Dispatchers.IO) {
@@ -81,8 +101,11 @@ class TransitRepository(context: Context? = null) {
         return count
     }
 
-    suspend fun updateAllData(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}) =
-        withContext(Dispatchers.IO) {
+    suspend fun updateAllData(
+        log: (String) -> Unit = {},
+        progress: (Float) -> Unit = {},
+        forceShapes: Boolean = true,
+    ) = withContext(Dispatchers.IO) {
             log("Zahajuji kompletní aktualizaci všech dat…")
             progress(0.05f)
 
@@ -91,7 +114,7 @@ class TransitRepository(context: Context? = null) {
 
             log("2/4: Stahuji trasy a geometrie (Shapes)…")
             progress(0.6f)
-            updateShapes(log = { log("2/4: $it") }, forceDownload = true)
+            updateShapes(log = { log("2/4: $it") }, forceDownload = forceShapes)
 
             log("3/4: Obnovuji živá data vozidel…")
             progress(0.8f)

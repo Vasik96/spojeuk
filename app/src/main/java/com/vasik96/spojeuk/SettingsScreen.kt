@@ -610,7 +610,8 @@ private fun DataUpdatesScreen(
                     ) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.5.dp
+                            strokeWidth = 2.5.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
                         )
                         Text(
                             "Probíhá aktualizace…",
@@ -629,7 +630,8 @@ private fun DataUpdatesScreen(
                     if (appState.updateProgress > 0f) {
                         LinearProgressIndicator(
                             progress = { appState.updateProgress },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.onPrimary
                         )
                     }
                 }

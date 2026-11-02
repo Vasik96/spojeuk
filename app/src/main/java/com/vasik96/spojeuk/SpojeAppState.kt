@@ -239,14 +239,19 @@ class SpojeAppState(
         return true
     }
 
-    fun performUpdateAll(api: TransitRepository, scope: CoroutineScope) {
+    fun performUpdateAll(
+        api: TransitRepository,
+        scope: CoroutineScope,
+        onSuccess: () -> Unit = {},
+    ) {
         if (!beginUpdate("Zahajuji aktualizaci…")) return
 
         scope.launch {
             runCatching {
                 api.updateAllData(
                     log = { updateStatusMessage = it },
-                    progress = { updateProgress = it }
+                    progress = { updateProgress = it },
+                    forceShapes = false,   // při automatice stahovat shapes jen když se změnily
                 )
                 stopsLoading = true
                 val loaded = api.loadStops(
@@ -256,9 +261,11 @@ class SpojeAppState(
                 updateIndexedStops(loaded)
                 stopsLoading = false
             }.onSuccess {
-                updateSuccess = "Všechna data byla úspěšně stažena a aktualizována!"
+                updateSuccess = "Všechna data byla úspěšně stažena a aktualizována! Změny se projeví po restartu."
                 updateStatusMessage = null
+                onSuccess()
             }.onFailure {
+                stopsLoading = false
                 if (it is CancellationException) throw it
                 updateError = "Aktualizace selhala: ${it.message}"
                 updateStatusMessage = null
@@ -266,6 +273,7 @@ class SpojeAppState(
             isUpdatingData = false
         }
     }
+
 
     fun performUpdateTimetable(api: TransitRepository, scope: CoroutineScope) {
         if (!beginUpdate("Aktualizuji jízdní řády…")) return
@@ -284,7 +292,7 @@ class SpojeAppState(
                 updateIndexedStops(loaded)
                 stopsLoading = false
             }.onSuccess {
-                updateSuccess = "Jízdní řády byly úspěšně aktualizovány!"
+                updateSuccess = "Jízdní řády byly úspěšně aktualizovány! Změny se projeví po restartu."
                 updateStatusMessage = null
             }.onFailure {
                 if (it is CancellationException) throw it
