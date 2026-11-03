@@ -294,8 +294,35 @@ class Net(val tt: Timetable, val day: LocalDate) {
         val agency = tt.trips[firstRide.tid]?.agency ?: ""
 
         val totalStops = rides.sumOf { maxOf(0, it.stops.size - 1) }
-        val transferAtStop = if (rides.size > 1) tt.stops[rides[0].toStop]?.name else null
+        val transferAtStop = if (rides.size > 1) {
+            val fromName = tt.stops[rides[0].toStop]?.name
+            val toName = tt.stops[rides[1].fromStop]?.name
+            if (fromName != null && toName != null && rides[0].toStop != rides[1].fromStop) {
+                val fromClean = prettyName(fromName)
+                val toClean = prettyName(toName)
+                if (fromClean != toClean) {
+                    "${stopLabel(fromClean)} → ${stopLabel(toClean)}"
+                } else {
+                    fromClean
+                }
+            } else {
+                fromName?.let { prettyName(it) }
+            }
+        } else null
         val transferWaitMin = if (rides.size > 1) maxOf(0, (rides[1].dep - rides[0].arr) / 60) else null
+
+        val calcTransferWalkMin = if (rides.size > 1) {
+            if (midWalk != null) {
+                walkMin(midWalk)
+            } else if (rides[0].toStop != rides[1].fromStop) {
+                val a = tt.stops[rides[0].toStop]
+                val b = tt.stops[rides[1].fromStop]
+                if (a != null && b != null && a.hasCoords && b.hasCoords) {
+                    val dist = Geo.distanceM(a.lat, a.lng, b.lat, b.lng)
+                    maxOf(1, (dist / 80.0).toInt())
+                } else null
+            } else null
+        } else null
 
         val tripStr = tt.trips[firstRide.tid]?.num?.ifBlank { firstRide.tid.toString() } ?: firstRide.tid.toString()
         val trip2Str = if (rides.size > 1) (tt.trips[rides[1].tid]?.num?.ifBlank { rides[1].tid.toString() } ?: rides[1].tid.toString()) else null
@@ -311,7 +338,7 @@ class Net(val tt: Timetable, val day: LocalDate) {
             realtime = false,
             lowFloor = (tt.trips[firstRide.tid]?.wheel ?: 0) > 0,
             stopsCount = totalStops,
-            transferAt = transferAtStop?.let { prettyName(it) },
+            transferAt = transferAtStop,
             transferWait = transferWaitMin,
             trip = tripStr,
             trip2 = trip2Str,
@@ -321,7 +348,7 @@ class Net(val tt: Timetable, val day: LocalDate) {
             cis = tt.trips[firstRide.tid]?.cis ?: "",
             boardWalkMin = firstWalk?.let { walkMin(it) },
             boardStopName = firstWalk?.let { tt.stops[it.toStop]?.name?.let { n -> prettyName(n) } },
-            transferWalkMin = midWalk?.let { walkMin(it) }
+            transferWalkMin = calcTransferWalkMin
         )
     }
 }

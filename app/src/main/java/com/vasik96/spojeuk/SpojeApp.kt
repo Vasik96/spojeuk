@@ -78,6 +78,10 @@ internal fun SpojeApp() {
     val api = remember { TransitRepository(context) }
     val scope = rememberCoroutineScope()
 
+    LaunchedEffect(api, appState) {
+        api.setEnabledVehicleSources(appState.enabledVehicleSources)
+    }
+
     LaunchedEffect(Unit) {
         if (appState.stops.isEmpty()) {
             appState.stopsLoading = true
@@ -254,23 +258,26 @@ internal fun SpojeApp() {
                                         appState.focusedTripVehicle = null
                                         appState.focusedTripRef = ref
                                         appState.tripRoute = emptyList()
+                                        appState.tripRouteSegments = emptyList()
                                         appState.fullRoute = emptyList()
                                         appState.tripStops = emptyList()
-                                        appState.journeyWalk = null
+                                        appState.journeyWalks = emptyList()
                                         appState.routeLoading = true
                                         appState.vehiclesLoaded = false
                                         appState.focusTrip = ref
                                         appState.highlightedTrip = ref
                                         appState.selectedTab = 1
                                         scope.launch {
+                                            val segments = api.journeySegments(journey)
                                             val points = api.journeyGeometry(journey)
                                             val full = api.firstLegFullRoute(journey)
                                             val stops = api.firstLegStopLocations(journey)
-                                            val walk = api.boardWalk(journey)  // nové
+                                            val walks = api.journeyWalks(journey)
+                                            appState.tripRouteSegments = segments.map { seg -> seg.map { LatLng(it.first, it.second) } }
                                             appState.tripRoute = points.map { LatLng(it.first, it.second) }
                                             appState.fullRoute = full.map { LatLng(it.first, it.second) }
                                             appState.tripStops = stops.map { LatLng(it.first, it.second) }
-                                            appState.journeyWalk = walk        // nové
+                                            appState.journeyWalks = walks
                                             appState.routeLoading = false
                                         }
                                     }

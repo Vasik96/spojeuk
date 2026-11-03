@@ -37,8 +37,15 @@ class TransitRepository(context: Context? = null) {
 
     private val autoPolicy = context?.let { AutoUpdatePolicy(it) }
 
+    fun vehicleSourceOptions(): List<VehicleSourceOption> =
+        hub.sourceOptions()
+
+    fun setEnabledVehicleSources(ids: Set<String>?) {
+        hub.setEnabledSources(ids)
+    }
     private fun onTimetableLoaded(tt: Timetable) {
         Log.i(TAG, "DB: hasGid=${tt.hasGid} trips=${tt.meta["trips"]} tag=${tt.meta["tag"]}")
+        TrainLines.populateFromTimetable(tt)
         if (!tt.hasGid) scheduleShapeUpgrade()
         scope.launch {
             runCatching { shapes.sync(http) }.onFailure { Log.w(TAG, "sync tras selhal: ${it.message}") }
@@ -207,13 +214,30 @@ class TransitRepository(context: Context? = null) {
     }
 
 
-    /** pěší trasa po silnici **/
-    suspend fun boardWalk(j: Journey): WalkRoute? = withContext(Dispatchers.IO) {
+    /** Všechny pěší trasy po silnici v rámci spojení (před nástupem i při přestupech) **/
+    suspend fun journeyWalks(j: Journey): List<WalkRoute> = withContext(Dispatchers.IO) {
         val tt = store.ensure().timetable
-        val leg = j.rawLegs.firstOrNull()?.takeIf { it.kind == "walk" } ?: return@withContext null
-        val a = tt.stops[leg.fromStop]?.takeIf { it.hasCoords } ?: return@withContext null
-        val b = tt.stops[leg.toStop]?.takeIf { it.hasCoords } ?: return@withContext null
-        osrm.walkRoute(a.lat to a.lng, b.lat to b.lng)
+        val routes = mutableListOf<WalkRoute>()
+        for (leg in j.rawLegs) {
+            if (leg.kind != "walk") continue
+            val a = tt.stops[leg.fromStop]?.takeIf { it.hasCoords } ?: continue
+            val b = tt.stops[leg.toStop]?.takeIf { it.hasCoords } ?: continue
+            if (leg.fromStop == leg.toStop || (a.lat == b.lat && a.lng == b.lng)) continue
+            val route = osrm.walkRoute(a.lat to a.lng, b.lat to b.lng)
+            if (route != null) {
+                routes.add(route)
+            } else {
+                val dist = Geo.distanceM(a.lat, a.lng, b.lat, b.lng)
+                val min = maxOf(1, (dist / 80.0).toInt())
+                routes.add(WalkRoute(listOf(a.lat to a.lng, b.lat to b.lng), dist, min))
+            }
+        }
+        routes
+    }
+
+    /** pěší trasa po silnici před nástupem **/
+    suspend fun boardWalk(j: Journey): WalkRoute? = withContext(Dispatchers.IO) {
+        journeyWalks(j).firstOrNull()
     }
 
     // ───────────────────────── živé polohy ─────────────────────────
@@ -266,6 +290,10 @@ class TransitRepository(context: Context? = null) {
 
     suspend fun routeForTrip(tid: Int): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
         geometry.forTrip(store.ensure().timetable, tid)
+    }
+
+    suspend fun journeySegments(j: Journey): List<List<Pair<Double, Double>>> = withContext(Dispatchers.IO) {
+        geometry.forJourneySegments(store.ensure().timetable, j)
     }
 
     suspend fun journeyGeometry(j: Journey): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {

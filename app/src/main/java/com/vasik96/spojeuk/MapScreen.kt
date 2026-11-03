@@ -291,10 +291,13 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             val match = keyed.firstOrNull { it.second.uid == locked.uid }
             listOf(match ?: ("locked_${locked.uid}" to locked))
         } else {
-            keyed.filter { (_, x) ->
+            keyed
+            // filter na ustecky kraj
+                /*
+                .filter { (_, x) ->
                 (target != null && x.uid == target.uid) ||
                         (x.lat in 50.35..50.95 && x.lng in 13.55..14.60)
-            }
+            }*/
         }
 
     LaunchedEffect(allVehicles) {
@@ -338,33 +341,45 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     routeArrowDescriptor(primaryColor = arrowArgb, scale = arrowScale)
                 }
 
-                val walk = appState.journeyWalk ?: appState.walkRoute
-                if (walk != null && appState.tripRoute.isNotEmpty()) {
-                    val walkPoints = remember(walk) { walk.points.map { LatLng(it.first, it.second) } }
-                    Polyline(
-                        points = walkPoints,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        width = 14f,
-                        zIndex = 0.2f,
-                        pattern = listOf(Dot(), Gap(14f)),
-                        startCap = RoundCap(),
-                        endCap = RoundCap(),
-                        jointType = JointType.ROUND
-                    )
+                val walkList = remember(appState.journeyWalks, appState.walkRoute) {
+                    if (appState.journeyWalks.isNotEmpty()) appState.journeyWalks
+                    else listOfNotNull(appState.journeyWalk ?: appState.walkRoute)
+                }
+                for (walk in walkList) {
+                    if (walk.points.size >= 2 && appState.tripRoute.isNotEmpty()) {
+                        val walkPoints = remember(walk) { walk.points.map { LatLng(it.first, it.second) } }
+                        Polyline(
+                            points = walkPoints,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            width = 14f,
+                            zIndex = 0.2f,
+                            pattern = listOf(Dot(), Gap(14f)),
+                            startCap = RoundCap(),
+                            endCap = RoundCap(),
+                            jointType = JointType.ROUND
+                        )
+                    }
                 }
 
                 if (appState.tripRoute.isNotEmpty()) {
                     val full = appState.fullRoute
-                    val line = if (showFullRoute && full.size >= 2) full else appState.tripRoute
-                    Polyline(
-                        points = line,
-                        color = primaryColor,
-                        width = 12f,
-                        zIndex = 0f,
-                        startCap = RoundCap(),
-                        endCap = RoundCap(),
-                        jointType = JointType.ROUND
-                    )
+                    val segments = if (showFullRoute && full.size >= 2) listOf(full)
+                    else if (appState.tripRouteSegments.isNotEmpty()) appState.tripRouteSegments
+                    else listOf(appState.tripRoute)
+
+                    for (line in segments) {
+                        if (line.size >= 2) {
+                            Polyline(
+                                points = line,
+                                color = primaryColor,
+                                width = 12f,
+                                zIndex = 0f,
+                                startCap = RoundCap(),
+                                endCap = RoundCap(),
+                                jointType = JointType.ROUND
+                            )
+                        }
+                    }
                 }
 
                 if (appState.tripRoute.size >= 2) {
@@ -541,6 +556,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             SmallFloatingActionButton(
                 onClick = {
                     appState.tripRoute = emptyList()
+                    appState.tripRouteSegments = emptyList()
                     appState.fullRoute = emptyList()
                     appState.tripStops = emptyList()
                     appState.focusedTripVehicle = null
@@ -548,6 +564,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     appState.highlightedTrip = null
                     appState.focusTrip = null
                     appState.walkRoute = null
+                    appState.journeyWalks = emptyList()
                 },
                 modifier = Modifier.align(Alignment.BottomStart).padding(start = 18.dp, bottom = 18.dp)
             ) { Icon(Icons.Default.Close, contentDescription = "Skrýt trasu") }
@@ -769,12 +786,13 @@ private fun MapLibreScreenContent(
     val primaryColorArgb = primaryColor.toArgb()
     val tertiaryArgb = tertiaryColor.toArgb()
     val arrowArgb = arrowColor.toArgb()
-    val walk = appState.journeyWalk ?: appState.walkRoute
+    val walkList = if (appState.journeyWalks.isNotEmpty()) appState.journeyWalks else listOfNotNull(appState.journeyWalk ?: appState.walkRoute)
     val tripRoute = appState.tripRoute
+    val tripRouteSegments = appState.tripRouteSegments
     val fullRoute = appState.fullRoute
 
     // TRASY
-    LaunchedEffect(map, tripRoute, fullRoute, walk, showFullRoute, primaryColorArgb, tertiaryArgb, arrowArgb, arrowScale, arrowSpacing, dotBucket, styleVersion) {
+    LaunchedEffect(map, tripRoute, tripRouteSegments, fullRoute, walkList, showFullRoute, primaryColorArgb, tertiaryArgb, arrowArgb, arrowScale, arrowSpacing, dotBucket, styleVersion) {
         val m = map ?: return@LaunchedEffect
         val style = m.style ?: return@LaunchedEffect
         if (!style.isFullyLoaded) return@LaunchedEffect
@@ -784,49 +802,60 @@ private fun MapLibreScreenContent(
         removeRouteLayers(style)
 
         if (tripRoute.size >= 2) {
-            val line = if (showFullRoute && fullRoute.size >= 2) fullRoute else tripRoute
+            val segments = if (showFullRoute && fullRoute.size >= 2) listOf(fullRoute)
+            else if (tripRouteSegments.isNotEmpty()) tripRouteSegments
+            else listOf(tripRoute)
 
-            // hlavní trasa
-            style.addSource(GeoJsonSource("route-src", line.toLineString()))
-            addBelowMarkers(
-                style,
-                LineLayer("route-line", "route-src").withProperties(
-                    PropertyFactory.lineColor(primaryColorArgb),
-                    PropertyFactory.lineWidth(12f / density),
-                    PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
-                    PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
-                )
-            )
+            val routeFeatures = segments.mapNotNull { seg ->
+                if (seg.size >= 2) Feature.fromGeometry(seg.toLineString()) else null
+            }
 
-            // pěší trasa: tečky (Google: Dot 14 px + Gap 14 px => perioda 28 px fyzických)
-            if (walk != null && walk.points.size >= 2) {
-                val pts = walk.points.map { LatLng(it.first, it.second) }
-                val zoom = dotBucket / 4f
-                val mpp = metersPerPixel(zoom, pts.first().latitude)      // metry na dp
-                val totalMeters = routeLength(pts)
-
-                val wantedDp = 28f / density                              // rozestup jako u Google
-                val minDots = 14
-                // rozestup se zmenší, pokud by tečky nevyšly aspoň minDots
-                val spacingDp = minOf(wantedDp.toDouble(), totalMeters / mpp / minDots).coerceAtLeast(3.0)
-                val ratio = (spacingDp / wantedDp).coerceIn(0.0, 1.0).toFloat()
-                val dotDp = (14f / density) * ratio.coerceAtLeast(0.35f)  // tečky se zmenší spolu s rozestupem
-
-                val dots = dotsAlong(pts, spacingDp * mpp)
-                if (dots.isNotEmpty()) {
-                    val features = dots.map { Feature.fromGeometry(Point.fromLngLat(it.longitude, it.latitude)) }
-                    style.addSource(GeoJsonSource("walk-src", FeatureCollection.fromFeatures(features)))
-                    style.addImage("walk-dot", walkDotBitmap(tertiaryArgb))
-                    addBelowMarkers(
-                        style,
-                        SymbolLayer("walk-dots", "walk-src").withProperties(
-                            PropertyFactory.iconImage("walk-dot"),
-                            PropertyFactory.iconSize(dotDp / 32f),
-                            PropertyFactory.iconAllowOverlap(true),
-                            PropertyFactory.iconIgnorePlacement(true)
-                        )
+            if (routeFeatures.isNotEmpty()) {
+                // hlavní trasa
+                style.addSource(GeoJsonSource("route-src", FeatureCollection.fromFeatures(routeFeatures)))
+                addBelowMarkers(
+                    style,
+                    LineLayer("route-line", "route-src").withProperties(
+                        PropertyFactory.lineColor(primaryColorArgb),
+                        PropertyFactory.lineWidth(12f / density),
+                        PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                        PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
                     )
+                )
+            }
+
+            // pěší trasa: tečky
+            val walkFeatures = mutableListOf<Feature>()
+            for (w in walkList) {
+                if (w.points.size >= 2) {
+                    val pts = w.points.map { LatLng(it.first, it.second) }
+                    val zoom = dotBucket / 4f
+                    val mpp = metersPerPixel(zoom, pts.first().latitude)      // metry na dp
+                    val totalMeters = routeLength(pts)
+
+                    val wantedDp = 28f / density                              // rozestup jako u Google
+                    val minDots = 14
+                    val spacingDp = minOf(wantedDp.toDouble(), totalMeters / mpp / minDots).coerceAtLeast(3.0)
+
+                    val dots = dotsAlong(pts, spacingDp * mpp)
+                    dots.forEach { dot ->
+                        walkFeatures.add(Feature.fromGeometry(Point.fromLngLat(dot.longitude, dot.latitude)))
+                    }
                 }
+            }
+            if (walkFeatures.isNotEmpty()) {
+                val dotDp = 14f / density
+                style.addSource(GeoJsonSource("walk-src", FeatureCollection.fromFeatures(walkFeatures)))
+                style.addImage("walk-dot", walkDotBitmap(tertiaryArgb))
+                addBelowMarkers(
+                    style,
+                    SymbolLayer("walk-dots", "walk-src").withProperties(
+                        PropertyFactory.iconImage("walk-dot"),
+                        PropertyFactory.iconSize((dotDp / 32f).coerceAtLeast(0.15f)),
+                        PropertyFactory.iconAllowOverlap(true),
+                        PropertyFactory.iconIgnorePlacement(true)
+                    )
+                )
             }
 
             // šipky
@@ -855,8 +884,9 @@ private fun MapLibreScreenContent(
             }
 
             // začátek a konec jako vrstva (pod autobusy)
-            val s = line.first()
-            val e = line.last()
+            val routeLine = if (showFullRoute && fullRoute.size >= 2) fullRoute else tripRoute
+            val s = routeLine.first()
+            val e = routeLine.last()
             val ends = FeatureCollection.fromFeatures(
                 listOf(
                     Feature.fromGeometry(Point.fromLngLat(s.longitude, s.latitude)).also { it.addStringProperty("img", "route-start") },

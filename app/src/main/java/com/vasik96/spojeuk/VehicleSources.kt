@@ -10,8 +10,12 @@ import java.io.File
  * Slučování, štítek "Zdroj:", varování i párování se spoji se přizpůsobí samo.
  */
 object VehicleSources {
-    fun create(context: Context?): List<VehicleSource> = listOf(
-        DpmulSource(),
-        PortaboSource(snapshotFile = File(context?.filesDir ?: File("/tmp"), "last_seen.json")),
-    )
+    fun create(context: Context?): List<VehicleSource> {
+        context?.let { TrainLines.init(it) }          // pending → active, načte do paměti
+        return listOf(
+            DpmulSource(),
+            PortaboSource(snapshotFile = File(context?.filesDir ?: File("/tmp"), "last_seen.json")),
+            SpravaZeleznicSource(),
+        )
+    }
 }

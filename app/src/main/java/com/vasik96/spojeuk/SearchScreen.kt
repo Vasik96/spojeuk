@@ -1415,7 +1415,7 @@ private fun JourneyCard(
                         "Přestup: ${
                             j.transferAt
                                 ?.takeIf { it.isNotBlank() }
-                                ?.let { stopLabel(it) }
+                                ?.let { if (it.contains("→")) it else stopLabel(it) }
                                 ?: "mezi spoji"
                         } · čekání ${j.transferWait ?: "?"} min" +
                                 (j.transferWalkMin?.let { " · $it min pěšky" } ?: ""),
