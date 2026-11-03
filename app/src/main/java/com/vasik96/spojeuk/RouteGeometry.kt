@@ -13,11 +13,15 @@ class RouteGeometry(
         return osrm.pathFor(stopCoords(tt, tid))
     }
 
-    /** Trasa všech jízd spojení (pěší úseky jako přímka). */
-    fun forJourney(tt: Timetable, j: Journey): LatLngList =
-        j.rawLegs.filter { it.kind == "ride" }.flatMap { leg ->
-            legShape(tt, leg) ?: osrm.pathFor(leg.stops.mapNotNull { coord(tt, it.first) })
+    /** Trasy jednotlivých jízd spojení (samostatné úseky pro zamezení rovných čar mezi přestupy). */
+    fun forJourneySegments(tt: Timetable, j: Journey): List<LatLngList> =
+        j.rawLegs.filter { it.kind == "ride" }.mapNotNull { leg ->
+            (legShape(tt, leg) ?: osrm.pathFor(leg.stops.mapNotNull { coord(tt, it.first) })).takeIf { it.isNotEmpty() }
         }
+
+    /** Trasa všech jízd spojení. */
+    fun forJourney(tt: Timetable, j: Journey): LatLngList =
+        forJourneySegments(tt, j).flatten()
 
     /** Celá trasa prvního spoje (i před nástupní zastávkou), pro hledání autobusu, který ještě nedojel. */
     fun firstLegFull(tt: Timetable, j: Journey): LatLngList {

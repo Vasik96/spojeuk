@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -39,6 +40,8 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -70,6 +73,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -112,7 +116,8 @@ internal fun SettingsScreen(
                 )
                 SettingsSubscreen.MAIN -> SettingsMain(
                     modifier = Modifier.fillMaxSize(),
-                    appState = appState
+                    appState = appState,
+                    api = api
                 )
             }
         }
@@ -122,7 +127,8 @@ internal fun SettingsScreen(
 @Composable
 private fun SettingsMain(
     modifier: Modifier = Modifier,
-    appState: SpojeAppState
+    appState: SpojeAppState,
+    api: TransitRepository
 ) {
     val scope = rememberCoroutineScope()
     var showThemeDialog by remember { mutableStateOf(false) }
@@ -519,6 +525,11 @@ private fun SettingsMain(
             }
         }
 
+        VehicleSourcesSettingsCard(
+            appState = appState,
+            api = api
+        )
+
         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
         SectionTitle("O aplikaci")
@@ -547,6 +558,127 @@ private fun SettingsMain(
     }
 }
 
+
+@Composable
+private fun VehicleSourcesSettingsCard(
+    appState: SpojeAppState,
+    api: TransitRepository
+) {
+    val sources = remember(api) {
+        api.vehicleSourceOptions()
+    }
+
+    val enabledIds = appState.enabledVehicleSources
+
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudDownload,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Zdroje poloh vozidel",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "Vyberte, ze kterých zdrojů se mají načítat živé polohy autobusů a vlaků.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            HorizontalDivider()
+
+            sources.forEach { source ->
+                val checked = enabledIds == null || source.id in enabledIds
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            val current = enabledIds ?: sources.map { it.id }.toSet()
+
+                            val updated = if (checked) {
+                                current - source.id
+                            } else {
+                                current + source.id
+                            }
+
+                            appState.updateEnabledVehicleSources(updated)
+                            api.setEnabledVehicleSources(updated)
+                        }
+                        .padding(vertical = 8.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            source.name,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+
+                    Switch(
+                        checked = checked,
+                        onCheckedChange = { newChecked ->
+                            val current = enabledIds ?: sources.map { it.id }.toSet()
+
+                            val updated = if (newChecked) {
+                                current + source.id
+                            } else {
+                                current - source.id
+                            }
+
+                            appState.updateEnabledVehicleSources(updated)
+                            api.setEnabledVehicleSources(updated)
+                        },
+                        thumbContent = {
+                            Icon(
+                                imageVector = if (checked) {
+                                    Icons.Default.Check
+                                } else {
+                                    Icons.Default.Close
+                                },
+                                contentDescription = null,
+                                modifier = Modifier.size(SwitchDefaults.IconSize),
+                                tint = if (checked) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                                }
+                            )
+                        }
+                    )
+                }
+            }
+
+            TextButton(
+                onClick = {
+                    appState.updateEnabledVehicleSources(null)
+                    api.setEnabledVehicleSources(null)
+                },
+                modifier = Modifier.align(Alignment.End)
+            ) {
+                Text("Obnovit výchozí výběr")
+            }
+        }
+    }
+}
 @Composable
 private fun SectionTitle(text: String) {
     Text(

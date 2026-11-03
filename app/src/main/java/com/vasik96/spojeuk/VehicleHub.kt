@@ -37,6 +37,11 @@ data class Fleet(
     }
 }
 
+data class VehicleSourceOption(
+    val id: String,
+    val name: String
+)
+
 /** Směr jízdy z posunu polohy, pro zdroje, které azimut nedávají (nebo dávají 0). */
 class HeadingTracker(private val minMoveM: Double = 15.0) {
     private val lastPos = HashMap<String, Pair<Double, Double>>()
@@ -88,6 +93,27 @@ class VehicleHub(
     @Volatile
     private var builtAtMs = 0L
 
+    @Volatile
+    private var enabledSourceIds: Set<String>? = null
+
+    @Synchronized
+    fun setEnabledSources(ids: Set<String>?) {
+        enabledSourceIds = ids?.toSet()
+        fleet = Fleet.EMPTY
+        builtAtMs = 0L
+    }
+
+    fun sourceOptions(): List<VehicleSourceOption> =
+        runners.map {
+            VehicleSourceOption(
+                id = it.source.id,
+                name = it.source.name
+            )
+        }
+
+
+
+
     fun sourceName(id: String): String = runners.firstOrNull { it.source.id == id }?.source?.name ?: id
 
     /**
@@ -98,7 +124,16 @@ class VehicleHub(
     suspend fun refresh(maxAgeMs: Long = 0): Fleet {
         val now = System.currentTimeMillis()
         if (maxAgeMs > 0 && fleet !== Fleet.EMPTY && now - builtAtMs < maxAgeMs) return fleet
-        runners.mapNotNull { r -> start(r)?.takeIf { r.source.awaitResult } }.joinAll()
+        val enabledIds = enabledSourceIds
+
+        runners
+            .filter { runner ->
+                enabledIds == null || runner.source.id in enabledIds
+            }
+            .mapNotNull { runner ->
+                start(runner)?.takeIf { runner.source.awaitResult }
+            }
+            .joinAll()
         return withContext(Dispatchers.Default) { rebuild() }
     }
 
@@ -126,15 +161,38 @@ class VehicleHub(
 
     @Synchronized
     private fun rebuild(): Fleet {
-        if (runners.none { it.lastOkMs > 0 }) {
-            throw IllegalStateException(runners.mapNotNull { it.lastError }.firstOrNull() ?: "Žádný zdroj poloh zatím neodpověděl")
+        val enabledIds = enabledSourceIds
+
+        val activeRunners = runners.filter { runner ->
+            enabledIds == null || runner.source.id in enabledIds
         }
+
+        if (activeRunners.isEmpty()) {
+            val empty = Fleet.EMPTY
+            fleet = empty
+            builtAtMs = System.currentTimeMillis()
+            return empty
+        }
+
+        if (activeRunners.none { it.lastOkMs > 0 }) {
+            throw IllegalStateException(
+                activeRunners.mapNotNull { it.lastError }.firstOrNull()
+                    ?: "Žádný zdroj poloh zatím neodpověděl"
+            )
+        }
+
         val now = System.currentTimeMillis()
         val tt = timetable()
-        val reports = runners.map { assess(it, now) }
-        val inputs = runners.mapIndexed { i, r ->
-            SourceInput(reports[i], r.source.freshness.staleVehicleSec, enrichedVehicles(r, tt))
+        val reports = activeRunners.map { assess(it, now) }
+
+        val inputs = activeRunners.mapIndexed { i, runner ->
+            SourceInput(
+                reports[i],
+                runner.source.freshness.staleVehicleSec,
+                enrichedVehicles(runner, tt)
+            )
         }
+
         val vehicles = fusion.fuse(inputs, tt?.locator, now)
         val result = Fleet(vehicles, reports, SourceLabel.build(reports), warningCount(reports))
         fleet = result

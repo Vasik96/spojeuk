@@ -107,6 +107,7 @@ class SpojeAppState(
     var mapError by mutableStateOf<String?>(null)
     var selectedVehicle by mutableStateOf<Vehicle?>(null)
     var tripRoute by mutableStateOf<List<LatLng>>(emptyList())
+    var tripRouteSegments by mutableStateOf<List<List<LatLng>>>(emptyList())
     var tripStops by mutableStateOf<List<LatLng>>(emptyList())
     var routeLoading by mutableStateOf(false)
 
@@ -135,7 +136,13 @@ class SpojeAppState(
 
     var searchedFrom by mutableStateOf<Stop?>(null)
 
-    var journeyWalk by mutableStateOf<WalkRoute?>(null)
+    var journeyWalks by mutableStateOf<List<WalkRoute>>(emptyList())
+
+    var journeyWalk: WalkRoute?
+        get() = journeyWalks.firstOrNull() ?: walkRoute
+        set(value) {
+            journeyWalks = if (value != null) listOf(value) else emptyList()
+        }
 
     // Settings & Preferences
     private val settingsPrefs = context.getSharedPreferences("app_settings_prefs", Context.MODE_PRIVATE)
@@ -149,6 +156,24 @@ class SpojeAppState(
     var predictVehiclePositions by mutableStateOf(
         settingsPrefs.getBoolean("predict_vehicle_positions", false)
     )
+
+    var enabledVehicleSources: Set<String>? by mutableStateOf(
+        settingsPrefs.getStringSet("enabled_vehicle_sources", null)?.toSet()
+    )
+        private set
+
+    fun updateEnabledVehicleSources(ids: Set<String>?) {
+        enabledVehicleSources = ids
+
+        settingsPrefs.edit {
+            if (ids == null) {
+                remove("enabled_vehicle_sources")
+            } else {
+                putStringSet("enabled_vehicle_sources", ids.toSet())
+            }
+        }
+    }
+
 
     var appTheme by mutableStateOf(
         runCatching { AppTheme.valueOf(settingsPrefs.getString("app_theme", "SYSTEM") ?: "SYSTEM") }.getOrDefault(AppTheme.SYSTEM)

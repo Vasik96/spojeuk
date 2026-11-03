@@ -147,6 +147,7 @@ internal fun VehicleDetailBottomSheet(
                         val points = api.tripGeometry(vehicle)
                         val stops = api.tripStopLocations(vehicle)
                         if (points.isNotEmpty()) {
+                            appState.tripRouteSegments = emptyList()
                             appState.tripRoute = points.map { LatLng(it.first, it.second) }
                             appState.tripStops = stops.map { LatLng(it.first, it.second) }
                             onDismiss()
