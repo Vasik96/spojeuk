@@ -44,18 +44,6 @@ Polohy autobusů se zobrazují **živě**, včetně zpoždění, a nemizí, kdy�
 
 ---
 
-## 🏗️ Architektura
-
-```mermaid
-flowchart LR
-    P["Portabo<br/>GetTraffic"] -->|každých 10 s| S["spoje-feed<br/>(Python server)"]
-    S -->|sloučený feed<br/>+ držené polohy| A["Android appka"]
-    P -.->|záloha při pádu serveru| A
-    G["GTFS<br/>(Sap1k/obehy)"] -->|import| DB[("static.sqlite")]
-    DB --> A
-    O["OSRM"] -->|geometrie tras| A
-```
-
 | Vrstva | Co dělá |
 |---|---|
 | `DukApi` | Fasáda: načtení jízdních řádů, hledání, polohy, trasy |
