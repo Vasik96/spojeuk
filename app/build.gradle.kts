@@ -41,25 +41,16 @@ android {
 
     signingConfigs {
         create("release") {
-            val keystorePath = localProperties.getProperty("KEYSTORE_FILE") ?: "local-key.jks"
-            val keystoreFile = rootProject.file(keystorePath)
-            if (keystoreFile.exists()) {
-                storeFile = keystoreFile
-                storePassword = localProperties.getProperty("KEYSTORE_PASSWORD") ?: "example123"
-                keyAlias = localProperties.getProperty("KEY_ALIAS") ?: "my-alias"
-                keyPassword = localProperties.getProperty("KEY_PASSWORD") ?: "example123"
-            }
+            storeFile = rootProject.file("local-key.jks")
+            storePassword = localProperties.getProperty("KEYSTORE_PASSWORD") ?: ""
+            keyAlias = localProperties.getProperty("KEY_ALIAS") ?: "my-alias"
+            keyPassword = localProperties.getProperty("KEY_PASSWORD") ?: ""
         }
     }
 
     buildTypes {
         release {
-            val releaseSigning = signingConfigs.findByName("release")
-            if (releaseSigning?.storeFile?.exists() == true) {
-                signingConfig = releaseSigning
-            } else {
-                signingConfig = signingConfigs.getByName("debug")
-            }
+            signingConfig = signingConfigs.getByName("release")
             optimization {
                 enable = true
             }
@@ -105,4 +96,6 @@ dependencies {
 
     implementation("androidx.core:core-splashscreen:1.2.0")
     implementation("org.maplibre.gl:android-sdk:13.7.1")
+
+    implementation("org.apache.commons:commons-compress:1.28.0")
 }
