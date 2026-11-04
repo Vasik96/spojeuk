@@ -8,6 +8,9 @@ const val USER_AGENT = "spojeuk/2.0 (Android)"
 const val RELEASES_API = "https://api.github.com/repos/Sap1k/obehy/releases/latest"
 const val ASSET_NAME = "jdf-filtered.tar"
 
+/** Předpočítané GTFS jen pro oblast (workflow region-gtfs.yml ve spojeuk-data): ~5 MB místo ~120 MB. */
+const val REGION_BASE_URL = "https://github.com/Vasik96/spojeuk-data/releases/download/gtfs"
+
 /** Vlaky (CZPTT) z téhož releasu: linky S1/R22, čísla vlaků a tvary tras. Stahuje se jen gtfs.zip uvnitř. */
 const val RAIL_ASSET_NAME = "czptt.tar"
 

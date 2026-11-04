@@ -113,42 +113,46 @@ private fun bearingBetween(start: LatLng, end: LatLng): Float {
     return (Math.toDegrees(kotlin.math.atan2(y, x)).toFloat() + 360f) % 360f
 }
 
+private val arrowDescCache = ConcurrentHashMap<String, BitmapDescriptor>()
+
 internal fun routeArrowDescriptor(primaryColor: Int, scale: Float): BitmapDescriptor {
     val size = (96 * scale).toInt().coerceAtLeast(18)
-    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
+    return arrowDescCache.getOrPut("$primaryColor:$size") {
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
 
-    // Souřadnice se škálují společně s bitmapou.
-    canvas.save()
-    canvas.scale(size / 72f, size / 72f)
+        // Souřadnice se škálují společně s bitmapou.
+        canvas.save()
+        canvas.scale(size / 72f, size / 72f)
 
-    val path = android.graphics.Path().apply {
-        moveTo(13f, 43f)
-        lineTo(36f, 15f)
-        lineTo(59f, 43f)
+        val path = android.graphics.Path().apply {
+            moveTo(13f, 43f)
+            lineTo(36f, 15f)
+            lineTo(59f, 43f)
+        }
+
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.BLACK
+            style = Paint.Style.STROKE
+            strokeWidth = 18f
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+        }
+        canvas.drawPath(path, borderPaint)
+
+        val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = primaryColor
+            style = Paint.Style.STROKE
+            strokeWidth = 11f
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+        }
+        canvas.drawPath(path, arrowPaint)
+
+        canvas.restore()
+
+        BitmapDescriptorFactory.fromBitmap(bitmap)
     }
-
-    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.BLACK
-        style = Paint.Style.STROKE
-        strokeWidth = 18f
-        strokeJoin = Paint.Join.ROUND
-        strokeCap = Paint.Cap.ROUND
-    }
-    canvas.drawPath(path, borderPaint)
-
-    val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = primaryColor
-        style = Paint.Style.STROKE
-        strokeWidth = 11f
-        strokeJoin = Paint.Join.ROUND
-        strokeCap = Paint.Cap.ROUND
-    }
-    canvas.drawPath(path, arrowPaint)
-
-    canvas.restore()
-
-    return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
 
 internal fun arrowSizeForZoom(zoom: Float): Float = when {
@@ -169,62 +173,38 @@ internal fun arrowSpacingForZoom(zoom: Float): Float = when {
     else -> 3000f
 }
 
-private fun pointAtDistance(route: List<LatLng>, targetMeters: Float): LatLng {
-    if (route.size < 2 || targetMeters <= 0f) {
-        return route.first()
-    }
-
-    var travelled = 0f
-
-    for (i in 0 until route.lastIndex) {
-        val start = route[i]
-        val end = route[i + 1]
-        val segmentLength = distanceMeters(start, end)
-
-        if (segmentLength <= 0f) continue
-
-        if (travelled + segmentLength >= targetMeters) {
-            val fraction = ((targetMeters - travelled) / segmentLength).coerceIn(0f, 1f).toDouble()
-
-            return LatLng(
-                start.latitude + (end.latitude - start.latitude) * fraction,
-                start.longitude + (end.longitude - start.longitude) * fraction
-            )
-        }
-
-        travelled += segmentLength
-    }
-
-    return route.last()
-}
-
+/** Šipky podél trasy v lineárním čase (kumulativní vzdálenosti + binární vyhledávání). */
 internal fun createRouteArrows(route: List<LatLng>, spacingMeters: Float = 300f): List<RouteArrow> {
-    if (route.size < 2) return emptyList()
+    val n = route.size
+    if (n < 2) return emptyList()
 
-    val totalLength = route.zipWithNext()
-        .sumOf { (a, b) -> distanceMeters(a, b).toDouble() }
-        .toFloat()
+    val cum = DoubleArray(n)
+    for (i in 1 until n) cum[i] = cum[i - 1] + distanceMeters(route[i - 1], route[i]).toDouble()
+    val total = cum[n - 1]
+    if (total < 100.0) return emptyList()
 
-    if (totalLength < 100f) return emptyList()
-
-    val arrows = mutableListOf<RouteArrow>()
-
-    // První šipka bude přibližně uprostřed prvního rozestupu.
-    var distance = spacingMeters / 2f
-
-    while (distance < totalLength - 20f) {
-        val position = pointAtDistance(route, distance)
-
-        // Směr určíme podle bodů těsně před a za šipkou, tím se omezí chybné natočení v ostrých zatáčkách.
-        val before = pointAtDistance(route, (distance - 15f).coerceAtLeast(0f))
-        val after = pointAtDistance(route, (distance + 15f).coerceAtMost(totalLength))
-
-        arrows += RouteArrow(position = position, bearing = bearingBetween(before, after))
-
-        distance += spacingMeters
+    fun at(d: Double): LatLng {
+        val dd = d.coerceIn(0.0, total)
+        var idx = java.util.Arrays.binarySearch(cum, dd)
+        if (idx < 0) idx = -idx - 2
+        idx = idx.coerceIn(0, n - 2)
+        val seg = cum[idx + 1] - cum[idx]
+        val t = if (seg <= 1e-9) 0.0 else (dd - cum[idx]) / seg
+        return LatLng(
+            route[idx].latitude + (route[idx + 1].latitude - route[idx].latitude) * t,
+            route[idx].longitude + (route[idx + 1].longitude - route[idx].longitude) * t
+        )
     }
 
-    return arrows
+    val out = ArrayList<RouteArrow>()
+    // První šipka přibližně uprostřed prvního rozestupu.
+    var d = spacingMeters / 2.0
+    while (d < total - 20.0) {
+        // Směr z bodů těsně před a za šipkou, omezí chybné natočení v ostrých zatáčkách.
+        out += RouteArrow(at(d), bearingBetween(at(d - 15.0), at(d + 15.0)))
+        d += spacingMeters
+    }
+    return out
 }
 
 // ───────────────────────── kruhy pro začátek, konec a zastávky ─────────────────────────

@@ -48,13 +48,19 @@ class VehicleFusion(
         return groups
     }
 
+    private fun trainNo(v: Vehicle) = if (v.train) v.cis.trim().trimStart('0') else ""
+
     private fun sameVehicle(a: Vehicle, b: Vehicle, nowMs: Long): Boolean {
-        if (a.id != 0 && b.id != 0) {
-            return sameVehicleId(a.id, b.id)
+        if (a.train || b.train) {
+            val na = trainNo(a); val nb = trainNo(b)
+            if (na.isNotEmpty() && na == nb) return true
+            if (a.tid != 0 && a.tid == b.tid) return true
+            if (na.isNotEmpty() && nb.isNotEmpty()) return false   // jiné číslo vlaku = jiný vlak
+        } else if (a.id != 0 && b.id != 0) {
+            return sameVehicleId(a.id, b.id)    // ID se porovnává jen u autobusů
         }
 
         if (a.tid != 0 && b.tid != 0 && a.tid == b.tid) return true
-
         if (normLine(a.line) != normLine(b.line)) return false
 
         val distance = Geo.distanceM(a.lat, a.lng, b.lat, b.lng)
@@ -71,6 +77,7 @@ class VehicleFusion(
         val others = group.filter { it !== winner }
         return winner.copy(
             tid = tid,
+            train = group.any { it.train },
             tripMatch = group.maxOf { it.tripMatch },
             accessible = winner.accessible ?: others.firstNotNullOfOrNull { it.accessible },
             airConditioned = winner.airConditioned ?: others.firstNotNullOfOrNull { it.airConditioned },

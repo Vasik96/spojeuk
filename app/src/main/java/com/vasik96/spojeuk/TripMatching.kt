@@ -20,6 +20,10 @@ object TripMatchers {
         tt.findTripId(v.cis, v.trip)?.let { TripMatchResult(it, exact = true) }
     }
 
+    val byCisOrTrain = TripMatcher { v, tt ->
+        if (v.train) byTrainNumber.match(v, tt) else byCisNumber.match(v, tt)
+    }
+
     /** Vlaky: zdroj dává číslo vlaku (SŽ `tn`) ve `v.cis`; spojí se s vlakem z CZPTT. */
     val byTrainNumber = TripMatcher { v, tt ->
         tt.findTrainTripId(v.cis)?.let { TripMatchResult(it, exact = true) }

@@ -22,6 +22,9 @@ const val FEED_URL = "http://37.46.211.70:8787/traffic"
 /** Od kolika "držených" poloh se feed považuje za výpadek. */
 const val OUTAGE_MIN = 18
 
+private val TRAIN_IDS = 20000..29999
+fun isTrainId(id: Int) = id in TRAIN_IDS
+
 /**
  * DÚK / Portabo: regionální doprava i MHD, přesné číslo spoje (CISLineID + RouteID).
  * Vozy, které server přestane posílat, drží z minula (MHD 20 min, ostatní 10 min), aby nemizely z mapy.
@@ -39,7 +42,7 @@ class PortaboSource(
         maxFetchAgeMs = 15_000,
         watchedSegments = setOf(Segment.CITY, Segment.REGIONAL),
     )
-    override val tripMatcher = TripMatchers.byCisNumber
+    override val tripMatcher = TripMatchers.byCisOrTrain
     override val adoptsTimetableLine = true
 
     @Volatile private var held = 0
@@ -134,6 +137,10 @@ class PortaboSource(
 
             val agency = e.optStringClean("agency", e.optStringClean("agency_name", ""))
             val destination = e.optStringClean("headsign", e.optStringClean("destination", e.optStringClean("last_stop", "")))
+
+            val isTrain = isTrainId(id)
+            val routeId = e.optStringClean("RouteID", "")
+
             out.add(
                 Vehicle(
                     source = ID,
@@ -149,11 +156,13 @@ class PortaboSource(
                     // server může vůz držet; skutečné stáří poskytuje _ageSec nebo LastActivityDT
                     observedAtMs = nowMs - ageSec * 1000L,
                     id = id,
-                    trip = e.optStringClean("RouteID", ""),
-                    cis = String.format(Locale.ROOT, "%06d", e.optInt("CISLineID", 0)),
+                    trip = if (isTrain) "" else routeId,
+                    cis = if (isTrain) routeId.trim() // číslo vlaku, stejně jako u SŽ
+                    else String.format(Locale.ROOT, "%06d", e.optInt("CISLineID", 0)),
                     destination = prettyName(destination),
                     agency = agency,
-                    segment = segmentOf(id, agency),
+                    segment = if (isTrain) Segment.REGIONAL else segmentOf(id, agency),
+                    train = isTrain,
                     state = state,
                     accessible = optBool(e, "HasLowfloor"),
                     airConditioned = optBool(e, "isAirConditioned"),
