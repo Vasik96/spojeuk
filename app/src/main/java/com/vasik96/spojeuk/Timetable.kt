@@ -54,6 +54,7 @@ class Timetable(val dbFile: File) {
         private set
 
     private val tripsByKey = HashMap<String, MutableList<Int>>()          // "cis:num" → spoje
+    private val tripsByTrain = HashMap<String, MutableList<Int>>()        // číslo vlaku → spoje
     private val activeCache = ConcurrentHashMap<LocalDate, Set<Int>>()
     private val timesCache = ConcurrentHashMap<Int, TripTimes>()
     private val lineIndexes = ConcurrentHashMap<List<String>, Map<String, List<Int>>>()
@@ -111,6 +112,7 @@ class Timetable(val dbFile: File) {
                 )
                 trips[id] = trip
                 if (trip.cis.isNotBlank()) tripsByKey.getOrPut("${trip.cis}:${trip.num}") { mutableListOf() }.add(id)
+                if (trip.isTrain && trip.num.isNotBlank()) tripsByTrain.getOrPut(trip.num) { mutableListOf() }.add(id)
             }
 
             db.forEachRow("SELECT id, dow, d0, d1 FROM svc") { c ->
@@ -167,7 +169,17 @@ class Timetable(val dbFile: File) {
     fun findTripId(cis: String, num: String): Int? {
         val c = cis.trim().padStart(6, '0')
         if (c == "000000" || num.isBlank()) return null
-        val candidates = tripsByKey["$c:$num"] ?: return null
+        return nearestInTime(tripsByKey["$c:$num"] ?: return null)
+    }
+
+    /** Vlak podle čísla (tn ze SŽ, např. "1193"), preferuje instanci nejbližší v čase (dnes / včera). */
+    fun findTrainTripId(trainNumber: String): Int? {
+        val n = trainNumber.trim().trimStart('0')
+        if (n.isEmpty()) return null
+        return nearestInTime(tripsByTrain[n] ?: return null)
+    }
+
+    private fun nearestInTime(candidates: List<Int>): Int? {
         val now = nowPrague()
         var best: Int? = null
         var bestGap = Int.MAX_VALUE

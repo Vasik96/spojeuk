@@ -33,7 +33,7 @@ class SpravaZeleznicSource(
         maxFetchAgeMs = 15_000,
         watchedSegments = setOf(Segment.REGIONAL),
     )
-    override val tripMatcher = TripMatchers.byCisNumber       // TODO: párování podle čísla vlaku (tn)
+    override val tripMatcher = TripMatchers.byTrainNumber     // číslo vlaku (tn) → vlak z CZPTT v jízdním řádu
     override val adoptsTimetableLine = true
 
     @Volatile private var held = 0
@@ -131,14 +131,8 @@ class SpravaZeleznicSource(
 
             val cat = p.optString("tt").trim()          // Os, R, Sp, ...
             val num = p.optString("tn").trim()          // číslo vlaku
-            if (TrainLines.lineFor(num) == null) {
-                Log.e(TAG, "bez linky: tn=$num tt=$cat (tabulka má ${TrainLines.size} vlaků)")
-            }
-            else {
-                Log.d(TAG, "s linkou")
-            }
-            val label = if (cat.isNotEmpty()) "$cat $num" else num
-            val line = TrainLines.lineFor(num) ?: label
+            // linku (S1, R22, ...) doplní TripEnricher z jízdního řádu podle čísla vlaku; bez shody zůstane "Os 6805"
+            val line = if (cat.isNotEmpty()) "$cat $num" else num
             val dest = p.optString("ln").trim()
             val delayMin = p.optInt("de", 0)
 
@@ -148,12 +142,12 @@ class SpravaZeleznicSource(
                     source = ID,
                     lat = lat,
                     lng = lng,
-                    line = line,                       // S1, U4 apod., nebo "Os 6805"
+                    line = line,                       // předběžně "Os 6805", po spárování S1 / R22 / U5
                     delay = delayMin,                  // zpoždění v minutách
                     observedAtMs = nowMs,
                     id = num.toIntOrNull() ?: (i + 1), // keyOf → cis:line:trip
                     trip = p.optString("id"),
-                    cis = num,
+                    cis = num,                         // číslo vlaku, podle něj se páruje (byTrainNumber)
                     destination = prettyName(dest),
                     agency = p.optString("d"),
                     segment = Segment.REGIONAL,

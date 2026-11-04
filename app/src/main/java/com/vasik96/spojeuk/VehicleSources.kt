@@ -11,7 +11,6 @@ import java.io.File
  */
 object VehicleSources {
     fun create(context: Context?): List<VehicleSource> {
-        context?.let { TrainLines.init(it) }          // pending → active, načte do paměti
         return listOf(
             DpmulSource(),
             PortaboSource(snapshotFile = File(context?.filesDir ?: File("/tmp"), "last_seen.json")),

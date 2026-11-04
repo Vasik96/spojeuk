@@ -8,9 +8,17 @@ const val USER_AGENT = "spojeuk/2.0 (Android)"
 const val RELEASES_API = "https://api.github.com/repos/Sap1k/obehy/releases/latest"
 const val ASSET_NAME = "jdf-filtered.tar"
 
+/** Vlaky (CZPTT) z téhož releasu: linky S1/R22, čísla vlaků a tvary tras. Stahuje se jen gtfs.zip uvnitř. */
+const val RAIL_ASSET_NAME = "czptt.tar"
+
 /** Oblast, ze které se do databáze berou spoje. */
 val BBOX_LAT = 50.45..50.85
 val BBOX_LON = 13.75..14.40
+
+/** Oblast pro vlaky: celý Ústecký kraj s okolím (spoj se bere, když se jí dotkne, a to celý, třeba až do Prahy).
+ *  Drž v souladu s tools/build_train_shapes.py. */
+val RAIL_BBOX_LAT = 50.10..51.10
+val RAIL_BBOX_LON = 12.90..14.60
 
 // ── vyhledávání spojení ──
 const val FOOT_MAX_M = 250.0          // max. pěší přesun mezi zastávkami
