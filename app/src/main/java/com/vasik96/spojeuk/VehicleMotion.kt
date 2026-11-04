@@ -1,11 +1,11 @@
 package com.vasik96.spojeuk
 
 import android.os.SystemClock
-import androidx.compose.runtime.withFrameNanos
 import com.google.android.gms.maps.model.LatLng
-import com.google.maps.android.compose.MarkerState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -14,7 +14,6 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 private const val EARTH_R = 6_371_008.8
-private const val MIN_MOVE_M = 4.0
 private const val MOVE_ANIM_MS = 500.0
 private const val MAX_SPEED_MPS = 30.0
 
@@ -22,9 +21,6 @@ private const val MAX_LEAD_S = 24.0
 private const val STALE_DECEL_S = 12.0
 
 private const val MAX_ON_ROUTE_OFFSET_M = 50.0
-private const val UI_STEP_MS = 12L
-
-private const val KEY_MATCH_M = 500f
 
 private const val STOP_BELOW_M = 50.0
 private const val SLOW_BELOW_M = 100.0
@@ -74,24 +70,36 @@ internal class PathMeasure(private val points: List<LatLng>) {
         totalMeters = cum[n - 1]
     }
 
+    /** Index úseku, ve kterém (nebo těsně před kterým) leží vzdálenost d. */
+    private fun segmentStart(d: Double): Int {
+        if (d <= 0.0) return 0
+        var idx = java.util.Arrays.binarySearch(cum, d)
+        if (idx < 0) idx = -idx - 2
+        return idx.coerceIn(0, n - 2)
+    }
+
     private fun scan(px: Double, py: Double, lo: Double, hi: Double): PathProjection? {
         var bestS = 0.0
         var bestD = Double.MAX_VALUE
         var found = false
-        for (i in 0 until n - 1) {
-            if (cum[i + 1] < lo || cum[i] > hi) continue
-            val ax = xs[i]
-            val ay = ys[i]
-            val dx = xs[i + 1] - ax
-            val dy = ys[i + 1] - ay
-            val len2 = dx * dx + dy * dy
-            val t = if (len2 <= 1e-9) 0.0 else (((px - ax) * dx + (py - ay) * dy) / len2).coerceIn(0.0, 1.0)
-            val d = hypot(px - (ax + dx * t), py - (ay + dy * t))
-            if (d < bestD) {
-                bestD = d
-                bestS = cum[i] + (cum[i + 1] - cum[i]) * t
-                found = true
+        var i = segmentStart(lo)
+        while (i < n - 1) {
+            if (cum[i] > hi) break
+            if (cum[i + 1] >= lo) {
+                val ax = xs[i]
+                val ay = ys[i]
+                val dx = xs[i + 1] - ax
+                val dy = ys[i + 1] - ay
+                val len2 = dx * dx + dy * dy
+                val t = if (len2 <= 1e-9) 0.0 else (((px - ax) * dx + (py - ay) * dy) / len2).coerceIn(0.0, 1.0)
+                val d = hypot(px - (ax + dx * t), py - (ay + dy * t))
+                if (d < bestD) {
+                    bestD = d
+                    bestS = cum[i] + (cum[i + 1] - cum[i]) * t
+                    found = true
+                }
             }
+            i++
         }
         return if (found) PathProjection(bestS, bestD) else null
     }
@@ -121,6 +129,10 @@ internal class PathMeasure(private val points: List<LatLng>) {
 
 // ───────────────────────── pohyb jednoho vozidla ─────────────────────────
 
+/**
+ * Pohyb je čistá funkce času ([positionAt]) bez Compose state a bez vlastních coroutin.
+ * Volá ho jedna smyčka z [MotionHub] pro všechna vozidla.
+ */
 internal class VehicleMotion(lat: Double, lng: Double, obsMs: Long) {
     private var fixPos = LatLng(lat, lng)
     private var fixObsMs = obsMs
@@ -132,20 +144,28 @@ internal class VehicleMotion(lat: Double, lng: Double, obsMs: Long) {
     private var route: PathMeasure? = null
     private var fixS: Double? = null
     private var speedMps = 0.0
-    private var dispS: Double? = null      // poslední zobrazená pozice podél trasy
     private var stationaryFixCount = 0
 
     private val speedSamples = mutableListOf<Double>()
 
+    // plynulé navázání na poslední zobrazenou pozici po novém fixu / nové trase
+    private var shown = fixPos
+    private var animFrom = fixPos
+    private var animT0 = SystemClock.elapsedRealtime()
+
+    private fun restartBlend() {
+        animFrom = shown
+        animT0 = SystemClock.elapsedRealtime()
+    }
+
     fun setRoute(r: PathMeasure?) {
         if (r === route) return
         route = r
-        dispS = null
         recompute()
+        restartBlend()
     }
 
     /** Zaregistruje nový fix. Stejný fix podruhé ignoruje. */
-
     fun onFix(lat: Double, lng: Double, obsMs: Long): Boolean {
         val np = LatLng(lat, lng)
         if (np == fixPos && obsMs == fixObsMs) return false
@@ -161,9 +181,9 @@ internal class VehicleMotion(lat: Double, lng: Double, obsMs: Long) {
         fixRecvMs = now
 
         recompute()
+        restartBlend()
         return true
     }
-
 
     /** Určí polohu fixu na trase a rychlost z posledních dvou fixů. Bez trasy se nic nehádá. */
     private fun recompute() {
@@ -222,7 +242,6 @@ internal class VehicleMotion(lat: Double, lng: Double, obsMs: Long) {
 
         // Uchováváme posledních 5 měření.
         speedSamples.add(measuredSpeed)
-
         while (speedSamples.size > 5) {
             speedSamples.removeAt(0)
         }
@@ -241,88 +260,33 @@ internal class VehicleMotion(lat: Double, lng: Double, obsMs: Long) {
         stationaryFixCount = 0
     }
 
-    /** Skončí sama, když je pohyb hotový. Nový fix ji zruší (LaunchedEffect) a spustí znovu od aktuální značky. */
-    suspend fun animate(marker: MarkerState, predict: Boolean) {
+    /** Pozice v čase [now] (SystemClock.elapsedRealtime). Levné, bez alokací kromě LatLng. */
+    fun positionAt(now: Long): LatLng {
+        val target = targetAt(now)
+        val frac = ((now - animT0) / MOVE_ANIM_MS).coerceIn(0.0, 1.0)
+        val pos = if (frac >= 1.0) target else lerpLatLng(animFrom, target, frac)
+        shown = pos
+        return pos
+    }
+
+    private fun targetAt(now: Long): LatLng {
         val r = route
         val sFix = fixS
-        if (predict && r != null && sFix != null) {
-            followRoute(marker, r, sFix)
-        } else {
-            dispS = null
-            glide(marker, fixPos)
-        }
-    }
+        if (r == null || sFix == null) return fixPos   // bez trasy / bez predikce = glide na fix
 
-    /** Pozice 1 -> pozice 2, vždy MOVE_ANIM_MS, bez hádání. */
-    private suspend fun glide(marker: MarkerState, to: LatLng) {
-        val from = marker.position
-        if (from == to) return
-        val t0 = SystemClock.elapsedRealtime()
-        var lastUi = t0 - UI_STEP_MS
-        while (true) {
-            withFrameNanos { }
-            val now = SystemClock.elapsedRealtime()
-            val frac = ((now - t0) / MOVE_ANIM_MS).coerceIn(0.0, 1.0)
-            if (frac >= 1.0) {
-                marker.position = to; return
-            }
-            if (now - lastUi >= UI_STEP_MS) {
-                marker.position = lerpLatLng(from, to, frac)
-                lastUi = now
+        val sinceRecv = ((now - fixRecvMs) / 1000.0).coerceAtLeast(0.0)
+        val predictedSeconds = when {
+            sinceRecv <= MAX_LEAD_S -> sinceRecv
+
+            sinceRecv >= MAX_LEAD_S + STALE_DECEL_S ->
+                MAX_LEAD_S + STALE_DECEL_S / 2.0
+
+            else -> {
+                val x = (sinceRecv - MAX_LEAD_S) / STALE_DECEL_S
+                MAX_LEAD_S + STALE_DECEL_S * (x - x * x / 2.0)
             }
         }
-    }
-
-    /** Predikce podél trasy. Prvních MOVE_ANIM_MS se značka srovná na predikovanou pozici, pak ji sleduje. */
-    private suspend fun followRoute(
-        marker: MarkerState,
-        r: PathMeasure,
-        sFix: Double
-    ) {
-        val startPos = marker.position
-        val t0 = SystemClock.elapsedRealtime()
-        var lastUi = t0 - UI_STEP_MS
-
-        while (true) {
-            withFrameNanos { }
-
-            val now = SystemClock.elapsedRealtime()
-            val sinceRecv = ((now - fixRecvMs) / 1000.0).coerceAtLeast(0.0)
-
-            val predictedSeconds = when {
-                sinceRecv <= MAX_LEAD_S -> sinceRecv
-
-                sinceRecv >= MAX_LEAD_S + STALE_DECEL_S ->
-                    MAX_LEAD_S + STALE_DECEL_S / 2.0
-
-                else -> {
-                    val x = (sinceRecv - MAX_LEAD_S) / STALE_DECEL_S
-                    MAX_LEAD_S + STALE_DECEL_S * (x - x * x / 2.0)
-                }
-            }
-
-            var s = min(
-                sFix + speedMps * predictedSeconds,
-                r.totalMeters
-            )
-
-            dispS = s
-
-
-            val frac = ((now - t0) / MOVE_ANIM_MS).coerceIn(0.0, 1.0)
-            val target = r.pointAt(s)
-
-            val pos = if (frac >= 1.0) {
-                target
-            } else {
-                lerpLatLng(startPos, target, frac)
-            }
-
-            if (now - lastUi >= UI_STEP_MS) {
-                marker.position = pos
-                lastUi = now
-            }
-        }
+        return r.pointAt(min(sFix + speedMps * predictedSeconds, r.totalMeters))
     }
 }
 
@@ -332,8 +296,6 @@ internal class VehicleMotion(lat: Double, lng: Double, obsMs: Long) {
  * Stabilní klíč pro Compose `key(...)`. uid u vozidel s id == 0 obsahuje souřadnice,
  * takže se při každém pohybu mění a marker by se pokaždé zahodil a vytvořil jinde.
  */
-
-
 internal class VehicleKeyer {
 
     private data class Prev(
@@ -558,7 +520,6 @@ internal class VehicleKeyer {
 }
 
 
-
 // ───────────────────────── trasy všech vozidel ─────────────────────────
 
 /** Trasa spoje pro každé vozidlo (shapes, jinak OSRM), cache podle tid. Nezávisí na tom, co je vykreslené. */
@@ -572,7 +533,10 @@ internal class VehicleRoutes(private val api: TransitRepository) {
         val tid = api.resolveTripId(v) ?: return null
         if (byTid.containsKey(tid)) return byTid[tid]
         val pts = gate.withPermit { api.routeForTrip(tid) }
-        val pm = if (pts.size >= 2) PathMeasure(pts.map { LatLng(it.first, it.second) }) else null
+        // stavba PathMeasure (trigonometrie přes celou trasu) mimo main vlákno
+        val pm = withContext(Dispatchers.Default) {
+            if (pts.size >= 2) PathMeasure(pts.map { LatLng(it.first, it.second) }) else null
+        }
         byTid[tid] = pm
         return pm
     }

@@ -119,6 +119,40 @@ class TimetableStore(
     }
 
     private fun downloadAndImport(target: File, log: (String) -> Unit, progress: (Float) -> Unit) {
+        // rychlá cesta: malé předfiltrované zipy z mého GitHubu; když selže, stará cesta přes Oběhy
+        if (runCatching { downloadRegion(target, log, progress) }
+                .onFailure { Log.w(TAG, "region GTFS selhalo, jdu přes Oběhy: ${it.message}") }
+                .getOrDefault(false)) return
+        downloadFromObehy(target, log, progress)
+    }
+
+    /** Vrací true i když je vše aktuální (nic se nestahuje). */
+    private fun downloadRegion(target: File, log: (String) -> Unit, progress: (Float) -> Unit): Boolean {
+        log("Zjišťuji nejnovější data…")
+        val remote = JSONObject(open("$REGION_BASE_URL/gtfs.json").use { it.body?.string().orEmpty() })
+        val tag = remote.optString("tag").ifBlank { return false }
+        val stagedTag = if (pendingFile.exists()) runCatching { Timetable.readMeta(pendingFile)["tag"] }.getOrNull() else null
+        if (target == pendingFile && (meta()["tag"] == tag || stagedTag == tag)) { log("Data jsou aktuální."); return true }
+
+        val dir = dbFile.parentFile
+        val feeds = listOf("jdf-region.zip" to false, "czptt-region.zip" to true).map { (name, rail) ->
+            val f = File(dir, if (rail) "gtfs_rail.zip" else "gtfs.zip")
+            log("Stahuji $name…")
+            open("$REGION_BASE_URL/$name").use { resp ->
+                val body = resp.body ?: error("Prázdná odpověď")
+                FileOutputStream(f).use { out -> body.byteStream().copyTo(out, 65536) }
+            }
+            GtfsFeed(f, rail)
+        }
+        try {
+            GtfsImporter(target).importGtfs(feeds, tag, log, progress)
+        } finally {
+            feeds.forEach { it.zip.delete() }
+        }
+        return true
+    }
+
+    private fun downloadFromObehy(target: File, log: (String) -> Unit, progress: (Float) -> Unit) {
         log("Zjišťuji nejnovější build z GitHubu…")
         val release = JSONObject(open(RELEASES_API).use { it.body?.string().orEmpty() })
         val tag = release.optString("tag_name", "latest")
@@ -153,7 +187,7 @@ class TimetableStore(
             if (railOk) add(GtfsFeed(railZip, rail = true))
         }
         try {
-            GtfsImporter(dbFile).importGtfs(feeds, tag, log, progress)
+            GtfsImporter(target).importGtfs(feeds, tag, log, progress)
         } finally {
             busZip.delete()
             railZip.delete()

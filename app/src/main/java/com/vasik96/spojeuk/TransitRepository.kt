@@ -150,7 +150,6 @@ class TransitRepository(context: Context? = null) {
         count: Int = 8,
     ): List<Journey> = withContext(Dispatchers.IO) {
         val b = store.ensure()
-        withLiveDelays(b.planner.find(fromName, toName, startTime, count))
 
         val journeys = b.planner.find(fromName, toName, startTime, count)
         withRouteStops(withLiveDelays(journeys))

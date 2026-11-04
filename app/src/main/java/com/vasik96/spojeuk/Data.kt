@@ -13,6 +13,7 @@ import java.util.zip.ZipFile
 // Import statických jízdních řádů: stažený tar → gtfs.zip → SQLite (static.sqlite).
 // Konstanty (BBOX_LAT, ...) jsou v Config.kt, pomocné funkce (intArrayToBytes, nowPrague) v Util.kt.
 // parseTsec už se nepoužívá, časy se parsují přímo z bajtů (parseTimeSec níže).
+// Párování vlakových stanic s autobusovými zastávkami je v StationPairing.kt.
 
 // ───────────────────────── Tar ─────────────────────────
 
@@ -372,6 +373,7 @@ class GtfsImporter(private val dbFile: File) {
             val stations = HashMap<String, StationData>()
             val posts = HashMap<String, PostData>()
             val region = HashSet<String>()
+            val railIds = HashSet<String>()   // stop_id ze vlakových feedů (pro párování nádraží)
             val svcIndexMap = HashMap<String, Int>()
             val stops = StopInterner(region, 200_000)
             var countTrips = 0
@@ -426,6 +428,7 @@ class GtfsImporter(private val dbFile: File) {
                     ) { sc ->
                         val stopId = sc.str(0)
                         if (stopId.isEmpty()) return@readCsv
+                        if (rail) railIds.add(stopId)
                         val name = sc.str(1)
                         val lat = sc.str(2).toDoubleOrNull()
                         val lon = sc.str(3).toDoubleOrNull()
@@ -673,14 +676,33 @@ class GtfsImporter(private val dbFile: File) {
                     log("Feed ${fi + 1}/${feeds.size} hotový, spojů celkem: $countTrips")
                 }
 
+                // ───── párování vlakových stanic s autobusovými zastávkami (viz StationPairing.kt) ─────
+                val pairInput = stops.order.map { code ->
+                    val g = stops.names[code]
+                    val post = posts[g]
+                    val parentName = if (post != null) stations[post.parent]?.name else null
+                    val name = post?.name ?: g
+                    val (la, lo) = coords(g)
+                    PairStop(
+                        id = g,
+                        name = name,
+                        place = if (!parentName.isNullOrEmpty()) parentName else name,
+                        lat = la,
+                        lon = lo,
+                        rail = g in railIds,
+                    )
+                }
+                val railGroups = pairRailStations(pairInput, log = log)
+
                 // ───── zastávky, které se skutečně použily ─────
                 val stmtStop = db.compileStatement("INSERT INTO stop VALUES(?,?,?,?,?,?)")
                 for ((i, code) in stops.order.withIndex()) {
                     val g = stops.names[code]
                     val post = posts[g]
                     val parentName = if (post != null) stations[post.parent]?.name else null
-                    val name = post?.name ?: g
-                    val place = if (!parentName.isNullOrEmpty()) parentName else name
+                    val paired = railGroups[g]
+                    val name = paired ?: post?.name ?: g
+                    val place = paired ?: if (!parentName.isNullOrEmpty()) parentName else name
                     val (la, lo) = coords(g)
 
                     stmtStop.bindLong(1, (i + 1).toLong())
