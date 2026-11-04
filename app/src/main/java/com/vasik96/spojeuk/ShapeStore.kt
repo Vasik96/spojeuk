@@ -22,10 +22,15 @@ const val SHAPES_BASE_URL = "https://github.com/Vasik96/spojeuk-data/releases/do
  * který se jednou za pár hodin zkontroluje a když je na GitHubu novější, stáhne se (~6 MB).
  * Bez souboru (offline, první start) vrací null a volající použije OSRM.
  */
-class ShapeStore(private val dir: File, private val context: Context? = null) {
-    private val dbFile = File(dir, "shapes.sqlite")
-    private val metaFile = File(dir, "shapes.json")
-    private val checkedFile = File(dir, "shapes.checked")
+class ShapeStore(
+    private val dir: File,
+    private val context: Context? = null,
+    /** "shapes" = autobusy, "train_shapes" = vlaky (soubory a názvy v releasu jsou podle toho). */
+    private val name: String = "shapes",
+) {
+    private val dbFile = File(dir, "$name.sqlite")
+    private val metaFile = File(dir, "$name.json")
+    private val checkedFile = File(dir, "$name.checked")
     private var db: SQLiteDatabase? = null
 
     private val cache = object : LinkedHashMap<String, List<Pair<Double, Double>>>(64, 0.75f, true) {
@@ -44,7 +49,7 @@ class ShapeStore(private val dir: File, private val context: Context? = null) {
         if (dbFile.exists()) return
         val ctx = context ?: return
         runCatching {
-            ctx.assets.open("shapes.sqlite").use { i -> FileOutputStream(dbFile).use { o -> i.copyTo(o) } }
+            ctx.assets.open("$name.sqlite").use { i -> FileOutputStream(dbFile).use { o -> i.copyTo(o) } }
         }.onFailure { dbFile.delete() }
     }
 
@@ -89,7 +94,7 @@ class ShapeStore(private val dir: File, private val context: Context? = null) {
                 now - checkedFile.lastModified() < 12 * 3600_000L
             ) return@withLock false
 
-            val remote = JSONObject(httpGet(http, "$SHAPES_BASE_URL/shapes.json"))
+            val remote = JSONObject(httpGet(http, "$SHAPES_BASE_URL/$name.json"))
             val localBuilt = runCatching { JSONObject(metaFile.readText()).optString("built") }.getOrDefault("")
             if (!forceDownload && dbFile.exists() && remote.optString("built") == localBuilt) {
                 checkedFile.writeText(now.toString())
@@ -99,10 +104,10 @@ class ShapeStore(private val dir: File, private val context: Context? = null) {
             val expected = remote.optInt("trips")
             if (expected <= 0) error("shapes.json neobsahuje počet spojů")
 
-            val tmp = File(dir, "shapes.sqlite.tmp")
+            val tmp = File(dir, "$name.sqlite.tmp")
             try {
                 val md = MessageDigest.getInstance("SHA-256")
-                val req = Request.Builder().url("$SHAPES_BASE_URL/shapes.sqlite").header("User-Agent", USER_AGENT).build()
+                val req = Request.Builder().url("$SHAPES_BASE_URL/$name.sqlite").header("User-Agent", USER_AGENT).build()
                 http.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) error("shapes.sqlite HTTP ${resp.code}")
                     val body = resp.body ?: error("prázdná odpověď")

@@ -28,7 +28,10 @@ data class DbTrip(
     val t0: Int,
     val t1: Int,
     val gid: String = "", // GTFS trip_id, klíč do shapes.sqlite
-)
+) {
+    /** Vlak z CZPTT (trip_id začíná "czptt:"); num je u něj číslo vlaku, cis prázdné. */
+    val isTrain: Boolean get() = gid.startsWith("czptt:")
+}
 
 data class SvcInfo(val id: Int, val dow: String, val d0: String, val d1: String)
 data class SvcDateInfo(val svc: Int, val date: String, val type: Int)

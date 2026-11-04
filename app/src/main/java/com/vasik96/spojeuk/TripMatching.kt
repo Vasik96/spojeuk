@@ -20,6 +20,11 @@ object TripMatchers {
         tt.findTripId(v.cis, v.trip)?.let { TripMatchResult(it, exact = true) }
     }
 
+    /** Vlaky: zdroj dává číslo vlaku (SŽ `tn`) ve `v.cis`; spojí se s vlakem z CZPTT. */
+    val byTrainNumber = TripMatcher { v, tt ->
+        tt.findTrainTripId(v.cis)?.let { TripMatchResult(it, exact = true) }
+    }
+
     /** Zdroj číslo spoje nezná: hádá se podle linky, polohy u zastávky, času, směru a cíle. */
     fun byPosition(agencyKeywords: List<String> = emptyList()) = TripMatcher { v, tt ->
         tt.locator.matchByPosition(v, agencyKeywords)?.let { TripMatchResult(it, exact = false) }

@@ -29,7 +29,8 @@ class TransitRepository(context: Context? = null) {
 
     private val store = TimetableStore(context, http) { onTimetableLoaded(it) }
     private val shapes by lazy { ShapeStore(store.dbFile.parentFile ?: File("/tmp"), context) }
-    private val geometry by lazy { RouteGeometry(shapes, osrm) }
+    private val trainShapes by lazy { ShapeStore(store.dbFile.parentFile ?: File("/tmp"), context, "train_shapes") }
+    private val geometry by lazy { RouteGeometry(shapes, trainShapes, osrm) }
     private val stopLocator = StopLocator(osrm)
     private val hub = VehicleHub(VehicleSources.create(context), scope) { store.current?.timetable }
 
@@ -45,10 +46,10 @@ class TransitRepository(context: Context? = null) {
     }
     private fun onTimetableLoaded(tt: Timetable) {
         Log.i(TAG, "DB: hasGid=${tt.hasGid} trips=${tt.meta["trips"]} tag=${tt.meta["tag"]}")
-        TrainLines.populateFromTimetable(tt)
         if (!tt.hasGid) scheduleShapeUpgrade()
         scope.launch {
             runCatching { shapes.sync(http) }.onFailure { Log.w(TAG, "sync tras selhal: ${it.message}") }
+            runCatching { trainShapes.sync(http) }.onFailure { Log.w(TAG, "sync tras vlaků selhal: ${it.message}") }
         }
     }
 
@@ -69,6 +70,7 @@ class TransitRepository(context: Context? = null) {
                 autoPolicy?.timetableStagedMs = System.currentTimeMillis()
             }
             shapes.sync(http, force = true)
+            runCatching { trainShapes.sync(http, force = true) }
             true
         } catch (e: CancellationException) {
             throw e
@@ -97,6 +99,8 @@ class TransitRepository(context: Context? = null) {
         withContext(Dispatchers.IO) {
             log("Kontroluji trasy spojů (Shapes)…")
             val updated = shapes.sync(http, force = true, forceDownload = forceDownload)
+            runCatching { trainShapes.sync(http, force = true, forceDownload = forceDownload) }
+                .onFailure { Log.w(TAG, "sync tras vlaků selhal: ${it.message}") }
             log(if (updated) "Trasy spojů byly aktualizovány." else "Trasy spojů jsou již aktuální.")
             updated
         }
@@ -113,27 +117,27 @@ class TransitRepository(context: Context? = null) {
         progress: (Float) -> Unit = {},
         forceShapes: Boolean = true,
     ) = withContext(Dispatchers.IO) {
-            log("Zahajuji kompletní aktualizaci všech dat…")
-            progress(0.05f)
+        log("Zahajuji kompletní aktualizaci všech dat…")
+        progress(0.05f)
 
-            log("1/4: Stahuji nejnovější jízdní řády (GTFS)…")
-            updateTimetable(log = { log("1/4: $it") }, progress = { progress(0.05f + it * 0.5f) })
+        log("1/4: Stahuji nejnovější jízdní řády (GTFS)…")
+        updateTimetable(log = { log("1/4: $it") }, progress = { progress(0.05f + it * 0.5f) })
 
-            log("2/4: Stahuji trasy a geometrie (Shapes)…")
-            progress(0.6f)
-            updateShapes(log = { log("2/4: $it") }, forceDownload = forceShapes)
+        log("2/4: Stahuji trasy a geometrie (Shapes)…")
+        progress(0.6f)
+        updateShapes(log = { log("2/4: $it") }, forceDownload = forceShapes)
 
-            log("3/4: Obnovuji živá data vozidel…")
-            progress(0.8f)
-            updateRealtime(log = { log("3/4: $it") })
+        log("3/4: Obnovuji živá data vozidel…")
+        progress(0.8f)
+        updateRealtime(log = { log("3/4: $it") })
 
-            log("4/4: Čistím cache tras OSRM…")
-            progress(0.95f)
-            clearOsrmCache(log = { log("4/4: $it") })
+        log("4/4: Čistím cache tras OSRM…")
+        progress(0.95f)
+        clearOsrmCache(log = { log("4/4: $it") })
 
-            progress(1.0f)
-            log("Kompletní aktualizace dat byla úspěšně dokončena!")
-        }
+        progress(1.0f)
+        log("Kompletní aktualizace dat byla úspěšně dokončena!")
+    }
 
     // ───────────────────────── vyhledávání spojení ─────────────────────────
 

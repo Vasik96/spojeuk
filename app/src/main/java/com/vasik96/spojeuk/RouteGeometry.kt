@@ -5,18 +5,26 @@ typealias LatLngList = List<Pair<Double, Double>>
 /** Trasy pro mapu: přesné tvary z GTFS shapes, a když spoj tvar nemá, silnice z OSRM. */
 class RouteGeometry(
     private val shapes: ShapeStore,
+    private val trainShapes: ShapeStore,
     private val osrm: OsrmClient,
 ) {
-    /** Celá trasa spoje. */
+    /** Tvar spoje z odpovídající databáze (vlaky mají vlastní). */
+    private fun shapeOf(tt: Timetable, tid: Int): LatLngList? {
+        val trip = tt.trips[tid] ?: return null
+        return (if (trip.isTrain) trainShapes else shapes).points(trip.gid)
+    }
+
+    /** Celá trasa spoje. Vlak bez tvaru se nikdy nevede po silnici (OSRM), jen přímo mezi zastávkami. */
     fun forTrip(tt: Timetable, tid: Int): LatLngList {
-        shapes.points(tt.trips[tid]?.gid.orEmpty())?.let { return it }
+        shapeOf(tt, tid)?.let { return it }
+        if (tt.trips[tid]?.isTrain == true) return stopCoords(tt, tid)
         return osrm.pathFor(stopCoords(tt, tid))
     }
 
     /** Trasy jednotlivých jízd spojení (samostatné úseky pro zamezení rovných čar mezi přestupy). */
     fun forJourneySegments(tt: Timetable, j: Journey): List<LatLngList> =
         j.rawLegs.filter { it.kind == "ride" }.mapNotNull { leg ->
-            (legShape(tt, leg) ?: osrm.pathFor(leg.stops.mapNotNull { coord(tt, it.first) })).takeIf { it.isNotEmpty() }
+            (legShape(tt, leg) ?: legFallback(tt, leg)).takeIf { it.isNotEmpty() }
         }
 
     /** Trasa všech jízd spojení. */
@@ -38,8 +46,13 @@ class RouteGeometry(
         tt.tripStops(tid).asIterable().mapNotNull { coord(tt, it) }
 
     /** Úsek přesné trasy mezi nástupní a výstupní zastávkou, nebo null (spoj nemá tvar / zastávky nesedí). */
+    private fun legFallback(tt: Timetable, leg: Leg): LatLngList {
+        val pts = leg.stops.mapNotNull { coord(tt, it.first) }
+        return if (tt.trips[leg.tid]?.isTrain == true) pts else osrm.pathFor(pts)
+    }
+
     private fun legShape(tt: Timetable, leg: Leg): LatLngList? {
-        val shape = shapes.points(tt.trips[leg.tid]?.gid.orEmpty()) ?: return null
+        val shape = shapeOf(tt, leg.tid) ?: return null
         val seq = leg.stops.map { it.first }
         if (seq.size < 2) return null
 

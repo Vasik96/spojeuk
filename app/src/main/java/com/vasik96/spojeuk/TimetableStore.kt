@@ -83,6 +83,7 @@ class TimetableStore(
             File(dir, "static.sqlite.new.tmp").delete()
             File(dir, "static.sqlite.tmp").delete()
             File(dir, "gtfs.zip").delete()
+            File(dir, "gtfs_rail.zip").delete()
             File(dir, "gtfs_temp").deleteRecursively()
 
             val p = pendingFile
@@ -122,25 +123,51 @@ class TimetableStore(
         val release = JSONObject(open(RELEASES_API).use { it.body?.string().orEmpty() })
         val tag = release.optString("tag_name", "latest")
         val assets = release.optJSONArray("assets") ?: JSONArray()
-        val asset = (0 until assets.length())
+        fun asset(name: String) = (0 until assets.length())
             .map { assets.getJSONObject(it) }
-            .firstOrNull { it.optString("name") == ASSET_NAME }
-            ?: error("Release $tag neobsahuje asset $ASSET_NAME")
+            .firstOrNull { it.optString("name") == name }
 
-        log("Stahuji $ASSET_NAME (${asset.optLong("size") / 1048576} MB)…")
-        val zip = File(dbFile.parentFile, "gtfs.zip")
-        open(asset.getString("browser_download_url")).use { resp ->
+        val busAsset = asset(ASSET_NAME) ?: error("Release $tag neobsahuje asset $ASSET_NAME")
+        val dir = dbFile.parentFile
+
+        val busZip = File(dir, "gtfs.zip")
+        log("Stahuji $ASSET_NAME (${busAsset.optLong("size") / 1048576} MB)…")
+        fetchGtfsZip(busAsset.getString("browser_download_url"), busZip, log)
+
+        // Vlaky jsou doplněk: když se nepovedou, appka zůstane s autobusy a příště to zkusí znovu.
+        val railZip = File(dir, "gtfs_rail.zip")
+        val railOk = asset(RAIL_ASSET_NAME)?.let { a ->
+            runCatching {
+                log("Stahuji vlaky ($RAIL_ASSET_NAME)…")
+                fetchGtfsZip(a.getString("browser_download_url"), railZip, log)
+                railZip.exists()
+            }.getOrElse {
+                Log.w(TAG, "vlaky se nepodařilo stáhnout: ${it.message}")
+                railZip.delete()
+                false
+            }
+        } ?: false.also { Log.w(TAG, "release $tag nemá $RAIL_ASSET_NAME") }
+
+        val feeds = buildList {
+            add(GtfsFeed(busZip, rail = false))
+            if (railOk) add(GtfsFeed(railZip, rail = true))
+        }
+        try {
+            GtfsImporter(dbFile).importGtfs(feeds, tag, log, progress)
+        } finally {
+            busZip.delete()
+            railZip.delete()
+        }
+    }
+
+    /** Streamuje tar z GitHubu a vytáhne z něj gtfs.zip (zbytek, třeba parquet, se nestahuje). */
+    private fun fetchGtfsZip(url: String, dest: File, log: (String) -> Unit) {
+        open(url).use { resp ->
             val body = resp.body ?: error("Prázdná odpověď")
             log("Rozbaluji GTFS…")
-            if (!TarUtils.streamGtfsZipToFile(body.byteStream(), zip) || !zip.exists()) {
-                error("V souboru $ASSET_NAME nebylo nalezeno gtfs.zip")
+            if (!TarUtils.streamGtfsZipToFile(body.byteStream(), dest) || !dest.exists()) {
+                error("V souboru nebylo nalezeno gtfs.zip ($url)")
             }
-        }
-
-        try {
-            GtfsImporter(dbFile).importGtfs(zip, tag, log, progress)
-        } finally {
-            zip.delete()
         }
     }
 
