@@ -87,6 +87,7 @@ class SpojeAppState(
     var setupDismissed by mutableStateOf(false)
 
     var journeys by mutableStateOf<List<Journey>>(emptyList())
+    var modeFilter by mutableStateOf(ModeFilter.ALL)
     var searchLoading by mutableStateOf(false)
     var loadingMore by mutableStateOf(false)
     var refreshing by mutableStateOf(false)
@@ -128,6 +129,10 @@ class SpojeAppState(
     var vehicleSource by mutableStateOf("")
 
     var userLoc by mutableStateOf<Pair<Double, Double>?>(null)
+    /** Kdy (System.currentTimeMillis) byla [userLoc] naposledy zjištěna; 0 = neznámo. */
+    var userLocTime: Long = 0L
+    /** Druhy dopravy na zastávkách pro filtr ve výběru zastávky; null dokud se nespočítají. */
+    var stopModes by mutableStateOf<StopModes?>(null)
 
     var autoFillDone = false      // předvyplnění proběhlo
     var autoFillAsked = false     // o oprávnění jsme už žádali

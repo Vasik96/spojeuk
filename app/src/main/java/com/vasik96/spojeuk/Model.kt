@@ -5,6 +5,18 @@ import java.time.LocalDateTime
 
 // ───────────────────────── jízdní řády ─────────────────────────
 
+enum class ModeFilter(val label: String) {
+    ALL("Vše"),
+    BUS("Autobusy"),
+    TRAIN("Vlaky");
+
+    fun accepts(isTrain: Boolean): Boolean = when (this) {
+        ALL -> true
+        BUS -> !isTrain
+        TRAIN -> isTrain
+    }
+}
+
 data class Stop(
     val id: String,
     val name: String,
@@ -53,6 +65,13 @@ data class Leg(
     val t1: Int = 0,
 )
 
+/** Jeden přestup mezi dvěma jízdami spojení. */
+data class TransferInfo(
+    val at: String,            // "Zastávka" nebo "Zastávka A → Zastávka B" (při přesunu pěšky)
+    val waitMin: Int,          // čekání v min
+    val walkMin: Int? = null,  // chůze mezi zastávkami v min
+)
+
 data class Journey(
     val departure: String,
     val arrival: String,
@@ -72,6 +91,8 @@ data class Journey(
     val day: LocalDate = todayPrague(),
     val rawLegs: List<Leg> = emptyList(),
     val transfers: Int = if (line2 != null) 1 else 0,
+    val lines: List<String> = listOf(line),               // všechny linky v pořadí jízd
+    val transferList: List<TransferInfo> = emptyList(),   // všechny přestupy v pořadí
     val cis: String = "",
     val boardWalkMin: Int? = null,      // chůze před prvním spojem
     val boardStopName: String? = null,  // kam se jde pěšky
@@ -80,8 +101,8 @@ data class Journey(
 ) {
     val dep: Int get() = sortKey
     val arr: Int get() = sortKey + durationMinutes * 60
-    val isTransfer get() = line2 != null
-    val key get() = "$sortKey|$departure|$arrival|$line|$trip|$line2|$trip2|$transferAt|$day"
+    val isTransfer get() = transfers > 0
+    val key get() = "$sortKey|$departure|$arrival|$line|$trip|$line2|$trip2|$transferAt|${lines.joinToString(",")}|$day"
     val durationMinutes: Int
         get() {
             var duration = tm(arrival) - tm(departure)

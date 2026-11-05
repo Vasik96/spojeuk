@@ -116,7 +116,7 @@ class Net(val tt: Timetable, val day: LocalDate) {
         return low
     }
 
-    fun raptor(srcs: List<Int>, dsts: Set<Int>, t0Sec: Int, kmax: Int = 4): List<Journey> {
+    fun raptor(srcs: List<Int>, dsts: Set<Int>, t0Sec: Int, kmax: Int = 4, modeFilter: ModeFilter = ModeFilter.ALL): List<Journey> {
         val foot = tt.foot
         val INF = 1_000_000_000
         val arrs = Array(kmax + 1) { HashMap<Int, Int>() }
@@ -179,7 +179,15 @@ class Net(val tt: Timetable, val day: LocalDate) {
                     val p = prevArrs[s]
                     if (p != null) {
                         val col = pattern.cols[i]
-                        val j = binarySearchLeft(col, p + mt)
+                        var j = binarySearchLeft(col, p + mt)
+                        if (modeFilter != ModeFilter.ALL) {
+                            while (j < col.size) {
+                                val tid = pattern.tids[j]
+                                val isTrain = tt.trips[tid]?.isTrain == true
+                                if (modeFilter.accepts(isTrain)) break
+                                j++
+                            }
+                        }
                         if (j < col.size && (trip < 0 || j < trip || (j == trip && p < boardPrev))) {
                             trip = j
                             board = i
@@ -282,11 +290,6 @@ class Net(val tt: Timetable, val day: LocalDate) {
         val arr = legs.maxOf { it.arr }
 
         fun walkMin(l: Leg) = (l.arr - l.dep + 59) / 60
-        val midWalk = if (rides.size > 1) {
-            val i0 = legs.indexOfFirst { it === rides[0] }
-            val i1 = legs.indexOfFirst { it === rides[1] }
-            legs.subList(i0 + 1, i1).firstOrNull { it.kind == "walk" }
-        } else null
 
         val line1 = tt.trips[firstRide.tid]?.line ?: "?"
         val line2 = if (rides.size > 1) tt.trips[rides[1].tid]?.line else null
@@ -294,35 +297,41 @@ class Net(val tt: Timetable, val day: LocalDate) {
         val agency = tt.trips[firstRide.tid]?.agency ?: ""
 
         val totalStops = rides.sumOf { maxOf(0, it.stops.size - 1) }
-        val transferAtStop = if (rides.size > 1) {
-            val fromName = tt.stops[rides[0].toStop]?.name
-            val toName = tt.stops[rides[1].fromStop]?.name
-            if (fromName != null && toName != null && rides[0].toStop != rides[1].fromStop) {
-                val fromClean = prettyName(fromName)
-                val toClean = prettyName(toName)
-                if (fromClean != toClean) {
-                    "${stopLabel(fromClean)} → ${stopLabel(toClean)}"
-                } else {
-                    fromClean
-                }
-            } else {
-                fromName?.let { prettyName(it) }
-            }
-        } else null
-        val transferWaitMin = if (rides.size > 1) maxOf(0, (rides[1].dep - rides[0].arr) / 60) else null
 
-        val calcTransferWalkMin = if (rides.size > 1) {
-            if (midWalk != null) {
-                walkMin(midWalk)
-            } else if (rides[0].toStop != rides[1].fromStop) {
-                val a = tt.stops[rides[0].toStop]
-                val b = tt.stops[rides[1].fromStop]
-                if (a != null && b != null && a.hasCoords && b.hasCoords) {
-                    val dist = Geo.distanceM(a.lat, a.lng, b.lat, b.lng)
-                    maxOf(1, (dist / 80.0).toInt())
-                } else null
-            } else null
-        } else null
+        // přestup mezi jízdou i a i+1 (pro každý přestup zvlášť, ne jen první)
+        val transferList = (0 until rides.size - 1).map { i ->
+            val r0 = rides[i]
+            val r1 = rides[i + 1]
+            val fromName = tt.stops[r0.toStop]?.name?.let { prettyName(it) }
+            val toName = tt.stops[r1.fromStop]?.name?.let { prettyName(it) }
+            val at = when {
+                fromName != null && toName != null && r0.toStop != r1.fromStop -> {
+                    val fromClean = stopLabel(fromName)
+                    val toClean = stopLabel(toName)
+                    if (fromClean != toClean) "$fromClean → $toClean" else fromClean
+                }
+                else -> fromName?.let { stopLabel(it) } ?: ""
+            }
+            val wait = maxOf(0, (r1.dep - r0.arr) / 60)
+
+            val iA = legs.indexOfFirst { it === r0 }
+            val iB = legs.indexOfFirst { it === r1 }
+            val walkLeg = legs.subList(iA + 1, iB).firstOrNull { it.kind == "walk" }
+            val walk = when {
+                walkLeg != null -> walkMin(walkLeg)
+                r0.toStop != r1.fromStop -> {
+                    val a = tt.stops[r0.toStop]
+                    val b = tt.stops[r1.fromStop]
+                    if (a != null && b != null && a.hasCoords && b.hasCoords)
+                        maxOf(1, (Geo.distanceM(a.lat, a.lng, b.lat, b.lng) / 80.0).toInt())
+                    else null
+                }
+                else -> null
+            }
+            TransferInfo(at = at, waitMin = wait, walkMin = walk)
+        }
+        val firstTransfer = transferList.firstOrNull()
+        val allLines = rides.map { tt.trips[it.tid]?.line ?: "?" }
 
         val tripStr = tt.trips[firstRide.tid]?.num?.ifBlank { firstRide.tid.toString() } ?: firstRide.tid.toString()
         val trip2Str = if (rides.size > 1) (tt.trips[rides[1].tid]?.num?.ifBlank { rides[1].tid.toString() } ?: rides[1].tid.toString()) else null
@@ -338,8 +347,8 @@ class Net(val tt: Timetable, val day: LocalDate) {
             realtime = false,
             lowFloor = (tt.trips[firstRide.tid]?.wheel ?: 0) > 0,
             stopsCount = totalStops,
-            transferAt = transferAtStop,
-            transferWait = transferWaitMin,
+            transferAt = firstTransfer?.at,
+            transferWait = firstTransfer?.waitMin,
             trip = tripStr,
             trip2 = trip2Str,
             sortKey = dep,
@@ -348,7 +357,10 @@ class Net(val tt: Timetable, val day: LocalDate) {
             cis = tt.trips[firstRide.tid]?.cis ?: "",
             boardWalkMin = firstWalk?.let { walkMin(it) },
             boardStopName = firstWalk?.let { tt.stops[it.toStop]?.name?.let { n -> prettyName(n) } },
-            transferWalkMin = calcTransferWalkMin
+            transferWalkMin = firstTransfer?.walkMin,
+            transfers = rides.size - 1,
+            lines = allLines,
+            transferList = transferList
         )
     }
 }
@@ -372,7 +384,8 @@ class Planner(val tt: Timetable) {
         start: LocalDateTime,
         count: Int = 8,
         end: LocalDateTime? = null,
-        horizonHours: Int = 14
+        horizonHours: Int = 14,
+        modeFilter: ModeFilter = ModeFilter.ALL
     ): List<Journey> {
         val day = start.toLocalDate()
         val n = net(day)
@@ -392,7 +405,7 @@ class Planner(val tt: Timetable) {
         var runs = 0
 
         while (out.size < count && tSec <= tEndSec && runs < 40) {
-            val js = n.raptor(srcs, dsts, tSec)
+            val js = n.raptor(srcs, dsts, tSec, modeFilter = modeFilter)
             if (js.isEmpty()) break
             for (j in js) {
                 if (j.dep <= tEndSec) out[j.key] = j
@@ -400,22 +413,44 @@ class Planner(val tt: Timetable) {
             tSec = (js.minByOrNull { it.dep }?.dep ?: tSec) + 1
             runs++
         }
-        return prune(out.values.toList())
+        val pruned = prune(out.values.toList())
+        return if (modeFilter == ModeFilter.ALL) {
+            pruned
+        } else {
+            pruned.filter { j ->
+                j.rawLegs.all { leg ->
+                    leg.kind != "ride" || modeFilter.accepts(tt.trips[leg.tid]?.isTrain == true)
+                }
+            }
+        }
     }
 
-    fun moreLater(fromPlace: String, toPlace: String, journeys: List<Journey>, count: Int = 6): List<Journey> {
+    fun moreLater(
+        fromPlace: String,
+        toPlace: String,
+        journeys: List<Journey>,
+        count: Int = 6,
+        modeFilter: ModeFilter = ModeFilter.ALL
+    ): List<Journey> {
         if (journeys.isEmpty()) return emptyList()
         val last = journeys.maxOf { it.depDt }
-        val newJs = find(fromPlace, toPlace, last.plusSeconds(60), count)
+        val newJs = find(fromPlace, toPlace, last.plusSeconds(60), count, modeFilter = modeFilter)
         val existingKeys = journeys.mapTo(HashSet()) { it.key }
         return prune(journeys + newJs.filter { it.key !in existingKeys })
     }
 
-    fun moreEarlier(fromPlace: String, toPlace: String, journeys: List<Journey>, count: Int = 6, hours: Int = 2): List<Journey> {
+    fun moreEarlier(
+        fromPlace: String,
+        toPlace: String,
+        journeys: List<Journey>,
+        count: Int = 6,
+        hours: Int = 2,
+        modeFilter: ModeFilter = ModeFilter.ALL
+    ): List<Journey> {
         if (journeys.isEmpty()) return emptyList()
         val first = journeys.minOf { it.depDt }
         val lo = maxOf(first.minusHours(hours.toLong()), first.toLocalDate().atStartOfDay())
-        val newJs = find(fromPlace, toPlace, lo, 60, end = first.minusSeconds(1))
+        val newJs = find(fromPlace, toPlace, lo, 60, end = first.minusSeconds(1), modeFilter = modeFilter)
             .sortedBy { it.depDt }
             .takeLast(count)
         val existingKeys = journeys.mapTo(HashSet()) { it.key }

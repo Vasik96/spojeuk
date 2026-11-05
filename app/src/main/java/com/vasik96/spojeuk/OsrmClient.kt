@@ -7,6 +7,8 @@ import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -18,6 +20,23 @@ class OsrmClient(private val cacheDir: File) {
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
+
+    // rychlejší klient pro hledání nejbližší zastávky: krátké timeouty, ale víc pokusů
+    private val fastClient = client.newBuilder()
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.SECONDS)
+        .build()
+
+    /** Předehřátí spojení (DNS + TLS), aby první hledání nejbližší zastávky nebylo pomalé. */
+    fun warmUp() {
+        for (host in ROAD_HOSTS) {
+            runCatching {
+                val req = Request.Builder().url(host).head().header("User-Agent", USER_AGENT).build()
+                fastClient.newCall(req).execute().close()
+            }
+        }
+    }
 
     /** Trasa po silnici přes [stops]; při chybě vrátí původní zastávky (přímé úsečky). */
     fun pathFor(stops: List<Pair<Double, Double>>): List<Pair<Double, Double>> {
@@ -91,29 +110,57 @@ class OsrmClient(private val cacheDir: File) {
         return md.digest(input.toByteArray()).joinToString("") { "%02x".format(it) }
     }
 
-    /** Vzdálenosti po silnici z bodu `from` ke každému bodu v `to` (metry). null při chybě. */
+    /**
+     * Vzdálenosti z bodu `from` ke každému bodu v `to` (metry). null jen když selžou všechny pokusy.
+     * Dělá až [ROAD_ATTEMPTS] kol; v každém kole se dotazují oba servery současně (pěší a auto)
+     * a bere se první platná odpověď, takže jeden pomalý/nedostupný server nic nezpůsobí.
+     */
     fun roadDistances(
         from: Pair<Double, Double>,
         to: List<Pair<Double, Double>>
     ): List<Double?>? {
         if (to.isEmpty()) return emptyList()
-        return try {
-            val coords = (listOf(from) + to).joinToString(";") {
-                String.format(Locale.US, "%.6f,%.6f", it.second, it.first)
-            }
-            val dests = (1..to.size).joinToString(";")
-            val url = "https://router.project-osrm.org/table/v1/driving/$coords" +
-                    "?sources=0&destinations=$dests&annotations=distance"
-            val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                val body = resp.body?.string() ?: return null
-                val row = JSONObject(body).optJSONArray("distances")?.optJSONArray(0) ?: return null
-                List(to.size) { i -> if (row.isNull(i)) null else row.getDouble(i) }
-            }
-        } catch (e: Exception) {
-            null
+        val coords = (listOf(from) + to).joinToString(";") {
+            String.format(Locale.US, "%.6f,%.6f", it.second, it.first)
         }
+        val dests = (1..to.size).joinToString(";")
+        val urls = listOf(
+            "https://routing.openstreetmap.de/routed-foot/table/v1/foot/$coords" +
+                    "?sources=0&destinations=$dests&annotations=distance",
+            "https://router.project-osrm.org/table/v1/driving/$coords" +
+                    "?sources=0&destinations=$dests&annotations=distance"
+        )
+
+        val pool = Executors.newFixedThreadPool(urls.size)
+        try {
+            repeat(ROAD_ATTEMPTS) { attempt ->
+                val cs = ExecutorCompletionService<List<Double?>?>(pool)
+                urls.forEach { u -> cs.submit { fetchTable(u, to.size) } }
+                repeat(urls.size) {
+                    val res = runCatching { cs.take().get() }.getOrNull()
+                    if (res != null) return res
+                }
+                if (attempt < ROAD_ATTEMPTS - 1) Thread.sleep(250L * (attempt + 1))
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+        return null
+    }
+
+    private fun fetchTable(url: String, n: Int): List<Double?>? = try {
+        val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
+        fastClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return null
+            val body = resp.body?.string() ?: return null
+            val row = JSONObject(body).optJSONArray("distances")?.optJSONArray(0) ?: return null
+            if (row.length() < n) return null
+            val list = List(n) { i -> if (row.isNull(i)) null else row.getDouble(i) }
+            // odpověď, kde není žádná platná vzdálenost, ber jako neúspěch (zkusí se druhý server / další kolo)
+            if (list.all { it == null }) null else list
+        }
+    } catch (e: Exception) {
+        null
     }
 
     fun clearCache(): Int {
@@ -160,6 +207,9 @@ class OsrmClient(private val cacheDir: File) {
         }
     }
 }
+
+private const val ROAD_ATTEMPTS = 3
+private val ROAD_HOSTS = listOf("https://routing.openstreetmap.de/", "https://router.project-osrm.org/")
 
 data class WalkRoute(
     val points: List<Pair<Double, Double>>,
