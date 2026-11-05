@@ -50,10 +50,24 @@ private fun createLineMarkerDrawable(
         textAlign = Paint.Align.CENTER
     }
 
-    val displayLine = if (line.length > 6) line.take(6) else line
+    // Linka se nikdy neořezává. Marker se nejdřív roztáhne do šířky (až po maxWidthDp)
+    // a písmo se zmenšuje jen o tolik, o kolik je to nutné, aby se text vešel.
+    val displayLine = line
+    val maxWidthDp = if (highlighted) 84 else 72
+    val longPadDp = if (highlighted) 20 else 12      // u dlouhých linek menší okraje = větší písmo
+    var effectivePadDp = padDp
+    if (displayLine.length > 3) {
+        effectivePadDp = longPadDp
+        val maxTextWidthPx = (maxWidthDp - effectivePadDp) * density
+        val fullWidthPx = textPaint.measureText(displayLine)
+        if (fullWidthPx > maxTextWidthPx) {
+            val minSizePx = 8f * density   // spodní mez čitelnosti
+            textPaint.textSize = maxOf(minSizePx, textPaint.textSize * maxTextWidthPx / fullWidthPx)
+        }
+    }
     val textWidthPx = textPaint.measureText(displayLine)
 
-    val widthPx = maxOf((36 * density).toInt(), (textWidthPx + padDp * density).toInt())
+    val widthPx = maxOf((36 * density).toInt(), (textWidthPx + effectivePadDp * density).toInt())
     val heightPx = (heightDp * density).toInt()
 
     val bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)

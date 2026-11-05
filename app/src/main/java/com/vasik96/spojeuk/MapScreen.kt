@@ -28,6 +28,14 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.filled.DirectionsBus
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Train
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -290,17 +298,23 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val keyed = remember(allVehicles) { keyer.assign(allVehicles) }
 
     val hideOthers = appState.hideOtherVehiclesOnMap
+    val mapMode = appState.mapModeFilter
     val activeVehicles: List<Pair<String, Vehicle>> = remember(
-        keyed, strictMode, hideOthers, locked, target
+        keyed, strictMode, hideOthers, locked, target, mapMode
     ) {
         if (strictMode && hideOthers && locked != null) {
             val match = keyed.firstOrNull { it.second.uid == locked.uid }
             listOf(match ?: ("locked_${locked.uid}" to locked))
         } else {
             keyed.filter { (_, x) ->
-                (target != null && x.uid == target.uid) ||
-                        x.source != SpravaZeleznicSource.ID ||
-                        x.inUsteckyKraj()
+                val isTarget = target != null && x.uid == target.uid
+                // vybrané vozidlo zůstane vidět i při jiném filtru
+                isTarget || (
+                        mapMode.accepts(x.train) && (
+                                x.source != SpravaZeleznicSource.ID ||
+                                        x.inUsteckyKraj()
+                                )
+                        )
             }
         }
     }
@@ -518,36 +532,60 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth(),
             shape = RoundedCornerShape(24.dp)
         ) {
-            Row(Modifier.padding(start = 14.dp, top = 14.dp, bottom = 14.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Map, null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Mapa vozidel", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "${appState.vehicles.size} poloh · aktualizace po 6s",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (appState.vehicleSource.isNotBlank()) {
+            Column {
+                Row(Modifier.padding(start = 14.dp, top = 14.dp, bottom = 8.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Map, null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Mapa vozidel", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            sourceLabelText(
-                                appState.vehicleSource,
-                                normal = MaterialTheme.colorScheme.onSurfaceVariant,
-                                bad = MaterialTheme.colorScheme.error
-                            ),
-                            style = MaterialTheme.typography.bodySmall
+                            if (mapMode == ModeFilter.ALL) "${appState.vehicles.size} poloh · aktualizace po 6s"
+                            else "${activeVehicles.size} z ${appState.vehicles.size} poloh · aktualizace po 6s",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (appState.vehicleSource.isNotBlank()) {
+                            Text(
+                                sourceLabelText(
+                                    appState.vehicleSource,
+                                    normal = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    bad = MaterialTheme.colorScheme.error
+                                ),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                     }
+                    if (appState.routeLoading) { Wavy(24.dp); Spacer(Modifier.width(8.dp)) }
+                    if (appState.mapError != null) {
+                        Text("Offline", color = MaterialTheme.colorScheme.error)
+                    }
+                    //if (appState.heldCount > OUTAGE_MIN) {
+                        IconButton(onClick = { showHeldInfo = true }) {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = "Upozornění na zdroj dat",
+                            )
+                        }
+                    //}
                 }
-                if (appState.routeLoading) { Wavy(24.dp); Spacer(Modifier.width(8.dp)) }
-                if (appState.mapError != null) {
-                    Text("Offline", color = MaterialTheme.colorScheme.error)
-                }
-                if (appState.heldCount > OUTAGE_MIN) {
-                    IconButton(onClick = { showHeldInfo = true }) {
-                        Icon(
-                            Icons.Default.Warning,
-                            contentDescription = "Upozornění na zdroj dat",
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(start = 14.dp, end = 14.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ModeFilter.entries.forEach { mode ->
+                        FilterChip(
+                            selected = appState.mapModeFilter == mode,
+                            onClick = { appState.mapModeFilter = mode },
+                            label = { Text(mode.label) },
+                            leadingIcon = when (mode) {
+                                ModeFilter.BUS -> ({ Icon(Icons.Default.DirectionsBus, null, Modifier.size(18.dp)) })
+                                ModeFilter.TRAIN -> ({ Icon(Icons.Default.Train, null, Modifier.size(18.dp)) })
+                                ModeFilter.ALL -> null
+                            }
                         )
                     }
                 }
@@ -557,13 +595,11 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         if (active && showHeldInfo) {
             AlertDialog(
                 onDismissRequest = { showHeldInfo = false },
-                icon = { Icon(Icons.Default.Warning, null) },
-                title = { Text("API nespolehlivé") },
+                icon = { Icon(Icons.Default.Info, null) },
+                title = { Text("Zdroje dat") },
                 text = {
                     Text(
-                        "Zdroj dat (Portabo) dočasně nedodává ${appState.heldCount} vozidel, " +
-                                "většinou MHD/DPMUL. U nich zobrazuji poslední známou polohu, může být zastaralá. " +
-                                "Detail konkrétního vozidla ukáže, jak stará poloha je."
+                        "Některé zdroje nemusí poskytovat aktuální polohu – ty starší jsou označené červeně. Přesné stáří dat najdete v detailu konkrétního vozidla."
                     )
                 },
                 confirmButton = {
