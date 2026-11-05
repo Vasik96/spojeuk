@@ -141,24 +141,31 @@ class TransitRepository(context: Context? = null) {
 
     // ───────────────────────── vyhledávání spojení ─────────────────────────
 
-    fun newSearch(fromName: String, toName: String): JourneySearch = JourneySearch(this, fromName, toName)
+    fun newSearch(fromName: String, toName: String, modeFilter: ModeFilter = ModeFilter.ALL): JourneySearch =
+        JourneySearch(this, fromName, toName, modeFilter)
 
     suspend fun searchConnections(
         fromName: String,
         toName: String,
         startTime: LocalDateTime = nowPrague(),
         count: Int = 8,
+        modeFilter: ModeFilter = ModeFilter.ALL,
     ): List<Journey> = withContext(Dispatchers.IO) {
         val b = store.ensure()
 
-        val journeys = b.planner.find(fromName, toName, startTime, count)
+        val journeys = b.planner.find(fromName, toName, startTime, count, modeFilter = modeFilter)
         withRouteStops(withLiveDelays(journeys))
     }
 
-    suspend fun searchMoreLater(fromName: String, toName: String, current: List<Journey>): List<Journey> =
+    suspend fun searchMoreLater(
+        fromName: String,
+        toName: String,
+        current: List<Journey>,
+        modeFilter: ModeFilter = ModeFilter.ALL,
+    ): List<Journey> =
         withContext(Dispatchers.IO) {
             val b = store.ensure()
-            withLiveDelays(b.planner.moreLater(fromName, toName, current))
+            withRouteStops(withLiveDelays(b.planner.moreLater(fromName, toName, current, modeFilter = modeFilter)))
         }
 
     suspend fun searchMoreEarlier(
@@ -166,9 +173,10 @@ class TransitRepository(context: Context? = null) {
         toName: String,
         current: List<Journey>,
         hours: Int = 2,
+        modeFilter: ModeFilter = ModeFilter.ALL,
     ): List<Journey> = withContext(Dispatchers.IO) {
         val b = store.ensure()
-        withLiveDelays(b.planner.moreEarlier(fromName, toName, current, hours = hours))
+        withRouteStops(withLiveDelays(b.planner.moreEarlier(fromName, toName, current, hours = hours, modeFilter = modeFilter)))
     }
 
     /** Doplní do spojení živé zpoždění (z posledního sloučeného stavu vozů). */
@@ -192,25 +200,30 @@ class TransitRepository(context: Context? = null) {
     ): List<Journey> {
         val tt = store.ensure().timetable
 
+        fun norm(name: String): String {
+            val label = splitStopName(prettyName(name)).first.ifBlank { name }
+            return foldText(label).replace(Regex("\\bhl\\.?n\\.?\\b"), "hlavni nadrazi").replace(Regex("\\s+"), "")
+        }
+
         for (journey in journeys) {
             val rideLegs = journey.rawLegs.filter { it.kind == "ride" }
 
-            val stopIds = mutableListOf<Int>()
+            val names = mutableListOf<String>()
 
             rideLegs.forEach { leg ->
-                // Přidáme pouze nástupní a výstupní zastávku daného úseku.
-                if (stopIds.lastOrNull() != leg.fromStop) {
-                    stopIds.add(leg.fromStop)
+                val fromName = tt.stops[leg.fromStop]?.name?.let { prettyName(it) }
+                val toName = tt.stops[leg.toStop]?.name?.let { prettyName(it) }
+
+                if (fromName != null && (names.isEmpty() || norm(names.last()) != norm(fromName))) {
+                    names.add(fromName)
                 }
 
-                if (stopIds.lastOrNull() != leg.toStop) {
-                    stopIds.add(leg.toStop)
+                if (toName != null && (names.isEmpty() || norm(names.last()) != norm(toName))) {
+                    names.add(toName)
                 }
             }
 
-            journey.routeStops = stopIds.mapNotNull { stopId ->
-                tt.stops[stopId]?.name?.let { prettyName(it) }
-            }
+            journey.routeStops = names
         }
 
         return journeys
@@ -343,6 +356,14 @@ class TransitRepository(context: Context? = null) {
 
     // ───────────────────────── nejbližší zastávka ─────────────────────────
 
+    /** Druhy dopravy na zastávkách (vlak / bus), počítá se jednou na pozadí. */
+    suspend fun loadStopModes(): StopModes = withContext(Dispatchers.IO) {
+        store.ensure().timetable.computeStopModes()
+    }
+
+    /** Předehřátí spojení na routovací servery, ať první hledání nejbližší zastávky nečeká na TLS. */
+    suspend fun warmUpRouting() = withContext(Dispatchers.IO) { osrm.warmUp() }
+
     suspend fun nearestCandidates(lat: Double, lng: Double, limit: Int = 8): List<Pair<Stop, Double>> =
         withContext(Dispatchers.IO) { stopLocator.nearest(store.ensure().timetable, lat, lng, limit) }
 
@@ -359,6 +380,7 @@ class JourneySearch(
     private val api: TransitRepository,
     private val fromName: String,
     private val toName: String,
+    private val modeFilter: ModeFilter = ModeFilter.ALL,
 ) {
     private val currentJourneys = mutableListOf<Journey>()
     private val mutex = Mutex()
@@ -372,16 +394,16 @@ class JourneySearch(
     var hasEarlier: Boolean = true
         private set
 
-    fun fresh(): JourneySearch = JourneySearch(api, fromName, toName)
+    fun fresh(): JourneySearch = JourneySearch(api, fromName, toName, modeFilter)
 
     suspend fun loadMore(minNew: Int = 1): List<Journey> = withContext(Dispatchers.IO) {
         mutex.withLock {
             if (currentJourneys.isEmpty()) {
-                val initial = api.searchConnections(fromName, toName, startTime, minNew)
+                val initial = api.searchConnections(fromName, toName, startTime, minNew, modeFilter = modeFilter)
                 currentJourneys.addAll(initial)
                 if (initial.isEmpty()) hasMore = false
             } else {
-                val more = api.searchMoreLater(fromName, toName, currentJourneys.toList()).filter { it.depDt < cutoff }
+                val more = api.searchMoreLater(fromName, toName, currentJourneys.toList(), modeFilter = modeFilter).filter { it.depDt < cutoff }
                 if (more.size <= currentJourneys.size) {
                     hasMore = false
                 } else {
@@ -398,7 +420,7 @@ class JourneySearch(
             if (currentJourneys.isNotEmpty()) {
                 var grew = false
                 for (hours in intArrayOf(2, 6, 12)) {
-                    val more = api.searchMoreEarlier(fromName, toName, currentJourneys.toList(), hours)
+                    val more = api.searchMoreEarlier(fromName, toName, currentJourneys.toList(), hours, modeFilter = modeFilter)
                     if (more.size > currentJourneys.size) {
                         currentJourneys.clear()
                         currentJourneys.addAll(more)

@@ -93,6 +93,7 @@ import org.maplibre.android.camera.CameraPosition as MapLibreCameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory as MapLibreCameraUpdateFactory
 import org.maplibre.android.geometry.LatLng as MapLibreLatLng
 import org.maplibre.android.location.LocationComponentActivationOptions
+import org.maplibre.android.location.engine.LocationEngineRequest
 import org.maplibre.android.location.modes.CameraMode
 import org.maplibre.android.location.modes.RenderMode
 import org.maplibre.android.maps.MapLibreMap
@@ -598,12 +599,12 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
                     )
                 } else {
-                    LocationServices.getFusedLocationProviderClient(context).lastLocation
-                        .addOnSuccessListener { loc ->
-                            if (loc != null) scope.launch {
-                                animateCameraTo(LatLng(loc.latitude, loc.longitude), 14f)
-                            }
+                    // cache + čerstvá poloha současně, první odpověď vyhrává (dřív jen cache => často stará poloha)
+                    requestFix(context, 60_000L) { loc ->
+                        if (loc != null) scope.launch {
+                            animateCameraTo(LatLng(loc.latitude, loc.longitude), 14f)
                         }
+                    }
                 }
             },
             modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
@@ -822,7 +823,15 @@ private fun MapLibreScreenContent(
         runCatching {
             m.locationComponent.apply {
                 activateLocationComponent(
-                    LocationComponentActivationOptions.builder(context, style).build()
+                    LocationComponentActivationOptions.builder(context, style)
+                        // rychlejší aktualizace modrého bodu (výchozí je ~1 s a nižší priorita)
+                        .locationEngineRequest(
+                            LocationEngineRequest.Builder(500L)
+                                .setFastestInterval(250L)
+                                .setPriority(LocationEngineRequest.PRIORITY_HIGH_ACCURACY)
+                                .build()
+                        )
+                        .build()
                 )
                 isLocationComponentEnabled = true
                 cameraMode = CameraMode.NONE

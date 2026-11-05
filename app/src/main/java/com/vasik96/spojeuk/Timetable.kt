@@ -129,6 +129,30 @@ class Timetable(val dbFile: File) {
         }
     }
 
+    // ───────── druhy dopravy na zastávkách ─────────
+
+    /**
+     * Názvy zastávek, kde staví vlak / autobus (jedním průchodem přes trip_times).
+     * Párované nádraží + autobusové stanoviště se stejným názvem je v obou množinách.
+     * Drahé (čte všechny spoje), proto volat jen mimo hlavní vlákno, jednou.
+     */
+    fun computeStopModes(): StopModes {
+        val rail = HashSet<Int>()
+        val bus = HashSet<Int>()
+        val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
+        try {
+            db.forEachRow("SELECT trip, stops FROM trip_times") { c ->
+                val target = if (trips[c.getInt(0)]?.isTrain == true) rail else bus
+                for (sid in bytesToIntArray(c.getBlob(1))) target.add(sid)
+            }
+        } finally {
+            db.close()
+        }
+        fun names(ids: Set<Int>): Set<String> =
+            ids.mapNotNullTo(HashSet()) { stops[it]?.name }
+        return StopModes(railNames = names(rail), busNames = names(bus))
+    }
+
     // ───────── kalendář ─────────
 
     fun activeSvcs(d: LocalDate): Set<Int> = activeCache.getOrPut(d) {
@@ -227,3 +251,6 @@ class Timetable(val dbFile: File) {
         }
     }
 }
+
+/** Názvy zastávek podle druhu dopravy (pro filtr Vše / Autobusy / Vlaky). */
+class StopModes(val railNames: Set<String>, val busNames: Set<String>)

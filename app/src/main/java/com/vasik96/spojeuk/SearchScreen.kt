@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import android.content.res.Configuration
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.material.icons.filled.Train
+import androidx.compose.material3.FilterChip
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -118,6 +121,9 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import android.content.Context
+import android.location.Location
+import com.google.android.gms.location.CurrentLocationRequest
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.CancellationException
@@ -132,6 +138,36 @@ private const val FIRST_PAGE = 8
 private const val MORE_PAGE = 6
 
 private const val WALK_MAX_MIN = 20
+
+// stará poloha by předvyplnila špatnou zastávku
+private const val FIX_MAX_AGE_MS = 3 * 60_000L
+
+/**
+ * Rychlé zjištění polohy: současně se zeptá cache (lastLocation) a Play Services
+ * (getCurrentLocation s maxUpdateAge, takže vrátí čerstvou cache hned a nečeká na GPS).
+ * Vyhrává první platná odpověď; onFix(null) jen když selžou obě cesty. Volá se na main vlákně.
+ */
+@SuppressLint("MissingPermission")
+internal fun requestFix(context: Context, maxAgeMs: Long, onFix: (Location?) -> Unit) {
+    val client = LocationServices.getFusedLocationProviderClient(context)
+    var done = false
+    fun deliver(l: Location?) {
+        if (done) return
+        done = true
+        onFix(l)
+    }
+    client.lastLocation.addOnSuccessListener { l ->
+        if (l != null && System.currentTimeMillis() - l.time <= maxAgeMs) deliver(l)
+    }
+    val req = CurrentLocationRequest.Builder()
+        .setPriority(Priority.PRIORITY_BALANCED_POWER_ACCURACY)
+        .setMaxUpdateAgeMillis(maxAgeMs)
+        .setDurationMillis(10_000)
+        .build()
+    client.getCurrentLocation(req, null)
+        .addOnSuccessListener { l -> deliver(l) }
+        .addOnFailureListener { deliver(null) }
+}
 @SuppressLint("MissingPermission")
 @Composable
 internal fun SearchScreen(
@@ -175,16 +211,21 @@ internal fun SearchScreen(
         appState.walkRoute = route?.takeIf { it.minutes <= WALK_MAX_MIN }
     }
 
-    // Poloha jen z cache, bez zapínání GPS; spustí se při každém návratu na záložku Spoje
+    // Poloha se zjišťuje hned při otevření záložky (nečeká na načtení zastávek),
+    // takže předvyplnění pak může začít okamžitě. Spustí se při každém návratu na záložku Spoje.
     LaunchedEffect(Unit) {
         val granted =
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
                     ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (granted) {
-            LocationServices.getFusedLocationProviderClient(context).lastLocation
-                .addOnSuccessListener { loc ->
-                    if (loc != null) appState.userLoc = loc.latitude to loc.longitude
+            val fresh = appState.userLoc != null &&
+                    System.currentTimeMillis() - appState.userLocTime < FIX_MAX_AGE_MS
+            if (!fresh) requestFix(context, FIX_MAX_AGE_MS) { loc ->
+                if (loc != null) {
+                    appState.userLoc = loc.latitude to loc.longitude
+                    appState.userLocTime = System.currentTimeMillis()
                 }
+            }
         }
     }
 
@@ -194,6 +235,7 @@ internal fun SearchScreen(
     fun resolveNearest(lat: Double, lng: Double, target: String, onPick: (Stop) -> Unit) {
         scope.launch {
             appState.userLoc = lat to lng
+            appState.userLocTime = System.currentTimeMillis()
 
             val cands = runCatching { api.nearestCandidates(lat, lng) }.getOrNull().orEmpty()
             if (cands.isEmpty()) {
@@ -215,22 +257,16 @@ internal fun SearchScreen(
 
     fun fetchNearest(target: String, onPick: (Stop) -> Unit) {
         locatingTarget = target
-        val client = LocationServices.getFusedLocationProviderClient(context)
-        fun fail() { locatingTarget = null; toast("Polohu se nepodařilo zjistit") }
-        fun requestFresh() {
-            client.getCurrentLocation(Priority.PRIORITY_BALANCED_POWER_ACCURACY, null)
-                .addOnSuccessListener { loc ->
-                    if (loc != null) resolveNearest(loc.latitude, loc.longitude, target, onPick) else fail()
-                }
-                .addOnFailureListener { fail() }
+        // použije čerstvou polohu, kterou už aplikace má, jinak ji rychle zjistí
+        val known = appState.userLoc
+        if (known != null && System.currentTimeMillis() - appState.userLocTime < FIX_MAX_AGE_MS) {
+            resolveNearest(known.first, known.second, target, onPick)
+            return
         }
-        client.lastLocation
-            .addOnSuccessListener { last ->
-                if (last != null && System.currentTimeMillis() - last.time < 3 * 60_000) {
-                    resolveNearest(last.latitude, last.longitude, target, onPick)
-                } else requestFresh()
-            }
-            .addOnFailureListener { requestFresh() }
+        requestFix(context, FIX_MAX_AGE_MS) { loc ->
+            if (loc != null) resolveNearest(loc.latitude, loc.longitude, target, onPick)
+            else { locatingTarget = null; toast("Polohu se nepodařilo zjistit") }
+        }
     }
 
     val locationPermissionLauncher = rememberLauncherForActivityResult(
@@ -261,6 +297,7 @@ internal fun SearchScreen(
     fun applyAutoFill(lat: Double, lng: Double) {
         scope.launch {
             appState.userLoc = lat to lng
+            appState.userLocTime = System.currentTimeMillis()
             if (appState.autoFillDone) return@launch
             val untouched = appState.from == null && appState.to == null &&
                     appState.fromQuery.isBlank() && appState.toQuery.isBlank()
@@ -270,16 +307,11 @@ internal fun SearchScreen(
             val cands = runCatching { api.nearestCandidates(lat, lng, 6) }.getOrNull().orEmpty()
             if (cands.isEmpty()) return@launch
 
-            // zpřesnění po silnici (s jedním opakováním, OSRM bývá první pokus pomalý)
-            var refined: List<Pair<Stop, Double>>? = null
-            if (cands.size > 1) {
-                repeat(2) {
-                    if (refined == null) {
-                        refined = runCatching { api.refineByRoad(lat, lng, cands) }.getOrNull()
-                            ?.let { listOf(it) }
-                    }
-                }
-            }
+            // zpřesnění po silnici; OsrmClient si při chybě sám zkusí víc pokusů i záložní server
+            val refined: List<Pair<Stop, Double>>? =
+                if (cands.size > 1) runCatching { api.refineByRoad(lat, lng, cands) }.getOrNull()
+                    ?.let { listOf(it) }
+                else null
             val best = refined?.firstOrNull() ?: cands[0]
 
             // limit až na vzdálenost po silnici
@@ -306,19 +338,13 @@ internal fun SearchScreen(
 
     fun autoFill() {
         if (appState.autoFillDone) return
-        val client = LocationServices.getFusedLocationProviderClient(context)
-        fun fresh() {
-            client.getCurrentLocation(Priority.PRIORITY_BALANCED_POWER_ACCURACY, null)
-                .addOnSuccessListener { loc -> if (loc != null) applyAutoFill(loc.latitude, loc.longitude) }
+        // poloha zjištěná už při otevření záložky -> začne se hned
+        val known = appState.userLoc
+        if (known != null && System.currentTimeMillis() - appState.userLocTime < FIX_MAX_AGE_MS) {
+            applyAutoFill(known.first, known.second)
+            return
         }
-        client.lastLocation
-            .addOnSuccessListener { last ->
-                // stará poloha z cache by předvyplnila špatnou zastávku, proto max 5 min
-                if (last != null && System.currentTimeMillis() - last.time < 5 * 60_000)
-                    applyAutoFill(last.latitude, last.longitude)
-                else fresh()
-            }
-            .addOnFailureListener { fresh() }
+        requestFix(context, FIX_MAX_AGE_MS) { loc -> if (loc != null) applyAutoFill(loc.latitude, loc.longitude) }
     }
 
     val autoFillPermission = rememberLauncherForActivityResult(
@@ -375,7 +401,7 @@ internal fun SearchScreen(
             appState.refreshUsage()
         }
 
-        val s = api.newSearch(a.name, b.name)
+        val s = api.newSearch(a.name, b.name, modeFilter = appState.modeFilter)
         appState.search = s
         appState.journeys = emptyList()
         appState.searched = true
@@ -617,7 +643,32 @@ internal fun SearchScreen(
                     }
                 )
 
-                Spacer(Modifier.width(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ModeFilter.entries.forEach { mode ->
+                        FilterChip(
+                            selected = appState.modeFilter == mode,
+                            onClick = {
+                                if (appState.modeFilter != mode) {
+                                    appState.modeFilter = mode
+                                    if (appState.from != null && appState.to != null && appState.searched) {
+                                        runSearch()
+                                    }
+                                }
+                            },
+                            label = { Text(mode.label) },
+                            leadingIcon = when (mode) {
+                                ModeFilter.BUS -> ({ Icon(Icons.Default.DirectionsBus, null, Modifier.size(18.dp)) })
+                                ModeFilter.TRAIN -> ({ Icon(Icons.Default.Train, null, Modifier.size(18.dp)) })
+                                ModeFilter.ALL -> null
+                            }
+                        )
+                    }
+                }
 
                 Button(
                     onClick = { runSearch() },
@@ -1302,7 +1353,7 @@ private fun JourneyCard(
                     )
                 }
 
-                if (j.line2 != null) {
+                j.lines.drop(1).forEach { extraLine ->
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowForward,
                         contentDescription = "Přestup",
@@ -1316,7 +1367,7 @@ private fun JourneyCard(
                         contentColor = colors.onSecondaryContainer
                     ) {
                         Text(
-                            j.line2,
+                            extraLine,
                             modifier = Modifier.padding(
                                 horizontal = 10.dp,
                                 vertical = 7.dp
@@ -1347,8 +1398,22 @@ private fun JourneyCard(
                 color = colors.outlineVariant.copy(alpha = 0.35f)
             )
 
+            val displayStops = remember(j.routeStops) {
+                fun norm(name: String): String {
+                    val label = splitStopName(prettyName(name)).first.ifBlank { name }
+                    return foldText(label).replace(Regex("\\bhl\\.?n\\.?\\b"), "hlavni nadrazi").replace(Regex("\\s+"), "")
+                }
+                val result = mutableListOf<String>()
+                for (stop in j.routeStops) {
+                    if (result.isEmpty() || norm(result.last()) != norm(stop)) {
+                        result.add(stop)
+                    }
+                }
+                result
+            }
+
             // Trasa spoje – pouze začátek, přestupy a cíl
-            if (j.routeStops.size >= 2) {
+            if (displayStops.size >= 2) {
                 Column(
                     verticalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
@@ -1364,18 +1429,18 @@ private fun JourneyCard(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                         itemVerticalAlignment = Alignment.CenterVertically
                     ) {
-                        j.routeStops.forEachIndexed { index, stop ->
+                        displayStops.forEachIndexed { index, stop ->
                             Text(
                                 splitStopName(stop).first,
                                 style = if (
-                                    index == 0 || index == j.routeStops.lastIndex
+                                    index == 0 || index == displayStops.lastIndex
                                 ) {
                                     MaterialTheme.typography.bodyMedium
                                 } else {
                                     MaterialTheme.typography.bodySmall
                                 },
                                 fontWeight = if (
-                                    index == 0 || index == j.routeStops.lastIndex
+                                    index == 0 || index == displayStops.lastIndex
                                 ) {
                                     FontWeight.Bold
                                 } else {
@@ -1383,12 +1448,12 @@ private fun JourneyCard(
                                 },
                                 color = when (index) {
                                     0 -> colors.primary
-                                    j.routeStops.lastIndex -> colors.tertiary
+                                    displayStops.lastIndex -> colors.tertiary
                                     else -> colors.onSurfaceVariant
                                 }
                             )
 
-                            if (index < j.routeStops.lastIndex) {
+                            if (index < displayStops.lastIndex) {
                                 Icon(
                                     Icons.AutoMirrored.Filled.ArrowForward,
                                     contentDescription = null,
@@ -1411,24 +1476,49 @@ private fun JourneyCard(
                 verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
                 if (j.isTransfer) {
-                    Text(
-                        "Přestup: ${
-                            j.transferAt
-                                ?.takeIf { it.isNotBlank() }
-                                ?.let { if (it.contains("→")) it else stopLabel(it) }
-                                ?: "mezi spoji"
-                        } · čekání ${j.transferWait ?: "?"} min" +
-                                (j.transferWalkMin?.let { " · $it min pěšky" } ?: ""),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                    j.transferList.forEachIndexed { idx, t ->
+                        val prefix = if (j.transferList.size > 1) "${idx + 1}. přestup" else "Přestup"
+                        val at = t.at.takeIf { it.isNotBlank() }
+                        if (at != null && at.contains("→")) {
+                            val parts = at.split("→", limit = 2)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "$prefix: ${parts[0].trim()}",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = "do",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = colors.onSurface
+                                )
+                                Text(
+                                    text = parts[1].trim(),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+                        } else {
+                            Text(
+                                "$prefix: ${at ?: "mezi spoji"}",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        Text(
+                            "čekání ${t.waitMin} min" +
+                                    (t.walkMin?.let { " · $it min pěšky" } ?: ""),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.onSurfaceVariant
+                        )
+                    }
                 } else {
                     Text(
                         "${j.stopsCount ?: "—"} zastávek · přímý spoj",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
-
-
 
                 if (j.destination.isNotBlank()) {
                     Text(

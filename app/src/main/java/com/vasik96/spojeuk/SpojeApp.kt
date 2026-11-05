@@ -82,6 +82,17 @@ internal fun SpojeApp() {
         api.setEnabledVehicleSources(appState.enabledVehicleSources)
     }
 
+    // spojení na routovací servery rovnou při startu (první hledání nejbližší zastávky pak není pomalé)
+    LaunchedEffect(Unit) { runCatching { api.warmUpRouting() } }
+
+    // druhy dopravy na zastávkách pro chipy Vše / Autobusy / Vlaky
+    LaunchedEffect(appState.indexedStops.isNotEmpty()) {
+        if (appState.indexedStops.isEmpty() || appState.stopModes != null) return@LaunchedEffect
+        runCatching { api.loadStopModes() }
+            .onSuccess { appState.stopModes = it }
+            .onFailure { if (it is CancellationException) throw it }
+    }
+
     LaunchedEffect(Unit) {
         if (appState.stops.isEmpty()) {
             appState.stopsLoading = true
