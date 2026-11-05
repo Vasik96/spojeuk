@@ -88,6 +88,7 @@ class SpojeAppState(
 
     var journeys by mutableStateOf<List<Journey>>(emptyList())
     var modeFilter by mutableStateOf(ModeFilter.ALL)
+    var mapModeFilter by mutableStateOf(ModeFilter.ALL)   // filtr vozidel na mapě (Vše / Autobusy / Vlaky)
     var searchLoading by mutableStateOf(false)
     var loadingMore by mutableStateOf(false)
     var refreshing by mutableStateOf(false)
