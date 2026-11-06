@@ -2,6 +2,12 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -159,11 +165,27 @@ internal fun VehicleDetailBottomSheet(
                 },
                 enabled = !appState.routeLoading && vehicle.state in 0..1,
             ) {
-                if (appState.routeLoading) {
-                    Wavy(20.dp, color = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(8.dp))
+                AnimatedContent(
+                    targetState = appState.routeLoading,
+                    transitionSpec = {
+                        (fadeIn(tween(200)) + scaleIn(initialScale = 0.9f))
+                            .togetherWith(fadeOut(tween(100)))
+                    },
+                    label = "routeLoadingAnimation"
+                ) { loading ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        if (loading) {
+                            Wavy(20.dp, color = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Načítám trasu…")
+                        } else {
+                            Text("Zobrazit trasu spoje")
+                        }
+                    }
                 }
-                Text("Zobrazit trasu spoje")
             }
 
             HorizontalDivider()
@@ -172,8 +194,17 @@ internal fun VehicleDetailBottomSheet(
                 Text("Zpoždění:", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                 val delayText = if (vehicle.delay != 0) "${vehicle.delay} min" else "Včas (0 min)"
                 val delayBg = if (vehicle.delay > 3) Color(0xFFC62828) else Color(0xFF00838F)
-                Surface(shape = RoundedCornerShape(16.dp), color = delayBg, contentColor = Color.White) {
-                    Text(delayText, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall)
+                AnimatedContent(
+                    targetState = delayText to delayBg,
+                    transitionSpec = {
+                        (fadeIn(tween(200)) + scaleIn(initialScale = 0.85f))
+                            .togetherWith(fadeOut(tween(100)))
+                    },
+                    label = "delayBadgeAnimation"
+                ) { (txt, bg) ->
+                    Surface(shape = RoundedCornerShape(16.dp), color = bg, contentColor = Color.White) {
+                        Text(txt, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
 
