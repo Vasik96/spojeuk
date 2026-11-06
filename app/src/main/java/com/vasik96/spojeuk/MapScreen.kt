@@ -545,47 +545,54 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             shape = RoundedCornerShape(24.dp)
         ) {
             Column {
-                Row(Modifier.padding(start = 14.dp, top = 14.dp, bottom = 8.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Map, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("Mapa vozidel", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            if (mapMode == ModeFilter.ALL) "${appState.vehicles.size} poloh · aktualizace po 6s"
-                            else "${activeVehicles.size} z ${appState.vehicles.size} poloh · aktualizace po 6s",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        if (appState.vehicleSource.isNotBlank()) {
+                if (!appState.showOnlyMapFilters) {
+                    Row(Modifier.padding(start = 14.dp, top = 14.dp, bottom = 8.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Map, null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Mapa vozidel", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                sourceLabelText(
-                                    appState.vehicleSource,
-                                    normal = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    bad = MaterialTheme.colorScheme.error
-                                ),
-                                style = MaterialTheme.typography.bodySmall
+                                if (mapMode == ModeFilter.ALL) "${appState.vehicles.size} poloh · aktualizace po 6s"
+                                else "${activeVehicles.size} z ${appState.vehicles.size} poloh · aktualizace po 6s",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (appState.vehicleSource.isNotBlank()) {
+                                Text(
+                                    sourceLabelText(
+                                        appState.vehicleSource,
+                                        normal = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        bad = MaterialTheme.colorScheme.error
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                        if (appState.routeLoading) { Wavy(24.dp); Spacer(Modifier.width(8.dp)) }
+                        if (appState.mapError != null) {
+                            Text("Offline", color = MaterialTheme.colorScheme.error)
+                        }
+                        //if (appState.heldCount > OUTAGE_MIN) {
+                        IconButton(onClick = { showHeldInfo = true }) {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = "Upozornění na zdroj dat",
                             )
                         }
+                        //}
                     }
-                    if (appState.routeLoading) { Wavy(24.dp); Spacer(Modifier.width(8.dp)) }
-                    if (appState.mapError != null) {
-                        Text("Offline", color = MaterialTheme.colorScheme.error)
-                    }
-                    //if (appState.heldCount > OUTAGE_MIN) {
-                    IconButton(onClick = { showHeldInfo = true }) {
-                        Icon(
-                            Icons.Default.Info,
-                            contentDescription = "Upozornění na zdroj dat",
-                        )
-                    }
-                    //}
                 }
 
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
-                        .padding(start = 14.dp, end = 14.dp, bottom = 12.dp),
+                        .padding(
+                            start = 14.dp,
+                            end = 14.dp,
+                            top = if (appState.showOnlyMapFilters) 12.dp else 0.dp,
+                            bottom = 12.dp
+                        ),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     ModeFilter.entries.forEach { mode ->
