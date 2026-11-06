@@ -22,7 +22,7 @@ Polohy autobusů se zobrazují **živě**, včetně zpoždění, a nemizí, kdy�
 ## ✨ Funkce
 
 ### 🔎 Vyhledávání spojení
-- Vlastní vyhledávač **RAPTOR** nad lokální SQLite databází, bez serveru a bez internetu
+- Jednou se stáhnou JŘ, dále jde hledat offline
 - Přímé spoje i **přestupy**, s minimální dobou přestupu a **pěšími přesuny** mezi zastávkami do 250 m
 - Načítání **dřívějších** (tlačítko) i **pozdějších** spojů (automaticky při posunu seznamu) a pull-to-refresh
 - Zpoždění z živých dat přímo u výsledku hledání
