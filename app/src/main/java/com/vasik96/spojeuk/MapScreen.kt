@@ -156,6 +156,31 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     var showFullRoute by remember { mutableStateOf(false) }
     var isMapReady by remember { mutableStateOf(false) }
 
+    var mapInitialized by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        delay(140.milliseconds)
+        mapInitialized = true
+    }
+
+    if (!mapInitialized) {
+        Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Wavy(size = 48.dp, color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = "Načítání mapy…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        return
+    }
+
     LaunchedEffect(appState.mapProvider) {
         isMapReady = false
     }
