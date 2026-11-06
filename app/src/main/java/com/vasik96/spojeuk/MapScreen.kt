@@ -162,6 +162,18 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         }
     }
 
+    // pomalý zdroj (DPMÚL) dokončil dotaz na pozadí: zobraz ho hned, ne až v dalším kole pollingu
+    LaunchedEffect(active) {
+        if (!active) return@LaunchedEffect
+        api.vehicleUpdates.collect {
+            appState.updateVehicles(api.currentVehicles())
+            appState.heldCount = api.heldCount()
+            appState.vehicleSource = api.sourceLabel()
+            appState.mapError = null
+            appState.vehiclesLoaded = true
+        }
+    }
+
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(appState.mapCenter, appState.mapZoom)
     }
@@ -560,12 +572,12 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         Text("Offline", color = MaterialTheme.colorScheme.error)
                     }
                     //if (appState.heldCount > OUTAGE_MIN) {
-                        IconButton(onClick = { showHeldInfo = true }) {
-                            Icon(
-                                Icons.Default.Info,
-                                contentDescription = "Upozornění na zdroj dat",
-                            )
-                        }
+                    IconButton(onClick = { showHeldInfo = true }) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = "Upozornění na zdroj dat",
+                        )
+                    }
                     //}
                 }
 

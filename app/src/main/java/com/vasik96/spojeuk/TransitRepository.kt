@@ -258,6 +258,17 @@ class TransitRepository(context: Context? = null) {
 
     // ───────────────────────── živé polohy ─────────────────────────
 
+    /** Signál, že se na pozadí dotáhla čerstvá data od pomalého zdroje (DPMÚL). */
+    val vehicleUpdates get() = hub.updates
+
+    /** Poslední sloučený stav bez nového dotazu. */
+    fun currentVehicles(): List<Vehicle> = hub.fleet.vehicles
+
+    /** Rozjede dotazy na zdroje poloh hned při startu, ať pomalé API (DPMÚL, 10-15 s) odpovídá už před otevřením mapy. */
+    suspend fun prewarmVehicles() {
+        runCatching { hub.refresh() }
+    }
+
     /** Sloučené polohy ze všech zdrojů. Vyhodí výjimku, dokud žádný zdroj neodpověděl. */
     suspend fun vehiclePositions(): List<Vehicle> = hub.refresh().vehicles
 
