@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
 const val TRAFFIC_URL = "https://tabule.portabo.cz/api/v1-tabule/cis/GetTraffic/0"
 
 /** Vlastní server (neoficiální), drží starší spoje, aby MHD nemizelo. Zkouší se jako první. */
-const val FEED_URL = "http://37.46.211.70:8787/traffic"
+const val MAIN_URL_DUK = SERVER_IP + "/duk/traffic"
 
 /** Od kolika "držených" poloh se feed považuje za výpadek. */
 const val OUTAGE_MIN = 18
@@ -31,7 +31,7 @@ fun isTrainId(id: Int) = id in TRAIN_IDS
  */
 class PortaboSource(
     private val snapshotFile: File? = null,
-    private val urls: List<String> = listOf(FEED_URL, TRAFFIC_URL),
+    private val urls: List<String> = listOf(MAIN_URL_DUK, TRAFFIC_URL),
 ) : VehicleSource {
 
     override val id = ID

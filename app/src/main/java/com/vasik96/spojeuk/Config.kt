@@ -32,3 +32,5 @@ const val NEXT_DAY_CUTOFF = 6 * 3600  // spoje po půlnoci, které se ještě be
 // ── DPMÚL ──
 /** Části názvu dopravce (bez diakritiky, malými písmeny), podle kterých se pozná MHD v Ústí. */
 val DPMUL_AGENCY_KEYWORDS = listOf("dopravni podnik mesta usti", "dpmul")
+
+const val SERVER_IP = "http://37.46.211.70:8787"
