@@ -27,7 +27,7 @@ internal class MotionHub(
 ) {
     class Entry(var vehicle: Vehicle) {
         val motion = VehicleMotion(vehicle.lat, vehicle.lng, vehicle.observedAtMs)
-        val state: MarkerState by lazy { MarkerState(LatLng(vehicle.lat, vehicle.lng)) } // jen pro Google
+        val state = MarkerState(LatLng(vehicle.lat, vehicle.lng)) // jen pro Google
         var pos = LatLng(vehicle.lat, vehicle.lng)
         var routeKey: String? = null
         var routeJob: Job? = null

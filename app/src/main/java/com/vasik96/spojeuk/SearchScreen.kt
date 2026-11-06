@@ -825,27 +825,8 @@ internal fun SearchScreen(
                 label = "busScale"
             )
 
-            var emptyReady by remember { mutableStateOf(false) }
-            LaunchedEffect(Unit) { emptyReady = true }
-            val emptyAlpha by animateFloatAsState(
-                targetValue = if (emptyReady) 1f else 0f,
-                animationSpec = tween(500, delayMillis = 150, easing = FastOutSlowInEasing),
-                label = "emptyAlpha"
-            )
-            val emptyOffsetY by animateFloatAsState(
-                targetValue = if (emptyReady) 0f else 25f,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioLowBouncy,
-                    stiffness = Spring.StiffnessLow
-                ),
-                label = "emptyOffsetY"
-            )
-
             Box(
-                mod.fillMaxWidth().graphicsLayer {
-                    alpha = emptyAlpha
-                    translationY = emptyOffsetY
-                },
+                mod.fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
@@ -891,7 +872,11 @@ internal fun SearchScreen(
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 20.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    itemsIndexed(appState.journeys, key = { _, j -> j.key }) { index, journey ->
+                    itemsIndexed(
+                        appState.journeys,
+                        key = { _, j -> j.key },
+                        contentType = { _, _ -> "journey" }
+                    ) { index, journey ->
                         AppearAnimated(appState, journey.key, index, Modifier.animateItem()) {
                             JourneyCard(journey, now, appState.walkRoute) { onShowMapForJourney(journey) }
                         }
@@ -1279,7 +1264,7 @@ private fun StopPickerSheet(
                     }
                 }
 
-                items(options, key = { it.name }) { stop ->
+                items(options, key = { it.name }, contentType = { "stop" }) { stop ->
                     val (stopPart, city) = splitStopName(stop.name)
                     DropdownMenuItem(
                         contentPadding = PaddingValues(
