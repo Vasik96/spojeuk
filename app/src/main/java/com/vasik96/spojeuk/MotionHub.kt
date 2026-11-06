@@ -19,7 +19,8 @@ internal class ViewBox(val s: Double, val w: Double, val n: Double, val e: Doubl
 
 /**
  * Jedno místo, které drží pohyb všech vozidel. Místo N coroutin / N MarkerState animací
- * běží jedna smyčka (v MapScreen), která volá [tick] a výsledek rozdá mapě.
+ * běží jedna smyčka (v MapScreen, synchronizovaná s vykreslením každého snímku), která volá [tick]
+ * a výsledek rozdá mapě.
  */
 internal class MotionHub(
     private val routes: VehicleRoutes,
@@ -41,16 +42,19 @@ internal class MotionHub(
 
     fun positionOf(k: String): LatLng? = entries[k]?.pos
 
-    /** Voláno při každé nové dávce vozidel (nebo změně predikce). */
-    fun update(list: List<Pair<String, Vehicle>>, predict: Boolean) {
+    /**
+     * Voláno při každé nové dávce vozidel. Každý nový fix se VŽDY odanimuje z aktuální pozice do nové (A -> B).
+     * [followRoads] jen určuje, jestli se mezi A a B jede po trase spoje (silnici), nebo po přímce.
+     */
+    fun update(list: List<Pair<String, Vehicle>>, followRoads: Boolean) {
         val alive = HashSet<String>(list.size * 2)
         for ((k, v) in list) {
             alive += k
             val e = obtain(k, v)
             e.vehicle = v
-            e.motion.onFix(v.lat, v.lng, v.observedAtMs)
+            e.motion.onFix(v.lat, v.lng, v.observedAtMs, predict = followRoads)
 
-            val want = if (predict) "${v.tid}|${v.cis}|${v.trip}" else null
+            val want = if (followRoads) "${v.tid}|${v.cis}|${v.trip}" else null
             if (e.routeKey != want) {
                 e.routeKey = want
                 e.routeJob?.cancel()
