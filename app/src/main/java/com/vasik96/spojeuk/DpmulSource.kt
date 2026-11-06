@@ -1,5 +1,6 @@
 package com.vasik96.spojeuk
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -15,16 +16,21 @@ import java.util.concurrent.TimeUnit
 
 const val DPMUL_URL = "https://dpmxmobappbe.globdata.cz/api/v1/public/Common/skeleton/actual-vehicles"
 
+const val MAIN_URL_DPMUL = SERVER_IP + "/dpmul/traffic"
+
 /** Klíč zachycený v provozu oficiální aplikace DPMÚL (veřejné API). Když se změní, stačí ho tu přepsat. */
 const val DPMUL_API_KEY = "924486f2-3dd8-464f-9dd7-1f25aa43f0e9"
 const val DPMUL_AGENCY = "Dopravní podnik města Ústí nad Labem"
 
 /**
  * Oficiální API aplikace DPMÚL (Globdata): jen MHD Ústí, nejčerstvější polohy, ale bez čísla spoje,
- * takže vozy se ke spojům přiřazují heuristicky. Odpověď trvá i desítky sekund, proto běží na pozadí.
+ * takže vozy se ke spojům přiřazují heuristicky. Přímá odpověď trvá několik sekund (a kolísá),
+ * proto se čte z vlastního serveru ([MAIN_URL_DPMUL]), který ji dotahuje na pozadí a vrací hotovou.
+ * Když server nejde nebo hlásí, že nemá čerstvá data, appka se zeptá přímo (pomalejší cesta).
  */
 class DpmulSource(
-    private val url: String = DPMUL_URL,
+    private val serverUrl: String = MAIN_URL_DPMUL,
+    private val directUrl: String = DPMUL_URL,
     private val apiKey: String = DPMUL_API_KEY,
 ) : VehicleSource {
 
@@ -35,17 +41,48 @@ class DpmulSource(
     override val freshness = Freshness(maxFetchAgeMs = 60_000, maxMedianAgeSec = 180, staleVehicleSec = 90)
     override val tripMatcher = TripMatchers.byPosition(DPMUL_AGENCY_KEYWORDS)
     override val awaitResult = false
-    override val minIntervalMs = 5_000L
+    override val minIntervalMs = 3_000L
 
-    private val client = OkHttpClient.Builder()
+    /** Vlastní server: odpovídá hned, takže krátké timeouty. */
+    private val serverClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
+        .build()
+
+    /** Přímé API DPMÚL: pomalé a kolísavé, proto dlouhé timeouty. */
+    private val directClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .callTimeout(50, TimeUnit.SECONDS)
         .build()
 
     override suspend fun fetch(): List<Vehicle> = withContext(Dispatchers.IO) {
+        val fromServer = runCatching { fetchFromServer() }
+            .onFailure { Log.w(TAG, "vlastní server DPMÚL selhal, jdu přímo: ${it.message}") }
+            .getOrNull()
+        fromServer ?: fetchDirect()
+    }
+
+    /** null = server nemá použitelná čerstvá data (chyba, ještě nic nestáhl nebo je jeho odpověď moc stará). */
+    private fun fetchFromServer(): List<Vehicle>? {
+        val request = Request.Builder().url(serverUrl)
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "application/json")
+            .build()
+        return serverClient.newCall(request).execute().use { resp ->
+            if (!resp.isSuccessful) error("HTTP ${resp.code}")
+            val body = resp.body?.string().orEmpty()
+            // X-Age-Sec: stáří odpovědi na serveru; -1 = ještě žádná, server po 120 s starou odpověď nevrací (posílá [])
+            val age = resp.header("X-Age-Sec")?.toLongOrNull()
+            val vehicles = DpmulParser.parse(body, System.currentTimeMillis())
+            if (vehicles.isEmpty() && (age == null || age < 0 || age > SERVER_MAX_AGE_SEC)) null else vehicles
+        }
+    }
+
+    private fun fetchDirect(): List<Vehicle> {
         // API očekává POST s prázdným tělem, ne GET
-        val request = Request.Builder().url(url)
+        val request = Request.Builder().url(directUrl)
             .post(ByteArray(0).toRequestBody("application/json; charset=utf-8".toMediaType()))
             .header("User-Agent", "Dart/3.12 (dart:io)")
             .header("Accept", "application/json")
@@ -53,7 +90,7 @@ class DpmulSource(
             .header("x-app-version", "2.0.14")
             .header("dpmxbe-api-key", apiKey)
             .build()
-        client.newCall(request).execute().use { resp ->
+        return directClient.newCall(request).execute().use { resp ->
             if (!resp.isSuccessful) error("DPMÚL HTTP ${resp.code}")
             DpmulParser.parse(resp.body?.string().orEmpty(), System.currentTimeMillis())
         }
@@ -61,6 +98,8 @@ class DpmulSource(
 
     companion object {
         const val ID = "dpmul"
+        private const val TAG = "DpmulSource"
+        private const val SERVER_MAX_AGE_SEC = 60L
     }
 }
 
