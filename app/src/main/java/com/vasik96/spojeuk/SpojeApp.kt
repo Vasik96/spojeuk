@@ -11,7 +11,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -63,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -94,7 +94,31 @@ internal fun SpojeApp() {
     LaunchedEffect(Unit) { runCatching { api.warmUpRouting() } }
 
     // živé polohy rovnou při startu: DPMÚL API odpovídá 10-15 s, tak ať běží dřív, než uživatel otevře mapu
-    LaunchedEffect(api, appState.enabledVehicleSources) { api.prewarmVehicles() }
+    LaunchedEffect(api, appState.enabledVehicleSources) {
+        api.prewarmVehicles()
+        val curr = api.currentVehicles()
+        if (curr.isNotEmpty() && appState.vehicles.isEmpty()) {
+            appState.updateVehicles(curr)
+            appState.heldCount = api.heldCount()
+            appState.vehicleSource = api.sourceLabel()
+            appState.vehiclesLoaded = true
+        }
+    }
+
+    // pomalý zdroj (DPMÚL) dokončil dotaz na pozadí dřív, než uživatel otevřel mapu
+    LaunchedEffect(api) {
+        api.vehicleUpdates.collect {
+            if (appState.vehicles.isEmpty()) {
+                val curr = api.currentVehicles()
+                if (curr.isNotEmpty()) {
+                    appState.updateVehicles(curr)
+                    appState.heldCount = api.heldCount()
+                    appState.vehicleSource = api.sourceLabel()
+                    appState.vehiclesLoaded = true
+                }
+            }
+        }
+    }
 
     // druhy dopravy na zastávkách pro chipy Vše / Autobusy / Vlaky
     LaunchedEffect(appState.indexedStops.isNotEmpty()) {
@@ -144,11 +168,15 @@ internal fun SpojeApp() {
     }
 
 
-    // mapa se vytvoří až při první návštěvě a pak zůstane naživu
+    // Mapa se vytvoří v pozadí po ustálení startu (nebo ihned při přechodu na ni) a pak zůstane naživu
     var mapVisited by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        // Počkat na úplné ustálení po startu, aby nebrzdila první zobrazení
+        delay(2500.milliseconds)
+        mapVisited = true
+    }
     LaunchedEffect(appState.selectedTab) {
         if (appState.selectedTab == 1 && !mapVisited) {
-            delay(120.milliseconds)
             mapVisited = true
         }
     }
@@ -185,49 +213,12 @@ internal fun SpojeApp() {
         }
     }
 
-    var appReady by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        appReady = true
-    }
-
-    val topBarOffset by animateFloatAsState(
-        targetValue = if (appReady) 0f else -50f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "topBarOffset"
-    )
-    val topBarAlpha by animateFloatAsState(
-        targetValue = if (appReady) 1f else 0f,
-        animationSpec = tween(400, easing = FastOutSlowInEasing),
-        label = "topBarAlpha"
-    )
-
-    val bottomBarOffset by animateFloatAsState(
-        targetValue = if (appReady) 0f else 50f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "bottomBarOffset"
-    )
-    val bottomBarAlpha by animateFloatAsState(
-        targetValue = if (appReady) 1f else 0f,
-        animationSpec = tween(400, easing = FastOutSlowInEasing),
-        label = "bottomBarAlpha"
-    )
-
     MaterialTheme(colorScheme = scheme) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Box(Modifier.fillMaxSize()) {
                 Scaffold(
                     topBar = {
                         TopAppBar(
-                            modifier = Modifier.graphicsLayer {
-                                translationY = topBarOffset
-                                alpha = topBarAlpha
-                            },
                             title = {
                                 Column {
                                     Text(
@@ -241,45 +232,25 @@ internal fun SpojeApp() {
                         )
                     },
                     bottomBar = {
-                        NavigationBar(
-                            modifier = Modifier.graphicsLayer {
-                                translationY = bottomBarOffset
-                                alpha = bottomBarAlpha
-                            }
-                        ) {
-                            val tab0Scale by animateFloatAsState(
-                                targetValue = if (appState.selectedTab == 0) 1.15f else 1f,
-                                animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
-                                label = "tab0Bounce"
-                            )
+                        NavigationBar {
                             NavigationBarItem(
                                 selected = appState.selectedTab == 0,
                                 onClick = { appState.selectedTab = 0 },
-                                icon = { Icon(Icons.Default.DirectionsBus, null, modifier = Modifier.graphicsLayer(scaleX = tab0Scale, scaleY = tab0Scale)) },
+                                icon = { Icon(Icons.Default.DirectionsBus, null) },
                                 label = { Text("Spoje") }
                             )
 
-                            val tab1Scale by animateFloatAsState(
-                                targetValue = if (appState.selectedTab == 1) 1.15f else 1f,
-                                animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
-                                label = "tab1Bounce"
-                            )
                             NavigationBarItem(
                                 selected = appState.selectedTab == 1,
                                 onClick = { appState.selectedTab = 1 },
-                                icon = { Icon(Icons.Default.Map, null, modifier = Modifier.graphicsLayer(scaleX = tab1Scale, scaleY = tab1Scale)) },
+                                icon = { Icon(Icons.Default.Map, null) },
                                 label = { Text("Mapa") }
                             )
 
-                            val tab2Scale by animateFloatAsState(
-                                targetValue = if (appState.selectedTab == 2) 1.15f else 1f,
-                                animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
-                                label = "tab2Bounce"
-                            )
                             NavigationBarItem(
                                 selected = appState.selectedTab == 2,
                                 onClick = { appState.selectedTab = 2 },
-                                icon = { Icon(Icons.Default.Settings, null, modifier = Modifier.graphicsLayer(scaleX = tab2Scale, scaleY = tab2Scale)) },
+                                icon = { Icon(Icons.Default.Settings, null) },
                                 label = { Text("Nastavení") }
                             )
                         }
@@ -301,7 +272,7 @@ internal fun SpojeApp() {
                             exit = fadeOut(tween(180, easing = FastOutLinearInEasing))
                         ) {
                             Surface(
-                                modifier = Modifier.fillMaxSize(),
+                                modifier = Modifier.fillMaxSize().pointerInput(Unit) {},
                                 color = MaterialTheme.colorScheme.background
                             ) {}
                         }
@@ -350,22 +321,28 @@ internal fun SpojeApp() {
                                         appState.tripStops = emptyList()
                                         appState.journeyWalks = emptyList()
                                         appState.routeLoading = true
-                                        appState.vehiclesLoaded = false
+                                        appState.vehiclesLoaded = appState.vehicles.isNotEmpty()
                                         appState.focusTrip = ref
                                         appState.highlightedTrip = ref
                                         appState.selectedTab = 1
-                                        scope.launch {
+                                        scope.launch(Dispatchers.Default) {
                                             val segments = api.journeySegments(journey)
                                             val points = api.journeyGeometry(journey)
                                             val full = api.firstLegFullRoute(journey)
                                             val stops = api.firstLegStopLocations(journey)
                                             val walks = api.journeyWalks(journey)
-                                            appState.tripRouteSegments = segments.map { seg -> seg.map { LatLng(it.first, it.second) } }
-                                            appState.tripRoute = points.map { LatLng(it.first, it.second) }
-                                            appState.fullRoute = full.map { LatLng(it.first, it.second) }
-                                            appState.tripStops = stops.map { LatLng(it.first, it.second) }
-                                            appState.journeyWalks = walks
-                                            appState.routeLoading = false
+                                            val segLatLng = segments.map { seg -> seg.map { LatLng(it.first, it.second) } }
+                                            val ptsLatLng = points.map { LatLng(it.first, it.second) }
+                                            val fullLatLng = full.map { LatLng(it.first, it.second) }
+                                            val stopsLatLng = stops.map { LatLng(it.first, it.second) }
+                                            withContext(Dispatchers.Main) {
+                                                appState.tripRouteSegments = segLatLng
+                                                appState.tripRoute = ptsLatLng
+                                                appState.fullRoute = fullLatLng
+                                                appState.tripStops = stopsLatLng
+                                                appState.journeyWalks = walks
+                                                appState.routeLoading = false
+                                            }
                                         }
                                     }
                                 )

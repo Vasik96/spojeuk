@@ -336,6 +336,7 @@ internal class VehicleKeyer {
         return diff <= MAX_DIRECTION_DIFF
     }
 
+    @Synchronized
     fun assign(list: List<Vehicle>): List<Pair<String, Vehicle>> {
         val usedKeys = HashSet<String>()
         val usedPrev = HashSet<Int>()

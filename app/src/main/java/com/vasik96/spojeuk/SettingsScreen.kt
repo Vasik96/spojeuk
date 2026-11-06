@@ -3,6 +3,8 @@
 package com.vasik96.spojeuk
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -96,11 +98,11 @@ internal fun SettingsScreen(
         modifier = modifier,
         transitionSpec = {
             if (targetState == SettingsSubscreen.DATA_UPDATES) {
-                (slideInHorizontally(tween(280)) { it / 4 } + fadeIn(tween(280))) togetherWith
-                        (slideOutHorizontally(tween(280)) { -it / 4 } + fadeOut(tween(200)))
+                (slideInHorizontally(tween(300, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(150))) togetherWith
+                        (slideOutHorizontally(tween(300, easing = FastOutSlowInEasing)) { -it / 4 } + fadeOut(tween(200, delayMillis = 100, easing = FastOutLinearInEasing)))
             } else {
-                (slideInHorizontally(tween(280)) { -it / 4 } + fadeIn(tween(280))) togetherWith
-                        (slideOutHorizontally(tween(280)) { it / 4 } + fadeOut(tween(200)))
+                (slideInHorizontally(tween(260, easing = FastOutSlowInEasing)) { -it / 4 } + fadeIn(tween(150))) togetherWith
+                        (slideOutHorizontally(tween(260, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(200, easing = FastOutLinearInEasing)))
             }
         },
         label = "settingsSubscreen"
@@ -130,7 +132,6 @@ private fun SettingsMain(
     appState: SpojeAppState,
     api: TransitRepository
 ) {
-    val scope = rememberCoroutineScope()
     var showThemeDialog by remember { mutableStateOf(false) }
     var showMapProviderDialog by remember { mutableStateOf(false) }
     var showMapThemeDialog by remember { mutableStateOf(false) }
@@ -534,10 +535,7 @@ private fun SettingsMain(
 
         OutlinedCard(
             onClick = {
-                scope.launch {
-                    delay(70.milliseconds)
-                    appState.settingsSubscreen = SettingsSubscreen.DATA_UPDATES
-                }
+                appState.settingsSubscreen = SettingsSubscreen.DATA_UPDATES
             },
             modifier = Modifier.fillMaxWidth()
         ) {

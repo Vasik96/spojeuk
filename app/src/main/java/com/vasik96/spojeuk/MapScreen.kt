@@ -14,6 +14,7 @@ import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -21,6 +22,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.material3.Surface
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -140,7 +142,7 @@ private val USTECKY_LNG = 12.80..14.80
 private fun Vehicle.inUsteckyKraj() = lat in USTECKY_LAT && lng in USTECKY_LNG
 
 // jak často se u Google mapy přepisují pozice markerů (animace je počítaná z času)
-private const val GOOGLE_TICK_MS = 60L
+private const val GOOGLE_TICK_MS = 200L
 
 @SuppressLint("MissingPermission")
 @Composable
@@ -148,6 +150,36 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showFullRoute by remember { mutableStateOf(false) }
+    var isMapReady by remember { mutableStateOf(false) }
+
+    var mapInitialized by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        delay(130.milliseconds)
+        mapInitialized = true
+    }
+
+    if (!mapInitialized) {
+        Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Wavy(size = 48.dp, color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = "Načítání mapy…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        return
+    }
+
+    LaunchedEffect(appState.mapProvider) {
+        isMapReady = false
+    }
 
     // polling poloh
     LaunchedEffect(active) {
@@ -315,7 +347,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
     val keyer = remember { VehicleKeyer() }
     val routes = remember(api) { VehicleRoutes(api) }
-    val keyed = remember(allVehicles) { keyer.assign(allVehicles) }
+    val keyed by produceState(emptyList<Pair<String, Vehicle>>(), allVehicles) {
+        value = withContext(Dispatchers.Default) { keyer.assign(allVehicles) }
+    }
 
     val hideOthers = appState.hideOtherVehiclesOnMap
     val mapMode = appState.mapModeFilter
@@ -351,13 +385,15 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         while (true) {
             delay(GOOGLE_TICK_MS)
             hub.tick(SystemClock.elapsedRealtime())
-            val view = cameraPositionState.projection?.visibleRegion?.latLngBounds?.let {
-                ViewBox(
-                    it.southwest.latitude, it.southwest.longitude,
-                    it.northeast.latitude, it.northeast.longitude
-                ).expanded(0.3)
+            if (!cameraPositionState.isMoving) {
+                val view = cameraPositionState.projection?.visibleRegion?.latLngBounds?.let {
+                    ViewBox(
+                        it.southwest.latitude, it.southwest.longitude,
+                        it.northeast.latitude, it.northeast.longitude
+                    ).expanded(0.3)
+                }
+                hub.applyToMarkerStates(view)
             }
-            hub.applyToMarkerStates(view)
         }
     }
 
@@ -394,13 +430,16 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 modifier = Modifier.fillMaxSize(),
                 cameraPositionState = cameraPositionState,
                 mapColorScheme = scheme,
-                properties = MapProperties(isMyLocationEnabled = hasLocationPermission),
+                onMapLoaded = { isMapReady = true },
+                properties = MapProperties(isMyLocationEnabled = isMapReady && hasLocationPermission),
                 uiSettings = MapUiSettings(
                     zoomControlsEnabled = false,
                     myLocationButtonEnabled = false,
                     mapToolbarEnabled = false
                 )
             ) {
+                if (!isMapReady) return@GoogleMap
+
                 val primaryColor = MaterialTheme.colorScheme.primary
                 val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
 
@@ -538,7 +577,11 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 phase = phase,
                 target = target,
                 onMapReady = { maplibreMapRef = it },
-                onMapDisposed = { maplibreMapRef = null },
+                onStyleLoaded = { isMapReady = true },
+                onMapDisposed = {
+                    maplibreMapRef = null
+                    isMapReady = false
+                },
                 hasLocationPermission = hasLocationPermission,
                 tertiaryColor = MaterialTheme.colorScheme.tertiary,
                 arrowColor = MaterialTheme.colorScheme.onBackground,
@@ -683,6 +726,33 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             }
         }
 
+        AnimatedVisibility(
+            visible = !isMapReady,
+            enter = fadeIn(tween(150)),
+            exit = fadeOut(tween(300, easing = FastOutLinearInEasing))
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Wavy(size = 48.dp, color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            text = "Načítání mapy…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -701,10 +771,10 @@ private const val VEH_LAYER = "vehicles-layer"
 
 // TextureView místo SurfaceView: řeší "BLASTBufferQueue ... Can't acquire next buffer"
 // a rozbité vykreslování na Vivo/Funtouch v kombinaci s Compose AndroidView.
-private const val USE_TEXTURE_MODE = true
+private val USE_TEXTURE_MODE = android.os.Build.MANUFACTURER.lowercase() in setOf("vivo", "iqoo")
 
-// max. frekvence aktualizace pozic vozidel (~10 Hz), animace je počítaná z času
-private const val VEHICLE_UPDATE_INTERVAL_MS = 100L
+// max. frekvence aktualizace pozic vozidel, animace je počítaná z času
+private const val VEHICLE_UPDATE_INTERVAL_MS = 250L
 
 private fun ensureVehicleLayer(style: Style) {
     if (style.getSource(VEH_SRC) == null) {
@@ -744,6 +814,7 @@ private fun MapLibreScreenContent(
     target: Vehicle?,
     hasLocationPermission: Boolean,
     onMapReady: (MapLibreMap) -> Unit,
+    onStyleLoaded: () -> Unit = {},
     tertiaryColor: Color,
     arrowColor: Color,
     hub: MotionHub,
@@ -812,6 +883,7 @@ private fun MapLibreScreenContent(
     val latestTarget by rememberUpdatedState(target)
 
     val dirty = remember { AtomicBoolean(true) }
+    val moving = remember { AtomicBoolean(false) }
     // obrázky přidané do aktuálního stylu (při změně stylu se začíná od nuly)
     val addedImages = remember(styleVersion) { mutableSetOf<String>() }
 
@@ -833,8 +905,11 @@ private fun MapLibreScreenContent(
                     m.uiSettings.isLogoEnabled = false
                     m.uiSettings.isCompassEnabled = false
 
+                    m.addOnCameraMoveStartedListener { moving.set(true) }
                     // stav kamery se ukládá až když se mapa zastaví, ne při každém framu pohybu
                     m.addOnCameraIdleListener {
+                        moving.set(false)
+                        dirty.set(true)
                         val cp = m.cameraPosition
                         cp.target?.let {
                             appState.mapCenter = LatLng(it.latitude, it.longitude)
@@ -842,24 +917,37 @@ private fun MapLibreScreenContent(
                         }
                     }
 
-                    // klik na vozidlo: dotaz na vykreslené features vrstvy vozidel
+                    // klik na vozidlo: výpočet vzdálenosti v Kotlinu (zcela async / neblokující, žádné queryRenderedFeatures)
                     m.addOnMapClickListener { latLng ->
                         if (m.style?.getLayer(VEH_LAYER) == null) return@addOnMapClickListener false
-                        val pt = m.projection.toScreenLocation(latLng)
-                        val r = 18f * density
-                        val rect = RectF(pt.x - r, pt.y - r, pt.x + r, pt.y + r)
-                        val hit = m.queryRenderedFeatures(rect, VEH_LAYER).firstOrNull()
-                        val key = hit?.getStringProperty("key")
-                        val v =
-                            key?.let { k -> latestVehicles.firstOrNull { it.first == k }?.second }
-                        if (v != null) {
-                            appState.selectedVehicle = v
+                        val clickPt = m.projection.toScreenLocation(latLng)
+                        val radiusPx = 28f * density
+                        var clickedVehicle: Vehicle? = null
+                        var minSq = Float.MAX_VALUE
+
+                        for ((k, v) in latestVehicles) {
+                            val pos = hub.positionOf(k) ?: LatLng(v.lat, v.lng)
+                            val vehPt = m.projection.toScreenLocation(MapLibreLatLng(pos.latitude, pos.longitude))
+                            val dx = vehPt.x - clickPt.x
+                            val dy = vehPt.y - clickPt.y
+                            val distSq = dx * dx + dy * dy
+                            if (distSq <= radiusPx * radiusPx && distSq < minSq) {
+                                minSq = distSq
+                                clickedVehicle = v
+                            }
+                        }
+
+                        if (clickedVehicle != null) {
+                            appState.selectedVehicle = clickedVehicle
                             true
                         } else false
                     }
 
                     map = m
                     onMapReady(m)
+                    if (m.style?.isFullyLoaded == true) {
+                        onStyleLoaded()
+                    }
                 }
             }
         },
@@ -869,16 +957,27 @@ private fun MapLibreScreenContent(
     // změna vozidel / zvýraznění => překreslit zdroj
     LaunchedEffect(activeVehicles, phase, target) { dirty.set(true) }
 
+    LaunchedEffect(map) {
+        val m = map ?: return@LaunchedEffect
+        if (m.style?.isFullyLoaded == true) {
+            onStyleLoaded()
+        }
+    }
+
     // ── styl se nastavuje jen jednou a jen při změně tématu ──
     LaunchedEffect(useDarkMap, map) {
         val m = map ?: return@LaunchedEffect
-        if (appliedDark == useDarkMap) return@LaunchedEffect
+        if (appliedDark == useDarkMap) {
+            if (m.style?.isFullyLoaded == true) onStyleLoaded()
+            return@LaunchedEffect
+        }
         appliedDark = useDarkMap
         m.setStyle(Style.Builder().fromUri(cartoStyleUrl(useDarkMap))) { style ->
             if (useDarkMap) softenDark(style)
             ensureVehicleLayer(style)
             dirty.set(true)
             styleVersion++
+            onStyleLoaded()
         }
     }
 
@@ -929,12 +1028,25 @@ private fun MapLibreScreenContent(
         removeRouteLayers(style)
 
         if (tripRoute.size >= 2) {
+            val routeBitmap = withContext(Dispatchers.Default) {
+                Triple(
+                    routeArrowBitmap(arrowArgb),
+                    routeStartBitmap(context),
+                    routeEndBitmap(context)
+                )
+            }
+            style.addImage("route-arrow", routeBitmap.first)
+            style.addImage("route-start", routeBitmap.second)
+            style.addImage("route-end", routeBitmap.third)
+
             val segments = if (showFullRoute && fullRoute.size >= 2) listOf(fullRoute)
             else if (tripRouteSegments.isNotEmpty()) tripRouteSegments
             else listOf(tripRoute)
 
-            val routeFeatures = segments.mapNotNull { seg ->
-                if (seg.size >= 2) Feature.fromGeometry(seg.toLineString()) else null
+            val routeFeatures = withContext(Dispatchers.Default) {
+                segments.mapNotNull { seg ->
+                    if (seg.size >= 2) Feature.fromGeometry(seg.toLineString()) else null
+                }
             }
 
             if (routeFeatures.isNotEmpty()) {
@@ -956,10 +1068,12 @@ private fun MapLibreScreenContent(
             }
 
             // pěší trasa: čárkovaná linka s kulatými konci = tečky, kreslí GPU
-            val walkLines = walkList.filter { it.points.size >= 2 }.map { w ->
-                Feature.fromGeometry(
-                    LineString.fromLngLats(w.points.map { Point.fromLngLat(it.second, it.first) })
-                )
+            val walkLines = withContext(Dispatchers.Default) {
+                walkList.filter { it.points.size >= 2 }.map { w ->
+                    Feature.fromGeometry(
+                        LineString.fromLngLats(w.points.map { Point.fromLngLat(it.second, it.first) })
+                    )
+                }
             }
             if (walkLines.isNotEmpty()) {
                 style.addSource(
@@ -984,7 +1098,6 @@ private fun MapLibreScreenContent(
                     FeatureCollection.fromFeatures(listOf(Feature.fromGeometry(tripRoute.toLineString())))
                 )
             )
-            style.addImage("route-arrow", routeArrowBitmap(arrowArgb))
             addBelowMarkers(
                 style,
                 SymbolLayer("route-arrows", "arrows-src").withProperties(
@@ -1013,17 +1126,17 @@ private fun MapLibreScreenContent(
             val routeLine = if (showFullRoute && fullRoute.size >= 2) fullRoute else tripRoute
             val s = routeLine.first()
             val e = routeLine.last()
-            val ends = FeatureCollection.fromFeatures(
-                listOf(
-                    Feature.fromGeometry(Point.fromLngLat(s.longitude, s.latitude))
-                        .also { it.addStringProperty("img", "route-start") },
-                    Feature.fromGeometry(Point.fromLngLat(e.longitude, e.latitude))
-                        .also { it.addStringProperty("img", "route-end") }
+            val ends = withContext(Dispatchers.Default) {
+                FeatureCollection.fromFeatures(
+                    listOf(
+                        Feature.fromGeometry(Point.fromLngLat(s.longitude, s.latitude))
+                            .also { it.addStringProperty("img", "route-start") },
+                        Feature.fromGeometry(Point.fromLngLat(e.longitude, e.latitude))
+                            .also { it.addStringProperty("img", "route-end") }
+                    )
                 )
-            )
+            }
             style.addSource(GeoJsonSource("ends-src", ends))
-            style.addImage("route-start", routeStartBitmap(context))
-            style.addImage("route-end", routeEndBitmap(context))
             addBelowMarkers(
                 style,
                 SymbolLayer("route-ends", "ends-src").withProperties(
@@ -1035,12 +1148,13 @@ private fun MapLibreScreenContent(
         }
     }
 
-    // ── VOZIDLA: jedna smyčka, ~10 Hz, plynulá aktualizace bez flickerování při zoomu ──
+    // ── VOZIDLA: jedna smyčka, plynulá aktualizace bez flickerování při zoomu (zcela async na pozadí) ──
     LaunchedEffect(map, styleVersion, active) {
         val m = map ?: return@LaunchedEffect
         if (!active) return@LaunchedEffect
         while (true) {
             delay(VEHICLE_UPDATE_INTERVAL_MS)
+            if (moving.get()) continue
             val moved = hub.tick(SystemClock.elapsedRealtime())
             val d = dirty.getAndSet(false)
             if (!moved && !d) continue
@@ -1055,26 +1169,42 @@ private fun MapLibreScreenContent(
             val tgt = latestTarget
             val ph = latestPhase
 
-            val features = ArrayList<Feature>()
-            for ((k, v) in vehicles) {
+            val missingVehicles = vehicles.mapNotNull { (k, v) ->
                 val isTarget = tgt != null && v.uid == tgt.uid
-                val p = hub.positionOf(k) ?: LatLng(v.lat, v.lng)
-
                 val iconPhase = if (isTarget) ph else 0
                 val imgId = "veh|${v.line}|${v.train}|${v.delay > 3}|$iconPhase"
+                if (addedImages.contains(imgId)) null else Triple(k, v, imgId)
+            }.distinctBy { it.third }
 
-                if (addedImages.add(imgId)) {
-                    // kopie s nastavenou hustotou, ať je ikona stejně velká jako dřív (dp)
+            val newBitmaps = withContext(Dispatchers.Default) {
+                missingVehicles.map { (_, v, imgId) ->
+                    val isTarget = tgt != null && v.uid == tgt.uid
+                    val iconPhase = if (isTarget) ph else 0
                     val bmp = markerBitmap(context, v.line, v.train, v.delay, iconPhase)
-                        .copy(Bitmap.Config.ARGB_8888, false)
-                    bmp.density = context.resources.displayMetrics.densityDpi
+                        .copy(Bitmap.Config.ARGB_8888, false).apply {
+                            setDensity(context.resources.displayMetrics.densityDpi)
+                        }
+                    imgId to bmp
+                }
+            }
+
+            for ((imgId, bmp) in newBitmaps) {
+                if (addedImages.add(imgId)) {
                     style.addImage(imgId, bmp)
                 }
+            }
 
-                features += Feature.fromGeometry(Point.fromLngLat(p.longitude, p.latitude)).also {
-                    it.addStringProperty("img", imgId)
-                    it.addStringProperty("key", k)
-                    it.addNumberProperty("sort", if (iconPhase != 0) 2 else 1)
+            val features = withContext(Dispatchers.Default) {
+                vehicles.map { (k, v) ->
+                    val isTarget = tgt != null && v.uid == tgt.uid
+                    val p = hub.positionOf(k) ?: LatLng(v.lat, v.lng)
+                    val iconPhase = if (isTarget) ph else 0
+                    val imgId = "veh|${v.line}|${v.train}|${v.delay > 3}|$iconPhase"
+                    Feature.fromGeometry(Point.fromLngLat(p.longitude, p.latitude)).also {
+                        it.addStringProperty("img", imgId)
+                        it.addStringProperty("key", k)
+                        it.addNumberProperty("sort", if (iconPhase != 0) 2 else 1)
+                    }
                 }
             }
 
