@@ -2,7 +2,7 @@ package com.vasik96.spojeuk
 
 // Všechny ladicí konstanty na jednom místě. Zdroje poloh mají své URL u sebe (PortaboSource, DpmulSource).
 
-const val USER_AGENT = "spojeuk/2.0 (Android)"
+const val USER_AGENT = "spojeuk/3.0 (Android)"
 
 // ── jízdní řády (GTFS z Sap1k/obehy) ──
 const val RELEASES_API = "https://api.github.com/repos/Sap1k/obehy/releases/latest"
