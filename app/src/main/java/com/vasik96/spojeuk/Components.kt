@@ -4,9 +4,17 @@ package com.vasik96.spojeuk
 
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.EaseInOutSine
 import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -75,11 +83,24 @@ internal fun AppearAnimated(
 ) {
     // true jen při prvním zobrazení karty, takže při scrollování zpět se nepřehrává
     val state = remember(key) { MutableTransitionState(!appState.shownKeys.add(key)).apply { targetState = true } }
-    val d = index.coerceAtMost(6) * 50
+    val d = index.coerceAtMost(6) * 45
     AnimatedVisibility(
         visibleState = state,
         modifier = modifier,
-        enter = fadeIn(tween(300, delayMillis = d)) + slideInVertically(tween(350, delayMillis = d)) { it / 5 }
+        enter = fadeIn(tween(280, delayMillis = d)) +
+                slideInVertically(
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioLowBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                ) { it / 5 } +
+                scaleIn(
+                    initialScale = 0.94f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioLowBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                )
     ) { content() }
 }
 
@@ -142,6 +163,17 @@ internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> 
         label = "ProgressAnimation"
     )
 
+    val infiniteTransition = rememberInfiniteTransition(label = "setupPulse")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = 1.06f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = EaseInOutSine),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "setupPulseScale"
+    )
+
     Surface(
         modifier = Modifier.fillMaxSize().pointerInput(Unit) {},
         color = MaterialTheme.colorScheme.background
@@ -158,6 +190,10 @@ internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> 
             Box(
                 modifier = Modifier
                     .size(100.dp)
+                    .graphicsLayer {
+                        scaleX = pulseScale
+                        scaleY = pulseScale
+                    }
                     .clip(RoundedCornerShape(24.dp)),
                 contentAlignment = Alignment.Center
             ) {

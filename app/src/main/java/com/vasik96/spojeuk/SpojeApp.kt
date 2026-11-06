@@ -8,9 +8,16 @@ import android.content.ContextWrapper
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +53,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -177,12 +185,49 @@ internal fun SpojeApp() {
         }
     }
 
+    var appReady by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        appReady = true
+    }
+
+    val topBarOffset by animateFloatAsState(
+        targetValue = if (appReady) 0f else -50f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "topBarOffset"
+    )
+    val topBarAlpha by animateFloatAsState(
+        targetValue = if (appReady) 1f else 0f,
+        animationSpec = tween(400, easing = FastOutSlowInEasing),
+        label = "topBarAlpha"
+    )
+
+    val bottomBarOffset by animateFloatAsState(
+        targetValue = if (appReady) 0f else 50f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "bottomBarOffset"
+    )
+    val bottomBarAlpha by animateFloatAsState(
+        targetValue = if (appReady) 1f else 0f,
+        animationSpec = tween(400, easing = FastOutSlowInEasing),
+        label = "bottomBarAlpha"
+    )
+
     MaterialTheme(colorScheme = scheme) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Box(Modifier.fillMaxSize()) {
                 Scaffold(
                     topBar = {
                         TopAppBar(
+                            modifier = Modifier.graphicsLayer {
+                                translationY = topBarOffset
+                                alpha = topBarAlpha
+                            },
                             title = {
                                 Column {
                                     Text(
@@ -196,23 +241,45 @@ internal fun SpojeApp() {
                         )
                     },
                     bottomBar = {
-                        NavigationBar {
+                        NavigationBar(
+                            modifier = Modifier.graphicsLayer {
+                                translationY = bottomBarOffset
+                                alpha = bottomBarAlpha
+                            }
+                        ) {
+                            val tab0Scale by animateFloatAsState(
+                                targetValue = if (appState.selectedTab == 0) 1.15f else 1f,
+                                animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
+                                label = "tab0Bounce"
+                            )
                             NavigationBarItem(
                                 selected = appState.selectedTab == 0,
                                 onClick = { appState.selectedTab = 0 },
-                                icon = { Icon(Icons.Default.DirectionsBus, null) },
+                                icon = { Icon(Icons.Default.DirectionsBus, null, modifier = Modifier.graphicsLayer(scaleX = tab0Scale, scaleY = tab0Scale)) },
                                 label = { Text("Spoje") }
+                            )
+
+                            val tab1Scale by animateFloatAsState(
+                                targetValue = if (appState.selectedTab == 1) 1.15f else 1f,
+                                animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
+                                label = "tab1Bounce"
                             )
                             NavigationBarItem(
                                 selected = appState.selectedTab == 1,
                                 onClick = { appState.selectedTab = 1 },
-                                icon = { Icon(Icons.Default.Map, null) },
+                                icon = { Icon(Icons.Default.Map, null, modifier = Modifier.graphicsLayer(scaleX = tab1Scale, scaleY = tab1Scale)) },
                                 label = { Text("Mapa") }
+                            )
+
+                            val tab2Scale by animateFloatAsState(
+                                targetValue = if (appState.selectedTab == 2) 1.15f else 1f,
+                                animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
+                                label = "tab2Bounce"
                             )
                             NavigationBarItem(
                                 selected = appState.selectedTab == 2,
                                 onClick = { appState.selectedTab = 2 },
-                                icon = { Icon(Icons.Default.Settings, null) },
+                                icon = { Icon(Icons.Default.Settings, null, modifier = Modifier.graphicsLayer(scaleX = tab2Scale, scaleY = tab2Scale)) },
                                 label = { Text("Nastavení") }
                             )
                         }
@@ -230,8 +297,8 @@ internal fun SpojeApp() {
 
                         AnimatedVisibility(
                             visible = appState.selectedTab != 1,
-                            enter = fadeIn(tween(150)),
-                            exit = fadeOut(tween(150))
+                            enter = fadeIn(tween(200, easing = FastOutSlowInEasing)),
+                            exit = fadeOut(tween(180, easing = FastOutLinearInEasing))
                         ) {
                             Surface(
                                 modifier = Modifier.fillMaxSize(),
@@ -241,8 +308,14 @@ internal fun SpojeApp() {
 
                         AnimatedVisibility(
                             visible = appState.selectedTab == 0,
-                            enter = fadeIn(tween(150)),
-                            exit = fadeOut(tween(150))
+                            enter = fadeIn(tween(260, easing = FastOutSlowInEasing)) + scaleIn(
+                                initialScale = 0.97f,
+                                animationSpec = spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow)
+                            ),
+                            exit = fadeOut(tween(160, easing = FastOutLinearInEasing)) + scaleOut(
+                                targetScale = 0.98f,
+                                animationSpec = tween(160, easing = FastOutLinearInEasing)
+                            )
                         ) {
                             Surface(
                                 modifier = Modifier.fillMaxSize().pointerInput(Unit) {},
@@ -301,8 +374,14 @@ internal fun SpojeApp() {
 
                         AnimatedVisibility(
                             visible = appState.selectedTab == 2,
-                            enter = fadeIn(tween(150)),
-                            exit = fadeOut(tween(150))
+                            enter = fadeIn(tween(260, easing = FastOutSlowInEasing)) + scaleIn(
+                                initialScale = 0.97f,
+                                animationSpec = spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow)
+                            ),
+                            exit = fadeOut(tween(160, easing = FastOutLinearInEasing)) + scaleOut(
+                                targetScale = 0.98f,
+                                animationSpec = tween(160, easing = FastOutLinearInEasing)
+                            )
                         ) {
                             Surface(
                                 modifier = Modifier.fillMaxSize().pointerInput(Unit) {},
@@ -320,8 +399,11 @@ internal fun SpojeApp() {
 
                 AnimatedVisibility(
                     visible = appState.showSetup && !appState.setupDismissed,
-                    enter = fadeIn(),
-                    exit = fadeOut()
+                    enter = fadeIn(tween(300)) + scaleIn(
+                        initialScale = 0.92f,
+                        animationSpec = spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessLow)
+                    ),
+                    exit = fadeOut(tween(200)) + scaleOut(targetScale = 0.95f, animationSpec = tween(200))
                 ) {
                     SetupOverlay(
                         message = appState.setupMessage,

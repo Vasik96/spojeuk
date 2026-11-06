@@ -8,6 +8,25 @@ import android.content.pm.PackageManager
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.EaseInOutCubic
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -83,6 +102,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -93,6 +113,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -578,12 +599,44 @@ internal fun SearchScreen(
 
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
+    var cardReady by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        cardReady = true
+    }
+    val cardOffsetY by animateFloatAsState(
+        targetValue = if (cardReady) 0f else 35f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessLow
+        ),
+        label = "searchCardOffsetY"
+    )
+    val cardAlpha by animateFloatAsState(
+        targetValue = if (cardReady) 1f else 0f,
+        animationSpec = tween(400, easing = FastOutSlowInEasing),
+        label = "searchCardAlpha"
+    )
+
+    var swapRotation by remember { mutableFloatStateOf(0f) }
+    val animatedSwapRotation by animateFloatAsState(
+        targetValue = swapRotation,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "swapRotation"
+    )
+
     val searchCard: @Composable () -> Unit = {
         ElevatedCard(
             shape = RoundedCornerShape(28.dp),
             colors = CardDefaults.elevatedCardColors(
                 containerColor = MaterialTheme.colorScheme.surfaceContainer
-            )
+            ),
+            modifier = Modifier.graphicsLayer {
+                translationY = cardOffsetY
+                alpha = cardAlpha
+            }
         ) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 StopField(
@@ -610,6 +663,7 @@ internal fun SearchScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     HorizontalDivider(Modifier.weight(1f))
                     IconButton(onClick = {
+                        swapRotation += 180f
                         val f = appState.from
                         appState.from = appState.to
                         appState.to = f
@@ -617,7 +671,11 @@ internal fun SearchScreen(
                         appState.fromQuery = appState.toQuery
                         appState.toQuery = q
                     }) {
-                        Icon(Icons.Default.SwapVert, "Prohodit zastávky")
+                        Icon(
+                            Icons.Default.SwapVert,
+                            contentDescription = "Prohodit zastávky",
+                            modifier = Modifier.graphicsLayer { rotationZ = animatedSwapRotation }
+                        )
                     }
                     HorizontalDivider(Modifier.weight(1f))
                 }
@@ -678,18 +736,33 @@ internal fun SearchScreen(
                         .fillMaxWidth()
                         .heightIn(min = 54.dp),
                 ) {
-                    if (appState.searchLoading) {
-                        CircularWavyProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            color = MaterialTheme.colorScheme.primary,
-                            wavelength = 8.dp,
-                            amplitude = 1.5f
-                        )
-                    } else {
-                        Icon(Icons.Default.Search, contentDescription = null)
+                    AnimatedContent(
+                        targetState = appState.searchLoading,
+                        transitionSpec = {
+                            (fadeIn(animationSpec = tween(200, delayMillis = 50)) +
+                                    scaleIn(initialScale = 0.9f, animationSpec = tween(200, delayMillis = 50)))
+                                .togetherWith(fadeOut(animationSpec = tween(100)))
+                        },
+                        label = "searchButtonContent"
+                    ) { loading ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            if (loading) {
+                                CircularWavyProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    wavelength = 8.dp,
+                                    amplitude = 1.5f
+                                )
+                            } else {
+                                Icon(Icons.Default.Search, contentDescription = null)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (loading) "Hledám spoje…" else "Najít spojení")
+                        }
                     }
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (appState.searchLoading) "Hledám spoje…" else "Najít spojení")
                 }
             }
         }
@@ -732,9 +805,65 @@ internal fun SearchScreen(
 
     val resultsBody: @Composable (Modifier) -> Unit = { mod ->
         if (!appState.searched) {
-            Box(mod.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.DirectionsBus, null, Modifier.size(44.dp), tint = MaterialTheme.colorScheme.primary)
+            val infiniteTransition = rememberInfiniteTransition(label = "busFloating")
+            val busFloatY by infiniteTransition.animateFloat(
+                initialValue = -5f,
+                targetValue = 5f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1400, easing = EaseInOutCubic),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "busFloatY"
+            )
+            val busScale by infiniteTransition.animateFloat(
+                initialValue = 0.97f,
+                targetValue = 1.03f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1400, easing = EaseInOutCubic),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "busScale"
+            )
+
+            var emptyReady by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) { emptyReady = true }
+            val emptyAlpha by animateFloatAsState(
+                targetValue = if (emptyReady) 1f else 0f,
+                animationSpec = tween(500, delayMillis = 150, easing = FastOutSlowInEasing),
+                label = "emptyAlpha"
+            )
+            val emptyOffsetY by animateFloatAsState(
+                targetValue = if (emptyReady) 0f else 25f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioLowBouncy,
+                    stiffness = Spring.StiffnessLow
+                ),
+                label = "emptyOffsetY"
+            )
+
+            Box(
+                mod.fillMaxWidth().graphicsLayer {
+                    alpha = emptyAlpha
+                    translationY = emptyOffsetY
+                },
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.DirectionsBus,
+                        null,
+                        Modifier
+                            .size(48.dp)
+                            .graphicsLayer {
+                                translationY = busFloatY
+                                scaleX = busScale
+                                scaleY = busScale
+                            },
+                        tint = MaterialTheme.colorScheme.primary
+                    )
                     Text("Kam dnes vyrazíš?", style = MaterialTheme.typography.headlineSmall)
                     Text("Vyber výchozí a cílovou zastávku.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -934,20 +1063,29 @@ private fun StopField(
                     style = MaterialTheme.typography.labelMedium,
                     color = colors.onSurfaceVariant
                 )
-                if (text.isNotEmpty()) {
-                    Text(
-                        text,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                } else {
-                    Text(
-                        "Vyber zastávku",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = colors.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
+                AnimatedContent(
+                    targetState = text,
+                    transitionSpec = {
+                        (fadeIn(animationSpec = tween(200)) + slideInVertically { it / 3 })
+                            .togetherWith(fadeOut(animationSpec = tween(150)) + slideOutVertically { -it / 3 })
+                    },
+                    label = "stopFieldText"
+                ) { displayText ->
+                    if (displayText.isNotEmpty()) {
+                        Text(
+                            displayText,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else {
+                        Text(
+                            "Vyber zastávku",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = colors.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
                 }
             }
 
@@ -956,7 +1094,11 @@ private fun StopField(
                 Spacer(Modifier.width(6.dp))
             }
 
-            if (text.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = text.isNotEmpty(),
+                enter = fadeIn(tween(150)) + scaleIn(initialScale = 0.8f),
+                exit = fadeOut(tween(100)) + scaleOut(targetScale = 0.8f)
+            ) {
                 IconButton(onClick = { onTextChange("") }) {
                     Icon(Icons.Default.Clear, "Vymazat")
                 }
