@@ -163,6 +163,15 @@ class SpojeAppState(
         settingsPrefs.getBoolean("predict_vehicle_positions", false)
     )
 
+    var showOnlyMapFilters by mutableStateOf(
+        settingsPrefs.getBoolean("show_only_map_filters", false)
+    )
+
+    fun updateShowOnlyMapFilters(showOnly: Boolean) {
+        showOnlyMapFilters = showOnly
+        settingsPrefs.edit().putBoolean("show_only_map_filters", showOnly).apply()
+    }
+
     var enabledVehicleSources: Set<String>? by mutableStateOf(
         settingsPrefs.getStringSet("enabled_vehicle_sources", null)?.toSet()
     )

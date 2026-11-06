@@ -479,6 +479,55 @@ private fun SettingsMain(
             }
         }
 
+        val compactBannerChecked = appState.showOnlyMapFilters
+
+        OutlinedCard(
+            onClick = { appState.updateShowOnlyMapFilters(!compactBannerChecked) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics { role = Role.Switch }
+        ) {
+            Row(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.FilterList,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Kompaktní banner mapy",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Zobrazí v horním banneru mapy pouze filtry (Vše, Autobusy, Vlaky) bez informací o zdrojích a počtu vozidel.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = compactBannerChecked,
+                    onCheckedChange = null,
+                    thumbContent = {
+                        Icon(
+                            imageVector = if (compactBannerChecked) Icons.Default.Check else Icons.Default.Close,
+                            contentDescription = null,
+                            modifier = Modifier.size(SwitchDefaults.IconSize),
+                            tint = if (compactBannerChecked) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surfaceContainerHighest
+                        )
+                    }
+                )
+            }
+        }
+
         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
         SectionTitle("Data a aktualizace")
