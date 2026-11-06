@@ -85,6 +85,9 @@ internal fun SpojeApp() {
     // spojení na routovací servery rovnou při startu (první hledání nejbližší zastávky pak není pomalé)
     LaunchedEffect(Unit) { runCatching { api.warmUpRouting() } }
 
+    // živé polohy rovnou při startu: DPMÚL API odpovídá 10-15 s, tak ať běží dřív, než uživatel otevře mapu
+    LaunchedEffect(api, appState.enabledVehicleSources) { api.prewarmVehicles() }
+
     // druhy dopravy na zastávkách pro chipy Vše / Autobusy / Vlaky
     LaunchedEffect(appState.indexedStops.isNotEmpty()) {
         if (appState.indexedStops.isEmpty() || appState.stopModes != null) return@LaunchedEffect

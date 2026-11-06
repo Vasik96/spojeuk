@@ -2,9 +2,13 @@ package com.vasik96.spojeuk
 
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,6 +97,11 @@ class VehicleHub(
     @Volatile
     private var builtAtMs = 0L
 
+    private val _updates = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /** Vyšle se, když dokončí dotaz pomalý zdroj na pozadí ([VehicleSource.awaitResult] = false) a [fleet] je přepočtený. */
+    val updates: SharedFlow<Unit> = _updates.asSharedFlow()
+
     @Volatile
     private var enabledSourceIds: Set<String>? = null
 
@@ -148,6 +157,11 @@ class VehicleHub(
                 r.raw = vehicles
                 r.lastOkMs = System.currentTimeMillis()
                 r.lastError = null
+                // pomalý zdroj (DPMÚL) nikdo nečeká: přepočítej flotilu hned a dej vědět mapě,
+                // ať vozy nečekají na další kolo pollingu (až 6 s navíc)
+                if (!r.source.awaitResult) {
+                    runCatching { rebuild() }.onSuccess { _updates.tryEmit(Unit) }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
