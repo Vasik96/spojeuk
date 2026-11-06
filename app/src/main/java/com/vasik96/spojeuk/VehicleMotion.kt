@@ -9,22 +9,11 @@ import kotlinx.coroutines.withContext
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
-import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
 private const val EARTH_R = 6_371_008.8
-private const val MOVE_ANIM_MS = 500.0
-private const val MAX_SPEED_MPS = 30.0
-
-private const val MAX_LEAD_S = 24.0
-private const val STALE_DECEL_S = 12.0
-
 private const val MAX_ON_ROUTE_OFFSET_M = 50.0
-
-private const val STOP_BELOW_M = 50.0
-private const val SLOW_BELOW_M = 100.0
-private const val SLOW_SPEED_FACTOR = 0.65
 
 private fun haversineMeters(a: LatLng, b: LatLng): Double {
     val p1 = Math.toRadians(a.latitude)
@@ -129,164 +118,133 @@ internal class PathMeasure(private val points: List<LatLng>) {
 
 // ───────────────────────── pohyb jednoho vozidla ─────────────────────────
 
+/** Délka animace bez predikce z bodu A do bodu B (1 s). */
+private const val FAST_ANIM_DURATION_MS = 1_000.0
+
+/** Výchozí délka animace při predikci pohybu (5.8 s, odpovídá ~6s pollingu). */
+private const val PREDICT_ANIM_DURATION_MS = 5_800.0
+
+/** Skok delší než tohle není jízda (výměna vozu za jiný, chyba zdroje): bez animace. */
+private const val TELEPORT_M = 3_000.0
+
 /**
- * Pohyb je čistá funkce času ([positionAt]) bez Compose state a bez vlastních coroutin.
- * Volá ho jedna smyčka z [MotionHub] pro všechna vozidla.
+ * Každá nová poloha (bod B) se vždy odanimuje z právě zobrazené pozice (bod A) do B.
+ * Bez trasy po přímce, s trasou po silnici. Další fix navazuje z aktuálně zobrazené pozice,
+ * takže se vůz nikdy neskokne. Pohyb je čistá funkce času ([positionAt]), bez Compose state
+ * a bez vlastních coroutin; volá ho jedna smyčka z [MotionHub] pro všchna vozidla.
  */
 internal class VehicleMotion(lat: Double, lng: Double, obsMs: Long) {
-    private var fixPos = LatLng(lat, lng)
     private var fixObsMs = obsMs
     private var fixRecvMs = SystemClock.elapsedRealtime()
-    private var prevPos: LatLng? = null
-    private var prevObsMs = 0L
-    private var prevRecvMs = 0L
+
+    // aktuální animace A -> B
+    private var from = LatLng(lat, lng)
+    private var to = from
+    private var t0 = fixRecvMs
+    private var durMs = 1.0
 
     private var route: PathMeasure? = null
-    private var fixS: Double? = null
-    private var speedMps = 0.0
-    private var stationaryFixCount = 0
+    private var sFrom = Double.NaN
+    private var sTo = Double.NaN
+    // odchylka skutečných bodů od trasy (lat/lng delta), aby animace začínala a končila přesně v A a B
+    private var offFromLat = 0.0
+    private var offFromLng = 0.0
+    private var offToLat = 0.0
+    private var offToLng = 0.0
 
-    private val speedSamples = mutableListOf<Double>()
+    private var shown = from
 
-    // plynulé navázání na poslední zobrazenou pozici po novém fixu / nové trase
-    private var shown = fixPos
-    private var animFrom = fixPos
-    private var animT0 = SystemClock.elapsedRealtime()
+    /** Naplánuje animaci A -> B po trase (pokud je a sedí), jinak po přímce. */
+    private fun plan(a: LatLng, b: LatLng, now: Long, ms: Double) {
+        from = a
+        to = b
+        t0 = now
+        durMs = ms.coerceAtLeast(1.0)
+        sFrom = Double.NaN
+        sTo = Double.NaN
 
-    private fun restartBlend() {
-        animFrom = shown
-        animT0 = SystemClock.elapsedRealtime()
+        val r = route ?: return
+        val sb = r.project(b)?.s ?: return
+        val sa = r.project(a, nearS = sb - 400.0)?.s ?: return
+        val straight = haversineMeters(a, b)
+        val along = sb - sa
+        // trasa musí vést ve směru jízdy a nesmí být výrazně delší než vzdušná čára (jiná větev / smyčka)
+        if (along < 0.0 || along > straight * 1.6 + 60.0) return
+
+        val pa = r.pointAt(sa)
+        val pb = r.pointAt(sb)
+        offFromLat = a.latitude - pa.latitude
+        offFromLng = a.longitude - pa.longitude
+        offToLat = b.latitude - pb.latitude
+        offToLng = b.longitude - pb.longitude
+        sFrom = sa
+        sTo = sb
     }
 
     fun setRoute(r: PathMeasure?) {
         if (r === route) return
+        val now = SystemClock.elapsedRealtime()
+        val a = positionAt(now)
         route = r
-        recompute()
-        restartBlend()
+        if (r == null) {
+            sFrom = Double.NaN
+            sTo = Double.NaN
+        }
+        val maxDur = if (r != null) PREDICT_ANIM_DURATION_MS else FAST_ANIM_DURATION_MS
+        val remaining = (t0 + durMs - now).coerceIn(100.0, maxDur)
+        plan(a, to, now, remaining)
     }
 
-    /** Zaregistruje nový fix. Stejný fix podruhé ignoruje. */
-    fun onFix(lat: Double, lng: Double, obsMs: Long): Boolean {
+    /** Zaregistruje nový fix (= nový bod B). Stejný fix podruhé ignoruje. */
+    fun onFix(lat: Double, lng: Double, obsMs: Long, predict: Boolean = false): Boolean {
         val np = LatLng(lat, lng)
-        if (np == fixPos && obsMs == fixObsMs) return false
+        if (np == to) {
+            fixObsMs = obsMs
+            return false
+        }
 
         val now = SystemClock.elapsedRealtime()
+        val dtRecv = (now - fixRecvMs).toDouble()
 
-        prevPos = fixPos
-        prevObsMs = fixObsMs
-        prevRecvMs = fixRecvMs
-
-        fixPos = np
         fixObsMs = obsMs
         fixRecvMs = now
 
-        recompute()
-        restartBlend()
-        return true
-    }
-
-    /** Určí polohu fixu na trase a rychlost z posledních dvou fixů. Bez trasy se nic nehádá. */
-    private fun recompute() {
-        val r = route
-        if (r == null) {
-            fixS = null
-            speedMps = 0.0
-            stationaryFixCount = 0
-            speedSamples.clear()
-            return
+        val a = positionAt(now)   // navazuje se z toho, co je právě vidět
+        if (haversineMeters(a, np) > TELEPORT_M) {
+            from = np; to = np; t0 = now; durMs = 1.0
+            sFrom = Double.NaN; sTo = Double.NaN
+            shown = np
+            return true
         }
 
-        val s = r.project(fixPos)?.s
-        fixS = s
-
-        val pp = prevPos
-        if (s == null || pp == null) {
-            speedMps = 0.0
-            stationaryFixCount = 0
-            speedSamples.clear()
-            return
-        }
-
-        val ps = r.project(pp, nearS = s - 1_000.0)?.s
-        if (ps == null) {
-            speedMps = 0.0
-            stationaryFixCount = 0
-            speedSamples.clear()
-            return
-        }
-
-        val actualDistance = haversineMeters(fixPos, pp)
-        val routeDistance = s - ps
-
-        // Pod 50 m zastavit až do další aktualizace.
-        if (actualDistance < STOP_BELOW_M || routeDistance <= 0.0) {
-            speedMps = 0.0
-            stationaryFixCount++
-            speedSamples.clear()
-            return
-        }
-
-        val dtObs = (fixObsMs - prevObsMs) / 1000.0
-        val dtRecv = (fixRecvMs - prevRecvMs) / 1000.0
-        val dt = if (dtObs in 1.0..30.0) dtObs else dtRecv
-
-        if (dt !in 1.0..30.0) return
-
-        var measuredSpeed = (routeDistance / dt)
-            .coerceIn(0.0, MAX_SPEED_MPS)
-
-        // Mezi 50 a 100 m zpomalit.
-        if (actualDistance < SLOW_BELOW_M) {
-            measuredSpeed *= SLOW_SPEED_FACTOR
-        }
-
-        // Uchováváme posledních 5 měření.
-        speedSamples.add(measuredSpeed)
-        while (speedSamples.size > 5) {
-            speedSamples.removeAt(0)
-        }
-
-        // Medián potlačí náhodné GPS skoky.
-        val sorted = speedSamples.sorted()
-        val medianSpeed = sorted[sorted.size / 2]
-
-        // Plynulé přibližování k vypočítané rychlosti.
-        speedMps = if (speedMps < 0.5) {
-            medianSpeed
+        val targetDur = if (predict) {
+            if (dtRecv in 3_000.0..10_000.0) dtRecv.coerceIn(4_500.0, 6_000.0)
+            else PREDICT_ANIM_DURATION_MS
         } else {
-            speedMps * 0.65 + medianSpeed * 0.35
+            FAST_ANIM_DURATION_MS
         }
 
-        stationaryFixCount = 0
+        plan(a, np, now, targetDur)
+        return true
     }
 
     /** Pozice v čase [now] (SystemClock.elapsedRealtime). Levné, bez alokací kromě LatLng. */
     fun positionAt(now: Long): LatLng {
-        val target = targetAt(now)
-        val frac = ((now - animT0) / MOVE_ANIM_MS).coerceIn(0.0, 1.0)
-        val pos = if (frac >= 1.0) target else lerpLatLng(animFrom, target, frac)
-        shown = pos
-        return pos
-    }
-
-    private fun targetAt(now: Long): LatLng {
+        val f = ((now - t0) / durMs).coerceIn(0.0, 1.0)
         val r = route
-        val sFix = fixS
-        if (r == null || sFix == null) return fixPos   // bez trasy / bez predikce = glide na fix
-
-        val sinceRecv = ((now - fixRecvMs) / 1000.0).coerceAtLeast(0.0)
-        val predictedSeconds = when {
-            sinceRecv <= MAX_LEAD_S -> sinceRecv
-
-            sinceRecv >= MAX_LEAD_S + STALE_DECEL_S ->
-                MAX_LEAD_S + STALE_DECEL_S / 2.0
-
+        val pos = when {
+            f >= 1.0 -> to
+            r == null || sFrom.isNaN() -> lerpLatLng(from, to, f)
             else -> {
-                val x = (sinceRecv - MAX_LEAD_S) / STALE_DECEL_S
-                MAX_LEAD_S + STALE_DECEL_S * (x - x * x / 2.0)
+                val p = r.pointAt(sFrom + (sTo - sFrom) * f)
+                LatLng(
+                    p.latitude + offFromLat + (offToLat - offFromLat) * f,
+                    p.longitude + offFromLng + (offToLng - offFromLng) * f
+                )
             }
         }
-        return r.pointAt(min(sFix + speedMps * predictedSeconds, r.totalMeters))
+        shown = pos
+        return pos
     }
 }
 
