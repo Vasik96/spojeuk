@@ -310,7 +310,8 @@ internal fun SpojeApp() {
                                             departureTimeMillis = journey.depDt
                                                 .atZone(java.time.ZoneId.of("Europe/Prague"))
                                                 .toInstant()
-                                                .toEpochMilli()
+                                                .toEpochMilli(),
+                                            tid = journey.rawLegs.firstOrNull { it.kind == "ride" }?.tid ?: 0
                                         )
                                         appState.selectedVehicle = null
                                         appState.focusedTripVehicle = null
