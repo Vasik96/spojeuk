@@ -149,6 +149,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -204,6 +205,15 @@ internal fun SearchScreen(
     val context = LocalContext.current
     var locatingTarget by remember { mutableStateOf<String?>(null) }
     var pendingLocation by remember { mutableStateOf<Pair<String, (Stop) -> Unit>?>(null) }
+
+    LaunchedEffect(Unit) {
+        if (appState.searchJob?.isActive != true) {
+            appState.refreshing = false
+            appState.searchLoading = false
+            appState.loadingMore = false
+            appState.loadingEarlier = false
+        }
+    }
 
     // Referenční bod řazení: poloha uživatele, ale jen když je v regionu, jinak střed Ústí
     val origin = remember(appState.userLoc) {
@@ -451,7 +461,9 @@ internal fun SearchScreen(
             } catch (e: Exception) {
                 if (appState.search === s) appState.searchError = "Hledání selhalo: ${e.message}"
             } finally {
-                if (appState.search === s) appState.searchLoading = false
+                withContext(NonCancellable) {
+                    if (appState.search === s) appState.searchLoading = false
+                }
             }
         }
     }
@@ -474,6 +486,7 @@ internal fun SearchScreen(
         appState.searchJob = scope.launch {
             // Refresh poběží minimálně 700 ms.
             val refreshStartedAt = System.currentTimeMillis()
+            var wasCancelled = false
 
             try {
                 val r = withContext(Dispatchers.Default) {
@@ -485,19 +498,25 @@ internal fun SearchScreen(
                     appState.hasMore = s.hasMore
                 }
             } catch (e: CancellationException) {
+                wasCancelled = true
                 throw e
             } catch (e: Exception) {
                 if (appState.search === s) {
                     appState.searchError = "Obnovení selhalo: ${e.message}"
                 }
             } finally {
-                val elapsed = System.currentTimeMillis() - refreshStartedAt
-                val remaining = 700L - elapsed
-
-                if (remaining > 0) delay(remaining)
-
-                if (appState.search === s) {
-                    appState.refreshing = false
+                withContext(NonCancellable) {
+                    try {
+                        val elapsed = System.currentTimeMillis() - refreshStartedAt
+                        val remaining = 700L - elapsed
+                        if (remaining > 0 && !wasCancelled) {
+                            delay(remaining)
+                        }
+                    } catch (_: CancellationException) {
+                    }
+                    if (appState.search === s) {
+                        appState.refreshing = false
+                    }
                 }
             }
         }
@@ -526,7 +545,9 @@ internal fun SearchScreen(
                     appState.loadMoreFailed = true
                 }
             } finally {
-                if (appState.search === s) appState.loadingMore = false
+                withContext(NonCancellable) {
+                    if (appState.search === s) appState.loadingMore = false
+                }
             }
         }
     }
@@ -575,8 +596,10 @@ internal fun SearchScreen(
                         "Načtení dřívějších spojů selhalo: ${e.message}"
                 }
             } finally {
-                if (appState.search === s) {
-                    appState.loadingEarlier = false
+                withContext(NonCancellable) {
+                    if (appState.search === s) {
+                        appState.loadingEarlier = false
+                    }
                 }
             }
         }
