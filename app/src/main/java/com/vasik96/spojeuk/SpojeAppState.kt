@@ -34,7 +34,8 @@ class TripRef(
     val boardLng: Double?,
     val destination: String = "",
     val isPast: Boolean = false,
-    val departureTimeMillis: Long? = null
+    val departureTimeMillis: Long? = null,
+    val tid: Int = 0            // spoj z JŘ (první jízda spojení); 0 = neznámý
 )
 
 enum class AppTheme(val label: String) {
