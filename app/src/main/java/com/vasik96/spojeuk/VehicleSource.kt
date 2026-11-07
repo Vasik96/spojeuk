@@ -21,6 +21,7 @@ data class Freshness(
     val staleVehicleSec: Long = 40,
     /** Segmenty, u kterých se hlídá, že většina poloh není zastaralá (nebo že zdroj není ve výpadku). */
     val watchedSegments: Set<Segment> = emptySet(),
+    val dropAfterMs: Long = 3 * 60_000,
 )
 
 /**
