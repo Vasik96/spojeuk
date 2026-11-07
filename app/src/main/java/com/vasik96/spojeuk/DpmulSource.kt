@@ -129,6 +129,7 @@ object DpmulParser {
         if (lat !in 48.0..52.0 || lon !in 12.0..19.0) return null
 
         val observed = parseInstant(o.optStringClean("lastActivity")) ?: parseLocal(o.optStringClean("gpsTimestamp"))
+        if (observed != null && nowMs - observed.toEpochMilli() > 10 * 60_000L) return null
 
         val station = o.optInt("stationNumber", 0)
         val final = o.optInt("finalStationNumber", 0)

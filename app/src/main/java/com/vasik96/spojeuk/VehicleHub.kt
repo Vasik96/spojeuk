@@ -203,7 +203,7 @@ class VehicleHub(
             SourceInput(
                 reports[i],
                 runner.source.freshness.staleVehicleSec,
-                enrichedVehicles(runner, tt)
+                enrichedVehicles(runner, tt, now)
             )
         }
 
@@ -214,7 +214,8 @@ class VehicleHub(
         return result
     }
 
-    private fun enrichedVehicles(r: Runner, tt: Timetable?): List<Vehicle> {
+    private fun enrichedVehicles(r: Runner, tt: Timetable?, now: Long): List<Vehicle> {
+        if (now - r.lastOkMs > r.source.freshness.dropAfterMs) return emptyList()
         if (tt == null) return r.raw
         if (r.enrichedStamp != r.lastOkMs || r.enrichedFor !== tt) {
             r.enriched = r.raw.map { TripEnricher.enrich(it, r.source, tt) }
@@ -244,7 +245,8 @@ class VehicleHub(
                 s.inOutage || isSegmentStale(r.raw.filter { it.segment == seg }, now, f.staleVehicleSec)
             }
         }
-        return SourceReport(s.id, s.name, s.priority, s.segments, health, staleSegments, s.heldCount, vehicleCount = r.raw.size)
+        val dropped = hasData && now - r.lastOkMs > f.dropAfterMs
+        return SourceReport(s.id, s.name, s.priority, s.segments, health, staleSegments, s.heldCount, vehicleCount = if (dropped) 0 else r.raw.size)
     }
 
     private fun medianAgeOk(r: Runner, f: Freshness): Boolean {
