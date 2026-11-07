@@ -14,7 +14,7 @@ beze změny, appka jen změní URL.
 
 Endpointy:  GET /duk/traffic     sloučený feed DÚK (Portabo)
             GET /dpmul/traffic   poslední odpověď DPMÚL (JSON pole vozidel)
-            GET /health          stav serveru (DÚK na horní úrovni, DPMÚL pod klíčem "dpmul")
+            GET /health          stav serveru: souhrnné "ok", "uptimeMs", pod klíči "duk" a "dpmul" stav zdrojů
 Jen stdlib, žádné pip balíčky.
 """
 from __future__ import annotations
@@ -39,6 +39,8 @@ DPMUL_API_KEY = os.environ.get("DPMUL_API_KEY", "924486f2-3dd8-464f-9dd7-1f25aa4
 DPMUL_POLL_S = float(os.environ.get("DPMUL_POLL_S", "5"))          # odstup mezi starty dotazů
 DPMUL_TIMEOUT_S = float(os.environ.get("DPMUL_TIMEOUT_S", "30"))
 DPMUL_HOLD_S = int(os.environ.get("DPMUL_HOLD_S", "120"))          # starší odpověď už nevracet (vrátí se [])
+
+START_MONO = time.monotonic()      # pro uptime (nezávislé na změnách systémového času)
 
 log = logging.getLogger("spoje-feed")
 lock = threading.Lock()
@@ -251,14 +253,18 @@ class Handler(BaseHTTPRequestHandler):
             body, age = dpmul_body()
             extra["X-Age-Sec"] = "-1" if age is None else str(int(age))
         elif path == "/health":
-            age = time.time() - status["lastOk"] if status["lastOk"] else None
+            now = time.time()
+            with lock:
+                d_duk = dict(status)
             with dpmul_lock:
-                d = dict(dpmul_status)
-            d_age = time.time() - d["lastOk"] if d["lastOk"] else None
-            d.update(ok=d_age is not None and d_age < 60, upstreamAgeSec=None if d_age is None else int(d_age))
-            body = json.dumps({**status, "ok": age is not None and age < 60,
-                               "upstreamAgeSec": None if age is None else int(age),
-                               "dpmul": d}).encode()
+                d_dpmul = dict(dpmul_status)
+            for d in (d_duk, d_dpmul):
+                age = now - d["lastOk"] if d["lastOk"] else None
+                d.update(ok=age is not None and age < 60,
+                         upstreamAgeSec=None if age is None else int(age))
+            body = json.dumps({"ok": d_duk["ok"] and d_dpmul["ok"],
+                               "uptimeMs": int((time.monotonic() - START_MONO) * 1000),
+                               "duk": d_duk, "dpmul": d_dpmul}).encode()
         else:
             self.send_error(404)
             return
