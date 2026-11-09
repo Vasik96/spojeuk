@@ -20,10 +20,12 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
@@ -202,6 +204,7 @@ internal fun SearchScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val listState = appState.listState
+    var isSearchCardVisible by remember { mutableStateOf(true) }
     val context = LocalContext.current
     var locatingTarget by remember { mutableStateOf<String?>(null) }
     var pendingLocation by remember { mutableStateOf<Pair<String, (Stop) -> Unit>?>(null) }
@@ -445,6 +448,7 @@ internal fun SearchScreen(
         appState.loadingEarlier = false
         appState.searchError = null
         appState.searchedFrom = a
+        isSearchCardVisible = true
 
         appState.shownKeys.clear()
         listState.requestScrollToItem(0)
@@ -621,6 +625,33 @@ internal fun SearchScreen(
     }
 
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    val nestedScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                val dy = available.y
+                if (dy < -15f) {
+                    if (isSearchCardVisible) {
+                        isSearchCardVisible = false
+                    }
+                } else if (dy > 15f) {
+                    if (!isSearchCardVisible) {
+                        isSearchCardVisible = true
+                    }
+                }
+                return Offset.Zero
+            }
+        }
+    }
+
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 }
+            .collect { atTop ->
+                if (atTop) {
+                    isSearchCardVisible = true
+                }
+            }
+    }
 
     var cardReady by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
@@ -958,10 +989,30 @@ internal fun SearchScreen(
                     .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                searchCard()
+                AnimatedVisibility(
+                    visible = isSearchCardVisible || !appState.searched,
+                    enter = expandVertically(
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioNoBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        )
+                    ) + fadeIn(animationSpec = tween(200)),
+                    exit = shrinkVertically(
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioNoBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        )
+                    ) + fadeOut(animationSpec = tween(200))
+                ) {
+                    searchCard()
+                }
                 resultsHeader()
             }
-            resultsBody(Modifier.weight(1f))
+            resultsBody(
+                Modifier
+                    .weight(1f)
+                    .nestedScroll(nestedScrollConnection)
+            )
         }
     }
 }

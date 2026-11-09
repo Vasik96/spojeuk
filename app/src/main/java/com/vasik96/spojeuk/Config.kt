@@ -2,7 +2,10 @@ package com.vasik96.spojeuk
 
 // Všechny ladicí konstanty na jednom místě. Zdroje poloh mají své URL u sebe (PortaboSource, DpmulSource).
 
-const val USER_AGENT = "spojeuk/3.0 (Android)"
+/** Jednotná verze aplikace (BuildConfig.VERSION_NAME z build.gradle.kts / gradle.properties). */
+val APP_VERSION: String get() = BuildConfig.VERSION_NAME
+
+val USER_AGENT = "spojeuk/$APP_VERSION (Android)"
 
 // ── jízdní řády (GTFS z Sap1k/obehy) ──
 const val RELEASES_API = "https://api.github.com/repos/Sap1k/obehy/releases/latest"
