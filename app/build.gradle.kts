@@ -13,6 +13,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val appVersionName = providers.gradleProperty("appVersionName").getOrElse("3.0")
+
 android {
     namespace = "com.vasik96.spojeuk"
     compileSdk {
@@ -24,7 +26,7 @@ android {
         minSdk = 33
         targetSdk = 37
         versionCode = (System.currentTimeMillis() / 1000).toInt()
-        versionName = "3.0"
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["MAPS_API_KEY"] = localProperties.getProperty("MAPS_API_KEY") ?: ""
