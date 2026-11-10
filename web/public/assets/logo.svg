@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Spoje UK">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#58b0f2"/><stop offset="1" stop-color="#3d9de8"/></linearGradient></defs>
+  <rect width="512" height="512" rx="116" fill="url(#g)"/>
+  <g fill="#fff">
+    <path d="M176 118h160c34 0 58 22 58 56v124c0 14-8 24-22 24H140c-14 0-22-10-22-24V174c0-34 24-56 58-56z"/>
+    <rect x="152" y="320" width="48" height="72" rx="18"/>
+    <rect x="312" y="320" width="48" height="72" rx="18"/>
+  </g>
+  <g fill="#3d9de8">
+    <rect x="156" y="158" width="200" height="60" rx="10"/>
+    <circle cx="190" cy="274" r="20"/><circle cx="322" cy="274" r="20"/>
+  </g>
+</svg>
