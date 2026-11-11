@@ -319,6 +319,12 @@ class TransitRepository(context: Context? = null) {
         geometry.forTrip(store.ensure().timetable, tid)
     }
 
+    suspend fun stopCoordsForTrip(tid: Int): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
+        val tt = store.ensure().timetable
+        val stopIds = tt.tripStops(tid)
+        stopIds.asIterable().mapNotNull { id -> tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng } }
+    }
+
     suspend fun journeySegments(j: Journey): List<List<Pair<Double, Double>>> = withContext(Dispatchers.IO) {
         geometry.forJourneySegments(store.ensure().timetable, j)
     }

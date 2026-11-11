@@ -27,7 +27,7 @@ internal class MotionHub(
     private val scope: CoroutineScope,   // main scope z rememberCoroutineScope()
 ) {
     class Entry(var vehicle: Vehicle) {
-        val motion = VehicleMotion(vehicle.lat, vehicle.lng, vehicle.observedAtMs)
+        val motion = VehicleMotion(vehicle.lat, vehicle.lng, vehicle.observedAtMs, isTrain = vehicle.train)
         val state = MarkerState(LatLng(vehicle.lat, vehicle.lng)) // jen pro Google
         var pos = LatLng(vehicle.lat, vehicle.lng)
         var routeKey: String? = null
@@ -52,13 +52,12 @@ internal class MotionHub(
             alive += k
             val e = obtain(k, v)
             e.vehicle = v
-            e.motion.onFix(v.lat, v.lng, v.observedAtMs, predict = followRoads)
+            e.motion.onFix(v.lat, v.lng, v.observedAtMs, heading = v.heading, predict = followRoads)
 
             val want = if (followRoads) "${v.tid}|${v.cis}|${v.trip}" else null
             if (e.routeKey != want) {
                 e.routeKey = want
                 e.routeJob?.cancel()
-                e.motion.setRoute(null)
                 if (want != null) {
                     e.routeJob = scope.launch {
                         repeat(4) {
@@ -70,6 +69,8 @@ internal class MotionHub(
                             delay(20_000)
                         }
                     }
+                } else {
+                    e.motion.setRoute(null)
                 }
             }
         }

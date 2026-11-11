@@ -127,7 +127,7 @@ internal fun SourceBadges() {
             text = {
                 Text(
                     "Spoje UK nejsou nijak spojeny, provozovány ani schváleny společnostmi " +
-                            "Doprava Ústeckého kraje (DÚK) ani Dopravní podnik města Ústí nad Labem (DPMÚL).\n\n" +
+                            "Doprava Ústeckého kraje (DÚK), Dopravní podnik města Ústí nad Labem (DPMÚL), ani se Správou železnic.\n\n" +
                             "Loga slouží pouze pro vizuální informaci o tom, jaká data se v aplikaci zobrazují (a ještě to s tím vypadá lépe), " +
                             "a jsou ochrannými známkami svých vlastníků."
                 )
@@ -163,17 +163,6 @@ internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> 
         label = "ProgressAnimation"
     )
 
-    val infiniteTransition = rememberInfiniteTransition(label = "setupPulse")
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1.0f,
-        targetValue = 1.06f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = EaseInOutSine),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "setupPulseScale"
-    )
-
     Surface(
         modifier = Modifier.fillMaxSize().pointerInput(Unit) {},
         color = MaterialTheme.colorScheme.background
@@ -190,10 +179,6 @@ internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> 
             Box(
                 modifier = Modifier
                     .size(100.dp)
-                    .graphicsLayer {
-                        scaleX = pulseScale
-                        scaleY = pulseScale
-                    }
                     .clip(RoundedCornerShape(24.dp)),
                 contentAlignment = Alignment.Center
             ) {
