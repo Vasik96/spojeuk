@@ -13,9 +13,9 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 private const val EARTH_R = 6_371_008.8
-private const val MAX_ON_ROUTE_OFFSET_M = 50.0
+private const val MAX_ON_ROUTE_OFFSET_M = 150.0
 
-private fun haversineMeters(a: LatLng, b: LatLng): Double {
+internal fun haversineMeters(a: LatLng, b: LatLng): Double {
     val p1 = Math.toRadians(a.latitude)
     val p2 = Math.toRadians(b.latitude)
     val dp = p2 - p1
@@ -41,12 +41,16 @@ internal fun Vehicle.sameAs(o: Vehicle): Boolean =
 internal class PathProjection(val s: Double, val offsetMeters: Double)
 
 /** Trasa jako polyline s kumulativními vzdálenostmi (v metrech). Body musí být ve směru jízdy. */
-internal class PathMeasure(private val points: List<LatLng>) {
+internal class PathMeasure(
+    private val points: List<LatLng>,
+    stopPoints: List<LatLng> = emptyList()
+) {
     private val n = points.size
     private val xs = DoubleArray(n)
     private val ys = DoubleArray(n)
     private val cum = DoubleArray(n)
     val totalMeters: Double
+    val stopDistances: DoubleArray
 
     init {
         require(n >= 2)
@@ -57,6 +61,34 @@ internal class PathMeasure(private val points: List<LatLng>) {
             if (i > 0) cum[i] = cum[i - 1] + hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1])
         }
         totalMeters = cum[n - 1]
+
+        if (stopPoints.isNotEmpty()) {
+            val list = ArrayList<Double>()
+            var lastS = 0.0
+            for (sp in stopPoints) {
+                val px = Math.toRadians(sp.longitude) * k * EARTH_R
+                val py = Math.toRadians(sp.latitude) * EARTH_R
+                val proj = scanWindow(
+                    px = px,
+                    py = py,
+                    lo = (lastS - 10.0).coerceAtLeast(0.0),
+                    hi = Double.MAX_VALUE,
+                    nearS = lastS,
+                    hasDir = false,
+                    vx = 0.0,
+                    vy = 0.0,
+                    maxOffset = 150.0
+                )
+                if (proj != null) {
+                    list.add(proj.s)
+                    lastS = proj.s
+                }
+            }
+            list.sort()
+            stopDistances = list.toDoubleArray()
+        } else {
+            stopDistances = DoubleArray(0)
+        }
     }
 
     /** Index úseku, ve kterém (nebo těsně před kterým) leží vzdálenost d. */
@@ -67,42 +99,126 @@ internal class PathMeasure(private val points: List<LatLng>) {
         return idx.coerceIn(0, n - 2)
     }
 
-    private fun scan(px: Double, py: Double, lo: Double, hi: Double): PathProjection? {
-        var bestS = 0.0
-        var bestD = Double.MAX_VALUE
-        var found = false
-        var i = segmentStart(lo)
-        while (i < n - 1) {
+    private fun scanWindow(
+        px: Double, py: Double,
+        lo: Double, hi: Double,
+        nearS: Double?,
+        hasDir: Boolean, vx: Double, vy: Double,
+        maxOffset: Double
+    ): PathProjection? {
+        var bestProj: PathProjection? = null
+        var bestCost = Double.MAX_VALUE
+
+        val startIdx = segmentStart(lo)
+        for (i in startIdx until n - 1) {
             if (cum[i] > hi) break
-            if (cum[i + 1] >= lo) {
-                val ax = xs[i]
-                val ay = ys[i]
-                val dx = xs[i + 1] - ax
-                val dy = ys[i + 1] - ay
-                val len2 = dx * dx + dy * dy
-                val t = if (len2 <= 1e-9) 0.0 else (((px - ax) * dx + (py - ay) * dy) / len2).coerceIn(0.0, 1.0)
-                val d = hypot(px - (ax + dx * t), py - (ay + dy * t))
-                if (d < bestD) {
-                    bestD = d
-                    bestS = cum[i] + (cum[i + 1] - cum[i]) * t
-                    found = true
+            if (cum[i + 1] < lo) continue
+
+            val ax = xs[i]
+            val ay = ys[i]
+            val dx = xs[i + 1] - ax
+            val dy = ys[i + 1] - ay
+            val len2 = dx * dx + dy * dy
+            if (len2 <= 1e-9) continue
+
+            val t = (((px - ax) * dx + (py - ay) * dy) / len2).coerceIn(0.0, 1.0)
+            val projX = ax + dx * t
+            val projY = ay + dy * t
+            val d = hypot(px - projX, py - projY)
+            if (d > maxOffset) continue
+
+            val s = cum[i] + (cum[i + 1] - cum[i]) * t
+            if (s < lo || s > hi) continue
+
+            val len = sqrt(len2)
+            val ux = dx / len
+            val uy = dy / len
+
+            var dirPenalty = 0.0
+            if (hasDir) {
+                val dot = ux * vx + uy * vy
+                if (dot < -0.2) {
+                    // Opačný směr segmentu (např. protisměrná silnice, protější rameno smyčky / kruháče)
+                    dirPenalty = 600.0
+                } else if (dot < 0.3) {
+                    dirPenalty = (0.3 - dot) * 40.0
                 }
             }
-            i++
+
+            var progPenalty = 0.0
+            if (nearS != null) {
+                if (s < nearS) {
+                    // Pohyb dozadu po trase
+                    progPenalty += (nearS - s) * 0.8
+                } else {
+                    progPenalty += (s - nearS) * 0.08
+                }
+            }
+
+            val totalCost = d + dirPenalty + progPenalty
+            if (totalCost < bestCost) {
+                bestCost = totalCost
+                bestProj = PathProjection(s, d)
+            }
         }
-        return if (found) PathProjection(bestS, bestD) else null
+        return if (bestProj != null && bestCost < 500.0) bestProj else null
     }
 
-    /** Průmět bodu na trasu. Vrací null, když je bod dál než maxOffset od trasy. */
-    fun project(p: LatLng, nearS: Double? = null, maxOffset: Double = MAX_ON_ROUTE_OFFSET_M): PathProjection? {
+    /**
+     * Průmět bodu na trasu.
+     * Při známé pozici [nearS] prohledává jen reálné dopředné okno (ne celou trasu!),
+     * čímž brání přeskokům na protější ramena smyček a kruhových objezdů.
+     * Zohledňuje směr jízdy vozidla [heading] nebo [moveVec].
+     */
+    fun project(
+        p: LatLng,
+        nearS: Double? = null,
+        heading: Double? = null,
+        moveVec: Pair<Double, Double>? = null,
+        maxOffset: Double = MAX_ON_ROUTE_OFFSET_M,
+        isTrain: Boolean = false,
+        dtSec: Double = 6.0
+    ): PathProjection? {
         val px = Math.toRadians(p.longitude) * cos(Math.toRadians(points[0].latitude)) * EARTH_R
         val py = Math.toRadians(p.latitude) * EARTH_R
-        if (nearS != null) {
-            scan(px, py, nearS - 150.0, nearS + 2_500.0)
-                ?.takeIf { it.offsetMeters <= maxOffset }
-                ?.let { return it }
+
+        var vx = 0.0
+        var vy = 0.0
+        var hasDir = false
+        if (heading != null) {
+            val rad = Math.toRadians(heading)
+            vx = sin(rad)
+            vy = cos(rad)
+            hasDir = true
+        } else if (moveVec != null) {
+            val mLen = hypot(moveVec.first, moveVec.second)
+            if (mLen >= 6.0) {
+                vx = moveVec.first / mLen
+                vy = moveVec.second / mLen
+                hasDir = true
+            }
         }
-        return scan(px, py, -1.0, Double.MAX_VALUE)?.takeIf { it.offsetMeters <= maxOffset }
+
+        if (nearS != null) {
+            val backWindow = 40.0
+            val maxSpeed = if (isTrain) 35.0 else 17.0
+            val forwardWindow = (maxSpeed * dtSec * 1.5 + 40.0).coerceIn(120.0, if (isTrain) 600.0 else 320.0)
+            val lo = (nearS - backWindow).coerceAtLeast(0.0)
+            val hi = (nearS + forwardWindow).coerceAtMost(totalMeters)
+
+            val proj = scanWindow(px, py, lo, hi, nearS, hasDir, vx, vy, maxOffset)
+            if (proj != null) return proj
+            // Když už vůz na trase je, v žádném případě neskenujeme celou trasu, aby se nepřeskočilo na smyčku!
+            return null
+        }
+
+        // První promítnutí vozu na trasu (nearS == null): hledáme s kontrolou směru, při neúspěchu zkusíme bez ní
+        val proj = scanWindow(px, py, -1.0, Double.MAX_VALUE, null, hasDir, vx, vy, maxOffset)
+        if (proj != null) return proj
+        if (hasDir) {
+            return scanWindow(px, py, -1.0, Double.MAX_VALUE, null, false, 0.0, 0.0, maxOffset)
+        }
+        return null
     }
 
     fun pointAt(s: Double): LatLng {
@@ -121,130 +237,408 @@ internal class PathMeasure(private val points: List<LatLng>) {
 /** Délka animace bez predikce z bodu A do bodu B (1 s). */
 private const val FAST_ANIM_DURATION_MS = 1_000.0
 
-/** Výchozí délka animace při predikci pohybu (5.8 s, odpovídá ~6s pollingu). */
-private const val PREDICT_ANIM_DURATION_MS = 5_800.0
-
 /** Skok delší než tohle není jízda (výměna vozu za jiný, chyba zdroje): bez animace. */
 private const val TELEPORT_M = 3_000.0
 
 /**
- * Každá nová poloha (bod B) se vždy odanimuje z právě zobrazené pozice (bod A) do B.
- * Bez trasy po přímce, s trasou po silnici. Další fix navazuje z aktuálně zobrazené pozice,
- * takže se vůz nikdy neskokne. Pohyb je čistá funkce času ([positionAt]), bez Compose state
- * a bez vlastních coroutin; volá ho jedna smyčka z [MotionHub] pro všchna vozidla.
+ * Pohyb jednoho vozidla. Podporuje:
+ * 1) Běžnou lineární animaci A -> B pro ne-predikční režim nebo vozy mimo trasu.
+ * 2) Spojitou predikci po trase spoje: interpolaci polohy po trase silnice bez teleportů,
+ *    plynulý nájezd na trasu po jejím načtení, respektování reálné rychlosti a zastávek.
  */
-internal class VehicleMotion(lat: Double, lng: Double, obsMs: Long) {
+internal class VehicleMotion(
+    lat: Double,
+    lng: Double,
+    obsMs: Long,
+    val isTrain: Boolean = false
+) {
     private var fixObsMs = obsMs
     private var fixRecvMs = SystemClock.elapsedRealtime()
 
-    // aktuální animace A -> B
+    // Lineární animace pro fallback / bez predikce / plynulý nájezd na trasu
     private var from = LatLng(lat, lng)
     private var to = from
     private var t0 = fixRecvMs
     private var durMs = 1.0
 
+    // Spojitý pohyb po trase
     private var route: PathMeasure? = null
-    private var sFrom = Double.NaN
-    private var sTo = Double.NaN
-    // odchylka skutečných bodů od trasy (lat/lng delta), aby animace začínala a končila přesně v A a B
-    private var offFromLat = 0.0
-    private var offFromLng = 0.0
-    private var offToLat = 0.0
-    private var offToLng = 0.0
+    private var sCurr = Double.NaN         // aktuálně vykreslená pozice (m od začátku trasy)
+    private var sTarget = Double.NaN       // cílová extrapolovaná pozice (m od začátku trasy)
+    private var sLastFix = Double.NaN      // pozice z posledního serverového fixu
+    private var lastFixRecvMs = 0L
+
+    // Cestovní rychlost v m/s: vlak ~18 m/s (~65 km/h), autobus ~8.8 m/s (~32 km/h)
+    private var vCruise = if (isTrain) 18.0 else 8.8
+    private var vCurrent = 0.0
+
+    private var lastTickMs = 0L
+
+    // Pobyt na zastávce
+    private var isDwelling = false
+    private var dwellStartMs = 0L
+    private var dwellDurationMs = 10_000L
+    private var dwellStopDist = -1.0
+
+    // Detekce stání na konečné / na místě
+    private var isStationary = false
+    private var stationaryFixCount = 0
+    private var lastFixPos: LatLng? = null
+
+    // Plynulý přechod ze surové polohy na trasu (žádný instantní teleport při načtení trasy)
+    private var isOffRoute = true
+    private var transitioningToRoute = false
+    private var needRouteInit = false
+
+    // 1-sekundová animace k nejnovější realtime pozici, když je realtime fix napřed
+    private var isCatchingUp = false
+    private var catchUpStartS = Double.NaN
+    private var catchUpEndS = Double.NaN
+    private var catchUpStartPos = from
+    private var catchUpT0 = fixRecvMs
 
     private var shown = from
 
-    /** Naplánuje animaci A -> B po trase (pokud je a sedí), jinak po přímce. */
-    private fun plan(a: LatLng, b: LatLng, now: Long, ms: Double) {
+    private fun planFallback(a: LatLng, b: LatLng, now: Long, ms: Double) {
         from = a
         to = b
         t0 = now
         durMs = ms.coerceAtLeast(1.0)
-        sFrom = Double.NaN
-        sTo = Double.NaN
-
-        val r = route ?: return
-        val sb = r.project(b)?.s ?: return
-        val sa = r.project(a, nearS = sb - 400.0)?.s ?: return
-        val straight = haversineMeters(a, b)
-        val along = sb - sa
-        // trasa musí vést ve směru jízdy a nesmí být výrazně delší než vzdušná čára (jiná větev / smyčka)
-        if (along < 0.0 || along > straight * 1.6 + 60.0) return
-
-        val pa = r.pointAt(sa)
-        val pb = r.pointAt(sb)
-        offFromLat = a.latitude - pa.latitude
-        offFromLng = a.longitude - pa.longitude
-        offToLat = b.latitude - pb.latitude
-        offToLng = b.longitude - pb.longitude
-        sFrom = sa
-        sTo = sb
     }
 
     fun setRoute(r: PathMeasure?) {
         if (r === route) return
-        val now = SystemClock.elapsedRealtime()
-        val a = positionAt(now)
         route = r
         if (r == null) {
-            sFrom = Double.NaN
-            sTo = Double.NaN
+            sCurr = Double.NaN
+            sTarget = Double.NaN
+            sLastFix = Double.NaN
+            isOffRoute = true
+            transitioningToRoute = false
+            needRouteInit = false
+            isCatchingUp = false
+        } else {
+            needRouteInit = true
+            isOffRoute = false
         }
-        val maxDur = if (r != null) PREDICT_ANIM_DURATION_MS else FAST_ANIM_DURATION_MS
-        val remaining = (t0 + durMs - now).coerceIn(100.0, maxDur)
-        plan(a, to, now, remaining)
     }
 
-    /** Zaregistruje nový fix (= nový bod B). Stejný fix podruhé ignoruje. */
-    fun onFix(lat: Double, lng: Double, obsMs: Long, predict: Boolean = false): Boolean {
+    /** Zaregistruje nový fix. */
+    fun onFix(
+        lat: Double,
+        lng: Double,
+        obsMs: Long,
+        heading: Double? = null,
+        predict: Boolean = false
+    ): Boolean {
         val np = LatLng(lat, lng)
-        if (np == to) {
+        val now = SystemClock.elapsedRealtime()
+
+        if (np == to && !predict) {
             fixObsMs = obsMs
             return false
         }
 
-        val now = SystemClock.elapsedRealtime()
-        val dtRecv = (now - fixRecvMs).toDouble()
-
         fixObsMs = obsMs
-        fixRecvMs = now
+        val curPos = shown
+        val moveDist = if (lastFixPos != null) haversineMeters(np, lastFixPos!!) else 0.0
 
-        val a = positionAt(now)   // navazuje se z toho, co je právě vidět
-        if (haversineMeters(a, np) > TELEPORT_M) {
+        // Směrový vektor pohybu mezi serverovými fixy (x=East, y=North v metrech)
+        val moveVec: Pair<Double, Double>? = if (lastFixPos != null && moveDist >= 6.0) {
+            val k = cos(Math.toRadians(lat))
+            val dx = (lng - lastFixPos!!.longitude) * Math.toRadians(1.0) * k * EARTH_R
+            val dy = (lat - lastFixPos!!.latitude) * Math.toRadians(1.0) * EARTH_R
+            dx to dy
+        } else null
+
+        if (haversineMeters(curPos, np) > TELEPORT_M) {
             from = np; to = np; t0 = now; durMs = 1.0
-            sFrom = Double.NaN; sTo = Double.NaN
             shown = np
+            sCurr = Double.NaN; sTarget = Double.NaN; sLastFix = Double.NaN
+            lastFixPos = np; lastFixRecvMs = now
+            isOffRoute = true; transitioningToRoute = false
             return true
         }
 
-        val targetDur = if (predict) {
-            if (dtRecv in 3_000.0..10_000.0) dtRecv.coerceIn(4_500.0, 6_000.0)
-            else PREDICT_ANIM_DURATION_MS
-        } else {
-            FAST_ANIM_DURATION_MS
+        val r = route
+        if (!predict || r == null) {
+            planFallback(curPos, np, now, FAST_ANIM_DURATION_MS)
+            to = np
+            lastFixPos = np
+            lastFixRecvMs = now
+            isOffRoute = true
+            transitioningToRoute = false
+            return true
         }
 
-        plan(a, np, now, targetDur)
+        val dtFixSec = if (lastFixRecvMs > 0L) ((now - lastFixRecvMs) / 1000.0).coerceIn(1.0, 30.0) else 6.0
+        val proj = r.project(
+            p = np,
+            nearS = if (sCurr.isNaN() || isOffRoute) null else sCurr,
+            heading = heading,
+            moveVec = moveVec,
+            isTrain = isTrain,
+            dtSec = dtFixSec
+        )
+
+        if (proj == null) {
+            // Vůz je mimo trasu (objížďka apod.) -> plynulá lineární animace na nový fix
+            planFallback(curPos, np, now, FAST_ANIM_DURATION_MS)
+            to = np
+            lastFixPos = np
+            lastFixRecvMs = now
+            isOffRoute = true
+            transitioningToRoute = false
+            return true
+        }
+
+        val sFix = proj.s
+        val targetPoint = r.pointAt(sFix)
+
+        val isNearTerminus = sFix >= r.totalMeters - 40.0
+        if (moveDist < 15.0 || isNearTerminus) {
+            stationaryFixCount++
+        } else {
+            stationaryFixCount = 0
+        }
+        val isStat = stationaryFixCount >= 2 || isNearTerminus
+        isStationary = isStat
+
+        if (sCurr.isNaN() || isOffRoute) {
+            sCurr = sFix
+            sTarget = sFix
+            sLastFix = sFix
+            lastFixRecvMs = now
+            lastFixPos = np
+            isOffRoute = false
+            isDwelling = false
+            if (!isStat) vCurrent = vCruise * 0.8
+
+            // Plynulý nájezd z dosavadní vizuální polohy na trasu (žádný skok/teleport!)
+            val dist = haversineMeters(curPos, targetPoint)
+            if (dist >= 1.0) {
+                planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
+                to = targetPoint
+                transitioningToRoute = true
+            } else {
+                transitioningToRoute = false
+            }
+            isCatchingUp = false
+            return true
+        }
+
+        // Výpočet reálné rychlosti z po sobě jdoucích fixů
+        if (lastFixRecvMs > 0 && !sLastFix.isNaN()) {
+            val dtSec = ((now - lastFixRecvMs) / 1000.0).coerceIn(2.0, 45.0)
+            val dsM = sFix - sLastFix
+            if (dsM > 10.0 && !isStat) {
+                val vCalc = dsM / dtSec
+                val minV = if (isTrain) 4.0 else 2.5
+                val maxV = if (isTrain) 35.0 else 14.5
+                if (vCalc in minV..maxV) {
+                    val defaultV = if (isTrain) 18.0 else 8.8
+                    vCruise = (if (vCruise <= 0.0) defaultV else vCruise) * 0.7 + vCalc * 0.3
+                }
+            }
+        }
+        if (vCruise <= 0.0) vCruise = if (isTrain) 18.0 else 8.8
+        if (isStat) vCurrent = 0.0
+
+        if (sFix > sCurr + 1.0 && !isStat) {
+            // Realtime pozice je napřed oproti predikci -> 1s animace k realtime pozici,
+            // od které pak predikce plynule pokračuje s tipováním, kde vůz je.
+            planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
+            to = targetPoint
+            catchUpStartS = sCurr
+            catchUpEndS = sFix
+            catchUpStartPos = curPos
+            catchUpT0 = 0L
+            isCatchingUp = true
+            transitioningToRoute = false
+            isDwelling = false
+        } else if (isStat) {
+            isCatchingUp = false
+            transitioningToRoute = false
+        }
+
+        sLastFix = sFix
+        lastFixRecvMs = now
+        lastFixPos = np
+
+        val ageSec = if (obsMs > 0 && obsMs <= System.currentTimeMillis()) {
+            ((System.currentTimeMillis() - obsMs) / 1000.0).coerceIn(0.0, 4.0)
+        } else 0.0
+
+        val extrapolatedS = (sFix + vCruise * ageSec).coerceAtMost(r.totalMeters)
+        sTarget = extrapolatedS
+
+        // Pokud server nahlásil, že vůz už je za zastávkou, zrušíme čekání
+        if (isDwelling && sFix > dwellStopDist + 25.0) {
+            isDwelling = false
+        }
+
+        to = targetPoint
         return true
     }
 
     /** Pozice v čase [now] (SystemClock.elapsedRealtime). Levné, bez alokací kromě LatLng. */
     fun positionAt(now: Long): LatLng {
-        val f = ((now - t0) / durMs).coerceIn(0.0, 1.0)
         val r = route
-        val pos = when {
-            f >= 1.0 -> to
-            r == null || sFrom.isNaN() -> lerpLatLng(from, to, f)
-            else -> {
-                val p = r.pointAt(sFrom + (sTo - sFrom) * f)
-                LatLng(
-                    p.latitude + offFromLat + (offToLat - offFromLat) * f,
-                    p.longitude + offFromLng + (offToLng - offFromLng) * f
-                )
+        if (r != null && needRouteInit) {
+            needRouteInit = false
+            val curPos = shown
+            val proj = r.project(curPos, nearS = null, isTrain = isTrain)
+            if (proj != null) {
+                sCurr = proj.s
+                sTarget = proj.s
+                sLastFix = proj.s
+                lastFixRecvMs = now
+                if (!isStationary) vCurrent = vCruise * 0.8
+                val targetPoint = r.pointAt(proj.s)
+                val dist = haversineMeters(curPos, targetPoint)
+                if (dist >= 1.0) {
+                    planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
+                    to = targetPoint
+                    transitioningToRoute = true
+                } else {
+                    transitioningToRoute = false
+                }
+                isOffRoute = false
+            } else {
+                sCurr = Double.NaN
+                sTarget = Double.NaN
+                sLastFix = Double.NaN
+                isOffRoute = true
+                transitioningToRoute = false
             }
         }
-        shown = pos
-        return pos
+
+        if (r == null || sCurr.isNaN() || isOffRoute) {
+            val f = ((now - t0) / durMs).coerceIn(0.0, 1.0)
+            val pos = lerpLatLng(from, to, f)
+            shown = pos
+            return pos
+        }
+
+        if (isCatchingUp) {
+            if (catchUpT0 <= 0L) catchUpT0 = now
+            val elapsedMs = now - catchUpT0
+            if (elapsedMs < FAST_ANIM_DURATION_MS) {
+                val f = (elapsedMs / FAST_ANIM_DURATION_MS).coerceIn(0.0, 1.0)
+                sCurr = catchUpStartS + (catchUpEndS - catchUpStartS) * f
+                val routePos = r.pointAt(sCurr)
+                val pos = lerpLatLng(catchUpStartPos, routePos, f)
+                shown = pos
+                return pos
+            } else {
+                // 1s animace k realtime pozici dokončena, sCurr je na sFix a predikce odtud pokračuje
+                isCatchingUp = false
+                sCurr = catchUpEndS
+                if (!isStationary) vCurrent = vCruise * 0.8
+                shown = r.pointAt(sCurr)
+            }
+        }
+
+        if (transitioningToRoute) {
+            val f = ((now - t0) / durMs).coerceIn(0.0, 1.0)
+            if (f >= 1.0) {
+                transitioningToRoute = false
+            }
+            val routePos = r.pointAt(sCurr)
+            val pos = lerpLatLng(from, routePos, f)
+            shown = pos
+            return pos
+        }
+
+        if (lastTickMs <= 0L) lastTickMs = now
+        val dtSec = ((now - lastTickMs) / 1000.0).coerceIn(0.001, 0.2)
+        lastTickMs = now
+
+        val totalMeters = r.totalMeters
+        if (isStationary || sCurr >= totalMeters) {
+            val goalS = if (sCurr >= totalMeters) totalMeters else sLastFix
+            if (kotlin.math.abs(goalS - sCurr) > 0.5) {
+                val step = (vCruise * dtSec * 0.8).coerceAtMost(kotlin.math.abs(goalS - sCurr))
+                sCurr = if (sCurr < goalS) sCurr + step else sCurr - step
+            }
+            val p = r.pointAt(sCurr)
+            shown = p
+            return p
+        }
+
+        // Predikce dopředu po trase: kompenzace latence serverových dat (~3.0 s pro busy, ~5.0 s pro vlaky)
+        val leadSec = if (isTrain) 5.0 else 3.0
+        val timeSinceFixSec = ((now - lastFixRecvMs) / 1000.0).coerceAtLeast(0.0)
+        val currentTargetS = (sLastFix + vCruise * (timeSinceFixSec + leadSec)).coerceAtMost(totalMeters)
+
+        if (isDwelling) {
+            if (now - dwellStartMs >= dwellDurationMs || (!sLastFix.isNaN() && sLastFix > dwellStopDist + 40.0)) {
+                isDwelling = false
+            } else {
+                val p = r.pointAt(dwellStopDist)
+                shown = p
+                return p
+            }
+        }
+
+        val err = currentTargetS - sCurr
+        val catchUpFactor = when {
+            err > 0 -> 1.0 + (err / 200.0).coerceAtMost(0.20)
+            err < 0 -> (1.0 + err / 200.0).coerceAtLeast(0.4)
+            else -> 1.0
+        }
+        var targetV = vCruise * catchUpFactor
+
+        val stops = r.stopDistances
+        var nextStopDist = -1.0
+        var prevStopDist = -1.0
+        for (sd in stops) {
+            if (sd > sCurr) {
+                if (nextStopDist < 0.0) nextStopDist = sd
+            } else {
+                prevStopDist = sd
+            }
+        }
+
+        if (nextStopDist > 0.0) {
+            val distToStop = nextStopDist - sCurr
+            if (distToStop <= 120.0 && sLastFix <= nextStopDist + 40.0) {
+                if (distToStop <= 3.0) {
+                    isDwelling = true
+                    dwellStartMs = now
+                    dwellDurationMs = if (isTrain) 25_000L else 12_000L
+                    dwellStopDist = nextStopDist
+                    sCurr = nextStopDist
+                    vCurrent = 0.0
+                    val p = r.pointAt(nextStopDist)
+                    shown = p
+                    return p
+                } else {
+                    val decelRatio = distToStop / 120.0
+                    targetV = (targetV * decelRatio * decelRatio).coerceAtLeast(0.8)
+                }
+            }
+        }
+
+        if (prevStopDist > 0.0) {
+            val distFromStop = sCurr - prevStopDist
+            if (distFromStop in 0.0..60.0) {
+                val accelFactor = distFromStop / 60.0
+                targetV *= (0.25 + 0.75 * accelFactor)
+            }
+        }
+
+        val maxAccel = (if (isTrain) 0.8 else 1.5) * dtSec
+        if (vCurrent < targetV) {
+            vCurrent = (vCurrent + maxAccel).coerceAtMost(targetV)
+        } else {
+            vCurrent = (vCurrent - maxAccel * 1.5).coerceAtLeast(targetV)
+        }
+
+        sCurr = (sCurr + vCurrent * dtSec).coerceIn(0.0, totalMeters)
+        val p = r.pointAt(sCurr)
+        shown = p
+        return p
     }
 }
 
@@ -492,9 +886,15 @@ internal class VehicleRoutes(private val api: TransitRepository) {
         val tid = api.resolveTripId(v) ?: return null
         if (byTid.containsKey(tid)) return byTid[tid]
         val pts = gate.withPermit { api.routeForTrip(tid) }
+        val stops = gate.withPermit { api.stopCoordsForTrip(tid) }
         // stavba PathMeasure (trigonometrie přes celou trasu) mimo main vlákno
         val pm = withContext(Dispatchers.Default) {
-            if (pts.size >= 2) PathMeasure(pts.map { LatLng(it.first, it.second) }) else null
+            if (pts.size >= 2) {
+                PathMeasure(
+                    pts.map { LatLng(it.first, it.second) },
+                    stops.map { LatLng(it.first, it.second) }
+                )
+            } else null
         }
         byTid[tid] = pm
         return pm

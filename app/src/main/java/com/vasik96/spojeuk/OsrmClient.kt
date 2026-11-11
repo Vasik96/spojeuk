@@ -42,16 +42,15 @@ class OsrmClient(private val cacheDir: File) {
     fun pathFor(stops: List<Pair<Double, Double>>): List<Pair<Double, Double>> {
         if (stops.size < 2) return stops
 
-        // řídké waypointy: první, poslední a body ≥ 700 m od posledního vybraného
+        // Zastávky spoje jako waypointy (vynecháme jen totožné zastávky < 10 m od sebe)
         val way = ArrayList<Pair<Double, Double>>()
         way.add(stops.first())
-        for (i in 1 until stops.size - 1) {
-            if (distM(way.last(), stops[i]) >= 700.0) way.add(stops[i])
+        for (i in 1 until stops.size) {
+            if (distM(way.last(), stops[i]) >= 10.0) way.add(stops[i])
         }
-        way.add(stops.last())
         if (way.size < 2) return stops
 
-        val key = md5("v2;" + way.joinToString(";") { "${it.first},${it.second}" })
+        val key = md5("v3;" + way.joinToString(";") { "${it.first},${it.second}" })
         val cacheFile = File(cacheDir, "routes/$key.json")
 
         if (cacheFile.exists()) {
