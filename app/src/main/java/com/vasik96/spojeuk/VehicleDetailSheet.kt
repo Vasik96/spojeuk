@@ -130,6 +130,14 @@ internal fun VehicleDetailBottomSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
+                val routeInfo by produceState("zjišťuji…", vehicle.tid, vehicle.cis, vehicle.trip) {
+                    value = runCatching { api.routeSourceInfo(vehicle) }.getOrDefault("nelze zjistit")
+                }
+                Text(
+                    "Trasa: $routeInfo",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
                 val ageSec by produceState(vehicle.ageSec(), vehicle) {
                     while (true) {
