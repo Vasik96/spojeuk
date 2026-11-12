@@ -24,7 +24,7 @@ class RouteGeometry(
         val exact = shapes.explain(trip.gid)
         if (shapes.points(trip.gid) != null) return exact
         val fuzzy = shapes.pointsFor(trip.gid, stopCoords(tt, tid))
-        return if (fuzzy != null) "tvar nalezen podle zastávek téže linky (${fuzzy.size} bodů); přesný gid v DB chybí"
+        return if (fuzzy != null) "tvar nalezen podle zastávek téže linky (${fuzzy.size} bodů); přesný gid v DB chybí\n$exact"
         else exact
     }
 

@@ -130,6 +130,9 @@ internal fun VehicleDetailBottomSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
+
+                // Trasa: ... nechat to tady kdyby nahodou byly zase nejaky trasy zniceny tak je to pro diagnostiku
+                /*
                 val routeInfo by produceState("zjišťuji…", vehicle.tid, vehicle.cis, vehicle.trip) {
                     value = runCatching { api.routeSourceInfo(vehicle) }.getOrDefault("nelze zjistit")
                 }
@@ -137,7 +140,7 @@ internal fun VehicleDetailBottomSheet(
                     "Trasa: $routeInfo",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                )*/
 
                 val ageSec by produceState(vehicle.ageSec(), vehicle) {
                     while (true) {
@@ -172,7 +175,7 @@ internal fun VehicleDetailBottomSheet(
                         appState.routeLoading = false
                     }
                 },
-                enabled = !appState.routeLoading && vehicle.state in 0..1,
+                enabled = !appState.routeLoading && vehicle.state != 255,
             ) {
                 AnimatedContent(
                     targetState = appState.routeLoading,

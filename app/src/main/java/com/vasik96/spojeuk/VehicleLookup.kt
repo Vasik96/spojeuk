@@ -40,7 +40,7 @@ internal fun distanceMeters(a: LatLng, b: LatLng): Float {
 
 /** Najde na mapě vůz, který jede spoj [ref]. */
 internal fun findVehicle(list: List<Vehicle>, ref: TripRef, route: List<LatLng>): VehicleMatch? {
-    val live = list.filter { it.state in 0..1 }
+    val live = list.filter { it.state != 255 }
 
     // 1) vozy spárované s tímto spojem (přesné ID, případně shoda podle JŘ). Kandidátů může být víc
     //    (např. vůz na točně, který má v zdroji stejné číslo spoje, a vůz, který už opravdu jede),

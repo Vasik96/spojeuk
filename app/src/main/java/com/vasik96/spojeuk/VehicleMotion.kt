@@ -427,6 +427,8 @@ internal class VehicleMotion(
             return true
         }
 
+        val dtFixSec = if (lastFixRecvMs > 0L) ((now - lastFixRecvMs) / 1000.0).coerceIn(1.0, 30.0) else 6.0
+
         val r = route
         if (!predict || r == null) {
             planFallback(curPos, np, now, FAST_ANIM_DURATION_MS)
@@ -438,7 +440,6 @@ internal class VehicleMotion(
             return true
         }
 
-        val dtFixSec = if (lastFixRecvMs > 0L) ((now - lastFixRecvMs) / 1000.0).coerceIn(1.0, 30.0) else 6.0
         // Oporou pro hledání je poslední FIX na trase (ne vykreslená, předsazená poloha): ta se pohybuje
         // jen podle skutečných dat a nepředbíhá, takže okno nikdy neujede od reality.
         val trackS = if (!sLastFix.isNaN()) sLastFix else sCurr
@@ -499,6 +500,22 @@ internal class VehicleMotion(
 
         missedFixes = 0
         val sFix = proj.s
+        val isNearStartTerminus = sFix <= 40.0
+        val isNearEndTerminus = sFix >= r.totalMeters - 40.0
+        val isNearTerminus = isNearStartTerminus || isNearEndTerminus
+
+        // Pokud vůz stojí/parkuje na konečné/startovní zastávce a je mimo hlavní osu trasy (>20 m od osy),
+        // necháme ho na surové GPS pozici v jeho konkrétním stání, aby se 5-10 parkujících autobusů nesloučilo do jediného bodu.
+        if (isNearTerminus && moveDist < 12.0 && proj.offsetMeters > 20.0) {
+            planFallback(curPos, np, now, FAST_ANIM_DURATION_MS)
+            to = np
+            lastFixPos = np
+            lastFixRecvMs = now
+            isOffRoute = true
+            transitioningToRoute = false
+            return true
+        }
+
         if (resynced) {
             // oprava polohy po trase (ne přímkou): vykreslená poloha se přesadí na ověřené místo
             sCurr = sFix
@@ -511,13 +528,12 @@ internal class VehicleMotion(
         lastGoodMs = now
         val targetPoint = r.pointAt(sFix)
 
-        val isNearTerminus = sFix >= r.totalMeters - 40.0
         if (moveDist < 15.0 || isNearTerminus) {
             stationaryFixCount++
         } else {
             stationaryFixCount = 0
         }
-        val isStat = stationaryFixCount >= 2 || isNearTerminus
+        val isStat = stationaryFixCount >= 2 || isNearEndTerminus
         isStationary = isStat
 
         if (sCurr.isNaN() || isOffRoute) {
@@ -611,7 +627,13 @@ internal class VehicleMotion(
                 sTarget = proj.s
                 sLastFix = proj.s
                 lastFixRecvMs = now
-                if (!isStationary) vCurrent = vCruise * 0.8
+                val isNearEndTerminus = proj.s >= r.totalMeters - 40.0
+                if (isNearEndTerminus) {
+                    isStationary = true
+                    vCurrent = 0.0
+                } else if (!isStationary) {
+                    vCurrent = vCruise * 0.8
+                }
                 val targetPoint = r.pointAt(proj.s)
                 val dist = haversineMeters(curPos, targetPoint)
                 if (dist >= 1.0) {
