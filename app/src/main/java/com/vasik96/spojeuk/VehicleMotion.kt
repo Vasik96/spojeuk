@@ -15,6 +15,15 @@ import kotlin.math.sqrt
 private const val EARTH_R = 6_371_008.8
 private const val MAX_ON_ROUTE_OFFSET_M = 150.0
 
+/** Kolik metrů zpět po trase se ještě toleruje (šum GPS, dvě zastávky těsně u sebe); víc je už „jiné rameno“. */
+private const val BACK_TOLERANCE_M = 25.0
+
+/** Odchylka fixu od trasy, od které je shoda „špatná“ (GPS šum bývá do ~15 m). Dva takové fixy za sebou spustí přesynchronizaci. */
+private const val POOR_FIT_M = 45.0
+
+/** Kolik po sobě jdoucích fixů mimo trasu vydrží dead reckoning po trase, než se vůz prohlásí za mimo trasu. */
+private const val MAX_MISSED_FIXES = 3
+
 internal fun haversineMeters(a: LatLng, b: LatLng): Double {
     val p1 = Math.toRadians(a.latitude)
     val p2 = Math.toRadians(b.latitude)
@@ -77,7 +86,8 @@ internal class PathMeasure(
                     hasDir = false,
                     vx = 0.0,
                     vy = 0.0,
-                    maxOffset = 150.0
+                    maxOffset = 150.0,
+                    stopMode = true
                 )
                 if (proj != null) {
                     list.add(proj.s)
@@ -99,12 +109,27 @@ internal class PathMeasure(
         return idx.coerceIn(0, n - 2)
     }
 
+    /**
+     * Najde nejlepší úsek trasy pro bod (px, py) v okně [lo, hi] metrů od začátku.
+     *
+     * Cena kandidáta = odchylka od trasy + postup + směr:
+     *  - **postup** ([nearS] = poslední známá pozice): zpět po trase se téměř nepouští, vpřed se čeká
+     *    [expected] metrů. Díky tomu se nelze „přepnout“ na protější rameno smyčky / protisměrnou
+     *    vozovku, protože ta leží na trase o stovky metrů jinde.
+     *  - **směr** je jen slabá nápověda ([hasDir]). Heading z DPMÚL je ve skutečnosti směr k nejbližší zastávce
+     *    vzdušnou čarou a v zatáčce / na kruháči bývá opačný než silnice, proto nikdy nesmí rozhodovat sám
+     *    ani vyřadit správný úsek.
+     * [stopMode] zachovává původní hledání zastávek (vpřed téměř zdarma, zpět draho).
+     */
     private fun scanWindow(
         px: Double, py: Double,
         lo: Double, hi: Double,
         nearS: Double?,
         hasDir: Boolean, vx: Double, vy: Double,
-        maxOffset: Double
+        maxOffset: Double,
+        expected: Double = 0.0,
+        stopMode: Boolean = false,
+        wideMode: Boolean = false
     ): PathProjection? {
         var bestProj: PathProjection? = null
         var bestCost = Double.MAX_VALUE
@@ -137,21 +162,32 @@ internal class PathMeasure(
             var dirPenalty = 0.0
             if (hasDir) {
                 val dot = ux * vx + uy * vy
-                if (dot < -0.2) {
-                    // Opačný směr segmentu (např. protisměrná silnice, protější rameno smyčky / kruháče)
-                    dirPenalty = 600.0
-                } else if (dot < 0.3) {
-                    dirPenalty = (0.3 - dot) * 40.0
+                // jen slabá nápověda (max. pár metrů odchylky), nikdy ne vyřazení úseku
+                dirPenalty = when {
+                    dot < -0.5 -> 12.0
+                    dot < 0.0 -> 4.0
+                    else -> 0.0
                 }
             }
 
             var progPenalty = 0.0
             if (nearS != null) {
-                if (s < nearS) {
-                    // Pohyb dozadu po trase
-                    progPenalty += (nearS - s) * 0.8
-                } else {
-                    progPenalty += (s - nearS) * 0.08
+                val delta = s - nearS
+                progPenalty = if (wideMode) {
+                    // přesynchronizace: pozice se může opravit i směrem zpět, rozhoduje hlavně odchylka od trasy
+                    kotlin.math.abs(delta - expected) * 0.05
+                } else if (stopMode) {
+                    if (delta < 0.0) -delta * 0.8 else delta * 0.08
+                } else when {
+                    delta < -BACK_TOLERANCE_M -> BACK_TOLERANCE_M * 0.3 + (-delta - BACK_TOLERANCE_M) * 2.0
+                    delta < 0.0 -> -delta * 0.3
+                    else -> {
+                        // věrohodný rozsah postupu: do ~1,8× očekávané dráhy je to lehká cena, dál (jiné rameno
+                        // smyčky, protější jízdní pás) rychle prudce roste, takže jeden odlehlý fix nepřeskočí
+                        val plausible = expected * 1.8 + 40.0
+                        if (delta <= plausible) kotlin.math.abs(delta - expected) * 0.08
+                        else (plausible - expected) * 0.08 + (delta - plausible) * 0.5
+                    }
                 }
             }
 
@@ -161,7 +197,7 @@ internal class PathMeasure(
                 bestProj = PathProjection(s, d)
             }
         }
-        return if (bestProj != null && bestCost < 500.0) bestProj else null
+        return bestProj
     }
 
     /**
@@ -177,7 +213,10 @@ internal class PathMeasure(
         moveVec: Pair<Double, Double>? = null,
         maxOffset: Double = MAX_ON_ROUTE_OFFSET_M,
         isTrain: Boolean = false,
-        dtSec: Double = 6.0
+        dtSec: Double = 6.0,
+        expectedSpeed: Double = if (isTrain) 18.0 else 8.8,
+        hintS: Double? = null,
+        wide: Boolean = false
     ): PathProjection? {
         val px = Math.toRadians(p.longitude) * cos(Math.toRadians(points[0].latitude)) * EARTH_R
         val py = Math.toRadians(p.latitude) * EARTH_R
@@ -199,6 +238,16 @@ internal class PathMeasure(
             }
         }
 
+        if (nearS != null && wide) {
+            // opravná přesynchronizace: okolí poslední známé pozice na obě strany, bez zákazu couvání
+            val maxSpeed = if (isTrain) 35.0 else 17.0
+            val fwd = (maxSpeed * dtSec * 1.5 + 60.0).coerceIn(150.0, 600.0)
+            return scanWindow(
+                px, py, (nearS - 450.0).coerceAtLeast(0.0), (nearS + fwd).coerceAtMost(totalMeters),
+                nearS, hasDir, vx, vy, maxOffset, expectedSpeed * dtSec, wideMode = true
+            )
+        }
+
         if (nearS != null) {
             val backWindow = 40.0
             val maxSpeed = if (isTrain) 35.0 else 17.0
@@ -206,19 +255,26 @@ internal class PathMeasure(
             val lo = (nearS - backWindow).coerceAtLeast(0.0)
             val hi = (nearS + forwardWindow).coerceAtMost(totalMeters)
 
-            val proj = scanWindow(px, py, lo, hi, nearS, hasDir, vx, vy, maxOffset)
+            val expected = kotlin.math.min(expectedSpeed * dtSec, kotlin.math.max(0.0, hi - nearS))
+            val proj = scanWindow(px, py, lo, hi, nearS, hasDir, vx, vy, maxOffset, expected)
             if (proj != null) return proj
             // Když už vůz na trase je, v žádném případě neskenujeme celou trasu, aby se nepřeskočilo na smyčku!
             return null
         }
 
-        // První promítnutí vozu na trasu (nearS == null): hledáme s kontrolou směru, při neúspěchu zkusíme bez ní
-        val proj = scanWindow(px, py, -1.0, Double.MAX_VALUE, null, hasDir, vx, vy, maxOffset)
-        if (proj != null) return proj
-        if (hasDir) {
-            return scanWindow(px, py, -1.0, Double.MAX_VALUE, null, false, 0.0, 0.0, maxOffset)
+        // Znovu nalezení trasy po výpadku: nejdřív okolí poslední známé pozice, celá trasa až nakonec
+        if (hintS != null) {
+            val maxSpeed = if (isTrain) 35.0 else 17.0
+            val fwd = (maxSpeed * dtSec * 1.5 + 150.0).coerceIn(300.0, 2500.0)
+            val near = scanWindow(
+                px, py, (hintS - 150.0).coerceAtLeast(0.0), (hintS + fwd).coerceAtMost(totalMeters),
+                hintS, hasDir, vx, vy, maxOffset, expectedSpeed * dtSec
+            )
+            if (near != null) return near
         }
-        return null
+
+        // První promítnutí vozu na trasu (nearS == null): nejbližší úsek, směr jen jako slabá nápověda
+        return scanWindow(px, py, -1.0, Double.MAX_VALUE, null, hasDir, vx, vy, maxOffset)
     }
 
     fun pointAt(s: Double): LatLng {
@@ -285,6 +341,13 @@ internal class VehicleMotion(
     private var stationaryFixCount = 0
     private var lastFixPos: LatLng? = null
 
+    // Poslední jistá pozice na trase (pro znovunalezení po výpadku) a počet fixů v řadě, které na trasu nesedly
+    private var lastGoodS = Double.NaN
+    private var lastGoodMs = 0L
+    private var missedFixes = 0
+    private var poorFits = 0
+    private var catchUpDurMs = FAST_ANIM_DURATION_MS
+
     // Plynulý přechod ze surové polohy na trasu (žádný instantní teleport při načtení trasy)
     private var isOffRoute = true
     private var transitioningToRoute = false
@@ -309,6 +372,9 @@ internal class VehicleMotion(
     fun setRoute(r: PathMeasure?) {
         if (r === route) return
         route = r
+        lastGoodS = Double.NaN
+        missedFixes = 0
+        poorFits = 0
         if (r == null) {
             sCurr = Double.NaN
             sTarget = Double.NaN
@@ -355,6 +421,7 @@ internal class VehicleMotion(
             from = np; to = np; t0 = now; durMs = 1.0
             shown = np
             sCurr = Double.NaN; sTarget = Double.NaN; sLastFix = Double.NaN
+            lastGoodS = Double.NaN; missedFixes = 0
             lastFixPos = np; lastFixRecvMs = now
             isOffRoute = true; transitioningToRoute = false
             return true
@@ -372,17 +439,55 @@ internal class VehicleMotion(
         }
 
         val dtFixSec = if (lastFixRecvMs > 0L) ((now - lastFixRecvMs) / 1000.0).coerceIn(1.0, 30.0) else 6.0
-        val proj = r.project(
+        // Oporou pro hledání je poslední FIX na trase (ne vykreslená, předsazená poloha): ta se pohybuje
+        // jen podle skutečných dat a nepředbíhá, takže okno nikdy neujede od reality.
+        val trackS = if (!sLastFix.isNaN()) sLastFix else sCurr
+        val tracked = !(sCurr.isNaN() || isOffRoute)
+        var proj = r.project(
             p = np,
-            nearS = if (sCurr.isNaN() || isOffRoute) null else sCurr,
+            nearS = if (tracked) trackS else null,
             heading = heading,
             moveVec = moveVec,
             isTrain = isTrain,
-            dtSec = dtFixSec
+            dtSec = dtFixSec,
+            expectedSpeed = vCruise,
+            hintS = if (!tracked && !lastGoodS.isNaN()) {
+                lastGoodS + vCruise * ((now - lastGoodMs) / 1000.0).coerceIn(0.0, 120.0) * 0.5
+            } else null
         )
+
+        // Kontrola shody: když dva fixy za sebou sedí na trasu špatně (> POOR_FIT_M), asi jsme uvízli na špatném
+        // místě (např. po odlehlém fixu uskočila poloha o stovky metrů vpřed). Zkusíme okolí na obě strany.
+        var resynced = false
+        if (tracked && proj != null && proj.offsetMeters > POOR_FIT_M) {
+            poorFits++
+            if (poorFits >= 2) {
+                val alt = r.project(
+                    p = np, nearS = trackS, heading = heading, moveVec = moveVec, isTrain = isTrain,
+                    dtSec = dtFixSec, expectedSpeed = vCruise, wide = true
+                )
+                if (alt != null && alt.offsetMeters < POOR_FIT_M * 0.6 && alt.offsetMeters < proj.offsetMeters - 20.0) {
+                    proj = alt
+                    resynced = true
+                }
+                poorFits = 0
+            }
+        } else if (proj != null) {
+            poorFits = 0
+        }
+
+        if (proj == null && tracked && missedFixes < MAX_MISSED_FIXES) {
+            // Fix nesedí na trasu (šum GPS, krátký výpadek): zůstáváme na trase a pokračujeme predikcí,
+            // místo abychom po jednom špatném bodu zahodili trasu a pak hledali na celé délce (skok na jiné rameno).
+            missedFixes++
+            lastFixPos = np
+            lastFixRecvMs = now
+            return true
+        }
 
         if (proj == null) {
             // Vůz je mimo trasu (objížďka apod.) -> plynulá lineární animace na nový fix
+            if (!sCurr.isNaN() && !isOffRoute) { lastGoodS = sLastFix.takeUnless { it.isNaN() } ?: sCurr; lastGoodMs = now }
             planFallback(curPos, np, now, FAST_ANIM_DURATION_MS)
             to = np
             lastFixPos = np
@@ -392,7 +497,18 @@ internal class VehicleMotion(
             return true
         }
 
+        missedFixes = 0
         val sFix = proj.s
+        if (resynced) {
+            // oprava polohy po trase (ne přímkou): vykreslená poloha se přesadí na ověřené místo
+            sCurr = sFix
+            sLastFix = sFix
+            isCatchingUp = false
+            isDwelling = false
+            vCurrent = vCruise * 0.8
+        }
+        lastGoodS = sFix
+        lastGoodMs = now
         val targetPoint = r.pointAt(sFix)
 
         val isNearTerminus = sFix >= r.totalMeters - 40.0
@@ -453,6 +569,8 @@ internal class VehicleMotion(
             catchUpEndS = sFix
             catchUpStartPos = curPos
             catchUpT0 = 0L
+            // do 100 m za 1 s; delší doběh trvá úměrně déle (max. 3 s), jede se ale pořád PO TRASE
+            catchUpDurMs = ((sFix - sCurr) / 100.0 * 1000.0).coerceIn(FAST_ANIM_DURATION_MS, 3_000.0)
             isCatchingUp = true
             transitioningToRoute = false
             isDwelling = false
@@ -523,11 +641,17 @@ internal class VehicleMotion(
         if (isCatchingUp) {
             if (catchUpT0 <= 0L) catchUpT0 = now
             val elapsedMs = now - catchUpT0
-            if (elapsedMs < FAST_ANIM_DURATION_MS) {
-                val f = (elapsedMs / FAST_ANIM_DURATION_MS).coerceIn(0.0, 1.0)
+            if (elapsedMs < catchUpDurMs) {
+                val f = (elapsedMs / catchUpDurMs).coerceIn(0.0, 1.0)
                 sCurr = catchUpStartS + (catchUpEndS - catchUpStartS) * f
+                // vždy po trase (ne po přímce, ta by u smyčky / kruháče řezala přes budovy);
+                // případný počáteční posun od osy trasy se plynule vytrácí
                 val routePos = r.pointAt(sCurr)
-                val pos = lerpLatLng(catchUpStartPos, routePos, f)
+                val axis0 = r.pointAt(catchUpStartS)
+                val pos = LatLng(
+                    routePos.latitude + (catchUpStartPos.latitude - axis0.latitude) * (1.0 - f),
+                    routePos.longitude + (catchUpStartPos.longitude - axis0.longitude) * (1.0 - f)
+                )
                 shown = pos
                 return pos
             } else {

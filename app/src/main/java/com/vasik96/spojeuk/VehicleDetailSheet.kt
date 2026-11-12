@@ -130,6 +130,7 @@ internal fun VehicleDetailBottomSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
+
                 val ageSec by produceState(vehicle.ageSec(), vehicle) {
                     while (true) {
                         value = vehicle.ageSec()

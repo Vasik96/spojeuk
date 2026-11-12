@@ -298,6 +298,16 @@ class TransitRepository(context: Context? = null) {
         geometry.forTrip(tt, tid)
     }
 
+    /** Pro ladění: z čeho se kreslí trasa tohoto vozidla (viz řádek „Trasa“ v detailu). */
+    suspend fun routeSourceInfo(v: Vehicle): String = withContext(Dispatchers.IO) {
+        val tt = store.ensure().timetable
+        val tid = v.tid.takeIf { it != 0 }
+            ?: tt.findTripId(v.cis, v.trip)
+            ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
+            ?: return@withContext "spoj z jízdního řádu nenalezen"
+        "spoj $tid, ${geometry.describe(tt, tid)}"
+    }
+
     suspend fun tripStopLocations(v: Vehicle): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
         val tt = store.ensure().timetable
         val tid = v.tid.takeIf { it != 0 }
