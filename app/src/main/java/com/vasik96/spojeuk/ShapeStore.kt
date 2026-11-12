@@ -74,6 +74,119 @@ class ShapeStore(
         return null
     }
 
+
+    // ───────── záložní párování tvaru (stejně jako web: lib/shapes.mjs → buildShapePack) ─────────
+    // gid spoje z jízdního řádu (jdf:trip:<linka>:<n>) se po přegenerování tras nemusí shodovat s trip_shape.gid.
+    // Pak se vezmou všechny tvary stejné linky (prefix jdf:trip:<linka>:) a vybere se ten, který nejlíp sedí na zastávky.
+
+    private val fuzzyCache = object : LinkedHashMap<String, List<Pair<Double, Double>>>(64, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, List<Pair<Double, Double>>>?
+        ): Boolean = size > 48
+    }
+    private val fuzzyMiss = HashSet<String>()
+
+    /**
+     * Tvar spoje: přesně podle [gid], jinak nejlépe sedící tvar téže linky podle [stops] (lat, lng v pořadí jízdy).
+     * Vlaky (czptt:) se nepárují, tam je shoda jen přesná.
+     */
+    @Synchronized
+    fun pointsFor(gid: String, stops: List<Pair<Double, Double>>): List<Pair<Double, Double>>? {
+        points(gid)?.let { return it }
+        if (gid.isBlank() || gid.startsWith("czptt:") || stops.size < 2 || !dbFile.exists()) return null
+        fuzzyCache[gid]?.let { return it }
+        if (gid in fuzzyMiss) return null
+        val found = runCatching { matchByRoute(gid, stops) }.getOrNull()
+        if (found != null) fuzzyCache[gid] = found else fuzzyMiss.add(gid)
+        return found
+    }
+
+    private fun routePrefix(gid: String): String? =
+        Regex("^jdf:trip:([^:]+):").find(gid)?.let { "jdf:trip:${it.groupValues[1]}" }
+
+    private fun openDb(): SQLiteDatabase? =
+        db ?: runCatching { SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY) }
+            .getOrNull()?.also { db = it }
+
+    private fun matchByRoute(gid: String, stops: List<Pair<Double, Double>>): List<Pair<Double, Double>>? {
+        val prefix = routePrefix(gid) ?: return null
+        val d = openDb() ?: return null
+        val shapeIds = ArrayList<Long>()
+        d.rawQuery(
+            "SELECT DISTINCT shape FROM trip_shape WHERE gid >= ? AND gid < ?",
+            arrayOf("$prefix:", "$prefix;")
+        ).use { c -> while (c.moveToNext()) shapeIds.add(c.getLong(0)) }
+
+        var best: List<Pair<Double, Double>>? = null
+        var bestMean = Double.MAX_VALUE
+        var bestMax = Double.MAX_VALUE
+        for (id in shapeIds) {
+            val pts = d.rawQuery("SELECT pts FROM shape WHERE id = ?", arrayOf(id.toString())).use { c ->
+                if (c.moveToFirst()) decode(c.getBlob(0)) else null
+            } ?: continue
+            val sc = shapeMatchScore(pts, stops) ?: continue
+            if (sc.first <= 100.0 && sc.second <= 350.0 &&
+                (sc.first < bestMean || (sc.first == bestMean && sc.second < bestMax))
+            ) { best = pts; bestMean = sc.first; bestMax = sc.second }
+        }
+        return best?.takeIf { it.size >= 2 }
+    }
+
+    /** (průměrná odchylka zastávky od tvaru, největší odchylka) pro přiřazení neklesající podél tvaru; null = nesedí. */
+    private fun shapeMatchScore(pts: List<Pair<Double, Double>>, stops: List<Pair<Double, Double>>): Pair<Double, Double>? {
+        if (pts.size < 2 || stops.size < 2) return null
+        val lat0 = pts[0].first
+        val lng0 = pts[0].second
+        val cosLat = Math.cos(Math.toRadians(lat0))
+        val n = pts.size
+        val xs = DoubleArray(n) { (pts[it].second - lng0) * 111320.0 * cosLat }
+        val ys = DoubleArray(n) { (pts[it].first - lat0) * 110540.0 }
+        val cum = DoubleArray(n)
+        for (i in 1 until n) cum[i] = cum[i - 1] + Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1])
+
+        class Cand(val s: Double, val dist: Double) { var cost = 0.0; var max = 0.0 }
+        var previous: List<Cand>? = null
+        for ((lat, lng) in stops) {
+            val x = (lng - lng0) * 111320.0 * cosLat
+            val y = (lat - lat0) * 110540.0
+            val cands = ArrayList<Cand>()
+            for (i in 0 until n - 1) {
+                val dx = xs[i + 1] - xs[i]
+                val dy = ys[i + 1] - ys[i]
+                val l2 = dx * dx + dy * dy
+                val t = if (l2 > 0.0) (((x - xs[i]) * dx + (y - ys[i]) * dy) / l2).coerceIn(0.0, 1.0) else 0.0
+                val dist = Math.hypot(x - xs[i] - t * dx, y - ys[i] - t * dy)
+                if (dist <= 500.0) cands.add(Cand(cum[i] + t * (cum[i + 1] - cum[i]), dist))
+            }
+            if (cands.isEmpty()) return null
+
+            val prev = previous
+            if (prev != null) {
+                var pi = 0
+                var bestPrev: Cand? = null
+                for (c in cands) {
+                    while (pi < prev.size && prev[pi].s <= c.s + 30.0) {
+                        val cand = prev[pi++]
+                        val bp = bestPrev
+                        if (bp == null || cand.cost < bp.cost || (cand.cost == bp.cost && cand.max < bp.max)) bestPrev = cand
+                    }
+                    val bp = bestPrev
+                    c.cost = if (bp != null) bp.cost + c.dist else Double.POSITIVE_INFINITY
+                    c.max = if (bp != null) maxOf(bp.max, c.dist) else Double.POSITIVE_INFINITY
+                }
+                previous = cands.filter { it.cost.isFinite() }
+                if (previous.isNullOrEmpty()) return null
+            } else {
+                for (c in cands) { c.cost = c.dist; c.max = c.dist }
+                previous = cands
+            }
+        }
+        val last = previous ?: return null
+        var best = last[0]
+        for (c in last) if (c.cost < best.cost || (c.cost == best.cost && c.max < best.max)) best = c
+        return (best.cost / stops.size) to best.max
+    }
+
     /** Pro ladění: proč má / nemá spoj přesný tvar (zobrazuje se v detailu vozidla). */
     @Synchronized
     fun explain(gid: String): String {
@@ -152,7 +265,7 @@ class ShapeStore(
                 if (!ok) error("stažený shapes.sqlite je poškozený nebo neúplný")
 
                 synchronized(this@ShapeStore) {
-                    db?.close(); db = null; cache.clear()
+                    db?.close(); db = null; cache.clear(); fuzzyCache.clear(); fuzzyMiss.clear()
                     if (!tmp.renameTo(dbFile)) { dbFile.delete(); tmp.renameTo(dbFile) }
                     metaFile.writeText(remote.toString())
                 }
