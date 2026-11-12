@@ -74,6 +74,17 @@ class ShapeStore(
         return null
     }
 
+    /** Pro ladění: proč má / nemá spoj přesný tvar (zobrazuje se v detailu vozidla). */
+    @Synchronized
+    fun explain(gid: String): String {
+        if (gid.isBlank()) return "spoj nemá gid"
+        if (!dbFile.exists()) return "soubor tras ($name.sqlite) v telefonu chybí"
+        val built = getBuiltDate() ?: "?"
+        val n = points(gid)?.size
+        return if (n != null) "přesný tvar ($n bodů, build $built)"
+        else "tvar pro tento spoj v $name.sqlite není (build $built), použije se OSRM"
+    }
+
     fun getBuiltDate(): String? {
         if (!metaFile.exists()) return null
         return runCatching { JSONObject(metaFile.readText()).optString("built") }.getOrNull()
@@ -96,7 +107,11 @@ class ShapeStore(
 
             val remote = JSONObject(httpGet(http, "$SHAPES_BASE_URL/$name.json"))
             val localBuilt = runCatching { JSONObject(metaFile.readText()).optString("built") }.getOrDefault("")
-            if (!forceDownload && dbFile.exists() && remote.optString("built") == localBuilt) {
+            val localSha = runCatching { JSONObject(metaFile.readText()).optString("sha256") }.getOrDefault("")
+            // stejné "built" nestačí: kdyby se soubor přegeneroval (např. ruční úpravy tras), musí se stáhnout i podle sha256
+            if (!forceDownload && dbFile.exists() && remote.optString("built") == localBuilt &&
+                remote.optString("sha256") == localSha
+            ) {
                 checkedFile.writeText(now.toString())
                 return@withLock false
             }

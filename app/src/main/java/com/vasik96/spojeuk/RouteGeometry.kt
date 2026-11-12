@@ -14,6 +14,13 @@ class RouteGeometry(
         return (if (trip.isTrain) trainShapes else shapes).points(trip.gid)
     }
 
+    /** Pro ladění: odkud se trasa spoje bere (přesný tvar, nebo OSRM a proč). */
+    fun describe(tt: Timetable, tid: Int): String {
+        val trip = tt.trips[tid] ?: return "spoj nenalezen"
+        if (trip.gid.isBlank()) return "spoj nemá gid (DB hasGid=${tt.hasGid}), použije se OSRM"
+        return (if (trip.isTrain) trainShapes else shapes).explain(trip.gid)
+    }
+
     /** Celá trasa spoje. Vlak bez tvaru se nikdy nevede po silnici (OSRM), jen přímo mezi zastávkami. */
     fun forTrip(tt: Timetable, tid: Int): LatLngList {
         shapeOf(tt, tid)?.let { return it }
