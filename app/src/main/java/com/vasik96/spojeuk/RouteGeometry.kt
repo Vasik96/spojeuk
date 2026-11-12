@@ -11,14 +11,21 @@ class RouteGeometry(
     /** Tvar spoje z odpovídající databáze (vlaky mají vlastní). */
     private fun shapeOf(tt: Timetable, tid: Int): LatLngList? {
         val trip = tt.trips[tid] ?: return null
-        return (if (trip.isTrain) trainShapes else shapes).points(trip.gid)
+        if (trip.isTrain) return trainShapes.points(trip.gid)
+        // přesný gid, a když v shapes.sqlite není (zastaralé jdf:trip:…), nejlépe sedící tvar téže linky podle zastávek
+        return shapes.pointsFor(trip.gid, stopCoords(tt, tid))
     }
 
     /** Pro ladění: odkud se trasa spoje bere (přesný tvar, nebo OSRM a proč). */
     fun describe(tt: Timetable, tid: Int): String {
         val trip = tt.trips[tid] ?: return "spoj nenalezen"
         if (trip.gid.isBlank()) return "spoj nemá gid (DB hasGid=${tt.hasGid}), použije se OSRM"
-        return (if (trip.isTrain) trainShapes else shapes).explain(trip.gid)
+        if (trip.isTrain) return trainShapes.explain(trip.gid)
+        val exact = shapes.explain(trip.gid)
+        if (shapes.points(trip.gid) != null) return exact
+        val fuzzy = shapes.pointsFor(trip.gid, stopCoords(tt, tid))
+        return if (fuzzy != null) "tvar nalezen podle zastávek téže linky (${fuzzy.size} bodů); přesný gid v DB chybí"
+        else exact
     }
 
     /** Celá trasa spoje. Vlak bez tvaru se nikdy nevede po silnici (OSRM), jen přímo mezi zastávkami. */
