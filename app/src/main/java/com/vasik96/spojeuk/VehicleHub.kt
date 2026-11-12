@@ -31,7 +31,7 @@ data class Fleet(
         val now = java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(nowMs), PRAGUE_ZONE)
         val rel = secondsSinceMidnight(day, now)
         if (rel < leg.t0 - 3600 || rel > leg.t1 + 3600) return null
-        val candidates = byTid[leg.tid]?.filter { it.state in 0..1 && it.delay > -30 && it.ageSec(nowMs) <= 180 } ?: return null
+        val candidates = byTid[leg.tid]?.filter { it.state != 255 && it.delay > -30 && it.ageSec(nowMs) <= 180 } ?: return null
         return candidates.firstOrNull { it.tripMatch == TripMatch.EXACT }
             ?: candidates.firstOrNull { it.tripMatch == TripMatch.HEURISTIC }
     }

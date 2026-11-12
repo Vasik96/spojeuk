@@ -305,7 +305,7 @@ class TransitRepository(context: Context? = null) {
             ?: tt.findTripId(v.cis, v.trip)
             ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
             ?: return@withContext "spoj z jízdního řádu nenalezen"
-        "spoj $tid, ${geometry.describe(tt, tid)}"
+        "spoj $tid, ${geometry.describe(tt, tid)}\ngid: ${tt.trips[tid]?.gid}"
     }
 
     suspend fun tripStopLocations(v: Vehicle): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {

@@ -108,32 +108,91 @@ class ShapeStore(
         db ?: runCatching { SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY) }
             .getOrNull()?.also { db = it }
 
+    /** (verze yymmdd, výluka?) z gid `jdf:trip:<linka>:<yymmdd>[:det]…`, nebo null. */
+    private fun gidVersion(gid: String): Pair<String, Boolean>? =
+        Regex("^jdf:trip:[^:]+:(\\d{6})(:det)?(?::|$)").find(gid)?.let { it.groupValues[1] to it.groupValues[2].isNotEmpty() }
+
     private fun matchByRoute(gid: String, stops: List<Pair<Double, Double>>): List<Pair<Double, Double>>? {
         val prefix = routePrefix(gid) ?: return null
         val d = openDb() ?: return null
-        val shapeIds = ArrayList<Long>()
+        val want = gidVersion(gid)
+
+        // shape id -> nejlepší "afinita" k hledanému gid:
+        // 2 = stejná verze jízdního řádu i stejný druh (běžný / výluka), 1 = jen stejný druh
+        // Tvar běžné trasy nikdy nepoužijeme pro výlukový spoj (a naopak): zastávky na něm sedí,
+        // ale úsek mezi nimi vede jinudy, což je přesně "část trasy je špatně".
+        val affinity = HashMap<Long, Int>()
         d.rawQuery(
-            "SELECT DISTINCT shape FROM trip_shape WHERE gid >= ? AND gid < ?",
+            "SELECT shape, gid FROM trip_shape WHERE gid >= ? AND gid < ?",
             arrayOf("$prefix:", "$prefix;")
-        ).use { c -> while (c.moveToNext()) shapeIds.add(c.getLong(0)) }
+        ).use { c ->
+            while (c.moveToNext()) {
+                val g = gidVersion(c.getString(1))
+                val a = when {
+                    want == null || g == null -> 1
+                    g.second != want.second -> continue
+                    g.first == want.first -> 2
+                    else -> 1
+                }
+                val id = c.getLong(0)
+                if (a > (affinity[id] ?: 0)) affinity[id] = a
+            }
+        }
 
         var best: List<Pair<Double, Double>>? = null
+        var bestAff = -1
         var bestMean = Double.MAX_VALUE
         var bestMax = Double.MAX_VALUE
-        for (id in shapeIds) {
+        for ((id, aff) in affinity) {
             val pts = d.rawQuery("SELECT pts FROM shape WHERE id = ?", arrayOf(id.toString())).use { c ->
                 if (c.moveToFirst()) decode(c.getBlob(0)) else null
             } ?: continue
             val sc = shapeMatchScore(pts, stops) ?: continue
-            if (sc.first <= 100.0 && sc.second <= 350.0 &&
-                (sc.first < bestMean || (sc.first == bestMean && sc.second < bestMax))
-            ) { best = pts; bestMean = sc.first; bestMax = sc.second }
+            if (sc.mean > 100.0 || sc.max > 350.0) continue
+            val better = aff > bestAff ||
+                    (aff == bestAff && (sc.mean < bestMean || (sc.mean == bestMean && sc.max < bestMax)))
+            if (better) {
+                // tvar delší než spoj (jiná varianta linky) se ořízne na úsek první až poslední zastávka
+                best = sliceBetween(pts, sc.sFirst, sc.sLast)
+                bestAff = aff; bestMean = sc.mean; bestMax = sc.max
+            }
         }
         return best?.takeIf { it.size >= 2 }
     }
 
-    /** (průměrná odchylka zastávky od tvaru, největší odchylka) pro přiřazení neklesající podél tvaru; null = nesedí. */
-    private fun shapeMatchScore(pts: List<Pair<Double, Double>>, stops: List<Pair<Double, Double>>): Pair<Double, Double>? {
+    private class MatchScore(val mean: Double, val max: Double, val sFirst: Double, val sLast: Double)
+
+    /** Úsek tvaru mezi kumulativními vzdálenostmi [a, b] (m od začátku). */
+    private fun sliceBetween(pts: List<Pair<Double, Double>>, a: Double, b: Double): List<Pair<Double, Double>> {
+        if (pts.size < 2 || b <= a) return pts
+        val cosLat = Math.cos(Math.toRadians(pts[0].first))
+        val cum = DoubleArray(pts.size)
+        for (i in 1 until pts.size) {
+            cum[i] = cum[i - 1] + Math.hypot(
+                (pts[i].second - pts[i - 1].second) * 111320.0 * cosLat,
+                (pts[i].first - pts[i - 1].first) * 110540.0
+            )
+        }
+        if (a <= 1.0 && b >= cum.last() - 1.0) return pts
+        fun at(s: Double): Pair<Double, Double> {
+            if (s <= 0.0) return pts.first()
+            if (s >= cum.last()) return pts.last()
+            var i = 1
+            while (i < cum.size - 1 && cum[i] < s) i++
+            val seg = cum[i] - cum[i - 1]
+            val t = if (seg > 0.0) (s - cum[i - 1]) / seg else 0.0
+            return (pts[i - 1].first + t * (pts[i].first - pts[i - 1].first)) to
+                    (pts[i - 1].second + t * (pts[i].second - pts[i - 1].second))
+        }
+        val out = ArrayList<Pair<Double, Double>>()
+        out.add(at(a))
+        for (i in pts.indices) if (cum[i] > a && cum[i] < b) out.add(pts[i])
+        out.add(at(b))
+        return out
+    }
+
+    /** Průměrná a největší odchylka zastávek od tvaru (přiřazení neklesající podél tvaru) + pozice první a poslední zastávky na tvaru; null = nesedí. */
+    private fun shapeMatchScore(pts: List<Pair<Double, Double>>, stops: List<Pair<Double, Double>>): MatchScore? {
         if (pts.size < 2 || stops.size < 2) return null
         val lat0 = pts[0].first
         val lng0 = pts[0].second
@@ -144,7 +203,7 @@ class ShapeStore(
         val cum = DoubleArray(n)
         for (i in 1 until n) cum[i] = cum[i - 1] + Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1])
 
-        class Cand(val s: Double, val dist: Double) { var cost = 0.0; var max = 0.0 }
+        class Cand(val s: Double, val dist: Double) { var cost = 0.0; var max = 0.0; var s0 = 0.0 }
         var previous: List<Cand>? = null
         for ((lat, lng) in stops) {
             val x = (lng - lng0) * 111320.0 * cosLat
@@ -173,18 +232,19 @@ class ShapeStore(
                     val bp = bestPrev
                     c.cost = if (bp != null) bp.cost + c.dist else Double.POSITIVE_INFINITY
                     c.max = if (bp != null) maxOf(bp.max, c.dist) else Double.POSITIVE_INFINITY
+                    c.s0 = bp?.s0 ?: 0.0
                 }
                 previous = cands.filter { it.cost.isFinite() }
                 if (previous.isNullOrEmpty()) return null
             } else {
-                for (c in cands) { c.cost = c.dist; c.max = c.dist }
+                for (c in cands) { c.cost = c.dist; c.max = c.dist; c.s0 = c.s }
                 previous = cands
             }
         }
         val last = previous ?: return null
         var best = last[0]
         for (c in last) if (c.cost < best.cost || (c.cost == best.cost && c.max < best.max)) best = c
-        return (best.cost / stops.size) to best.max
+        return MatchScore(best.cost / stops.size, best.max, best.s0, best.s)
     }
 
     /** Pro ladění: proč má / nemá spoj přesný tvar (zobrazuje se v detailu vozidla). */
@@ -195,7 +255,25 @@ class ShapeStore(
         val built = getBuiltDate() ?: "?"
         val n = points(gid)?.size
         return if (n != null) "přesný tvar ($n bodů, build $built)"
-        else "tvar pro tento spoj v $name.sqlite není (build $built), použije se OSRM"
+        else "tvar pro tento spoj v $name.sqlite není (build $built), použije se OSRM\n${lineVersions(gid)}"
+    }
+
+    /** Pro ladění: jaké verze téže linky (a kolik spojů) shapes.sqlite zná, např. "261001: 120, 261105 výluka: 0". */
+    private fun lineVersions(gid: String): String {
+        val prefix = routePrefix(gid) ?: return ""
+        val d = openDb() ?: return ""
+        val counts = java.util.TreeMap<String, Int>()
+        runCatching {
+            d.rawQuery("SELECT gid FROM trip_shape WHERE gid >= ? AND gid < ?", arrayOf("$prefix:", "$prefix;")).use { c ->
+                while (c.moveToNext()) {
+                    val v = gidVersion(c.getString(0)) ?: continue
+                    val k = v.first + if (v.second) " výluka" else ""
+                    counts[k] = (counts[k] ?: 0) + 1
+                }
+            }
+        }
+        val want = gidVersion(gid)?.let { it.first + if (it.second) " výluka" else "" } ?: "?"
+        return "hledáno: $want; v $name.sqlite pro linku: " + (if (counts.isEmpty()) "nic" else counts.entries.joinToString { "${it.key}: ${it.value}" })
     }
 
     fun getBuiltDate(): String? {
