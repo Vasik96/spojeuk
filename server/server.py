@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# THIS SERVER IS DEPRECATED, refer to the rust server on https://github.com/Vasik96/spojeuk-server
+# THIS FILE IS DEPRECATED AND UNUSED, refer to https://github.com/Vasik96/spojeuk-server for the rust version
 
 """spoje-feed: drží poslední známé polohy vozidel z Portabo GetTraffic (DÚK) a z API DPMÚL.
 
