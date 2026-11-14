@@ -17,7 +17,7 @@ import kotlin.coroutines.cancellation.CancellationException
 /**
  * Jediný vstup pro UI (nahrazuje DukApi). Sám nic nedělá, jen deleguje:
  *  - jízdní řády a plánování  → [TimetableStore]
- *  - živé polohy              → [VehicleHub] (zdroje viz [VehicleSources])
+ *  - živé polohy              → [VehicleHub] (vlastní server, API v2: /api/vehicles)
  *  - trasy pro mapu           → [RouteGeometry]
  *  - nejbližší zastávky       → [StopLocator]
  */
@@ -32,7 +32,7 @@ class TransitRepository(context: Context? = null) {
     private val trainShapes by lazy { ShapeStore(store.dbFile.parentFile ?: File("/tmp"), context, "train_shapes") }
     private val geometry by lazy { RouteGeometry(shapes, trainShapes, osrm) }
     private val stopLocator = StopLocator(osrm)
-    private val hub = VehicleHub(VehicleSources.create(context), scope) { store.current?.timetable }
+    private val hub = VehicleHub(VehicleApi(), scope, context?.let { File(it.filesDir, "last_vehicles.json") }) { store.current?.timetable }
 
     @Volatile private var shapeUpgradeTried = false
 
@@ -258,18 +258,18 @@ class TransitRepository(context: Context? = null) {
 
     // ───────────────────────── živé polohy ─────────────────────────
 
-    /** Signál, že se na pozadí dotáhla čerstvá data od pomalého zdroje (DPMÚL). */
+    /** Zůstává kvůli UI; server odpovídá hned, takže se už nic nedotahuje na pozadí a tok nic nevysílá. */
     val vehicleUpdates get() = hub.updates
 
     /** Poslední sloučený stav bez nového dotazu. */
     fun currentVehicles(): List<Vehicle> = hub.fleet.vehicles
 
-    /** Rozjede dotazy na zdroje poloh hned při startu, ať pomalé API (DPMÚL, 10-15 s) odpovídá už před otevřením mapy. */
+    /** Stáhne polohy hned při startu, ať jsou na mapě už při jejím otevření. */
     suspend fun prewarmVehicles() {
         runCatching { hub.refresh() }
     }
 
-    /** Sloučené polohy ze všech zdrojů. Vyhodí výjimku, dokud žádný zdroj neodpověděl. */
+    /** Sloučené polohy ze všech zdrojů. Vyhodí výjimku, dokud server ještě nikdy neodpověděl. */
     suspend fun vehiclePositions(): List<Vehicle> = hub.refresh().vehicles
 
     suspend fun updateRealtime(log: (String) -> Unit = {}): List<Vehicle> {

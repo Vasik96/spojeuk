@@ -109,6 +109,23 @@ class SpojeAppState(
     var vehiclesLoaded by mutableStateOf(false)
     var mapError by mutableStateOf<String?>(null)
     var selectedVehicle by mutableStateOf<Vehicle?>(null)
+
+    /** Čas (elapsedRealtime) posledního kliknutí na vozidlo; smyčky markerů po tu dobu nic nepočítají, ať sheet naběhne hned. */
+    @Volatile var vehicleSelectedAtMs: Long = 0L
+
+    /** Zpožděný klik z mapy (onClick markeru): pokud tap už vozidlo vybral, nepřepisovat výběr jiným (sousedním) vozidlem. */
+    fun selectVehicleLate(v: Vehicle) {
+        if (android.os.SystemClock.elapsedRealtime() - vehicleSelectedAtMs < 1000L) return
+        selectVehicle(v)
+    }
+
+    fun selectVehicle(v: Vehicle) {
+        // tap vyhodnocený hned při zvednutí prstu + pozdější (zpožděný) klik z mapy => druhé volání ignorovat
+        if (selectedVehicle?.uid == v.uid) return
+        vehicleSelectedAtMs = android.os.SystemClock.elapsedRealtime()
+        android.util.Log.d("SheetLag", "selectVehicle: +${vehicleSelectedAtMs - TouchDiag.lastUpAt} ms od zvednutí prstu")
+        selectedVehicle = v
+    }
     var tripRoute by mutableStateOf<List<LatLng>>(emptyList())
     var tripRouteSegments by mutableStateOf<List<List<LatLng>>>(emptyList())
     var tripStops by mutableStateOf<List<LatLng>>(emptyList())
@@ -222,8 +239,9 @@ class SpojeAppState(
     var focusedTripVehicle by mutableStateOf<Vehicle?>(null)
     var focusedTripRef by mutableStateOf<TripRef?>(null)
 
-    /** Najde v novém seznamu stejný vůz jako [cur]. Primárně podle source + id (vehicleNumber) nebo sameVehicleId. */
+    /** Najde v novém seznamu stejný vůz jako [cur]. Primárně podle uid ze serveru, pak source + id nebo sameVehicleId. */
     private fun rematch(list: List<Vehicle>, cur: Vehicle): Vehicle? {
+        list.firstOrNull { it.serverUid.isNotEmpty() && it.uid == cur.uid }?.let { return it }
         if (cur.id != 0) {
             return list.firstOrNull { it.source == cur.source && it.id == cur.id }
                 ?: list.firstOrNull { it.id != 0 && sameVehicleId(it.id, cur.id) }

@@ -127,8 +127,8 @@ enum class Segment(val label: String) {
 enum class TripMatch { NONE, HEURISTIC, EXACT }
 
 /**
- * Jedna poloha vozu, nezávislá na zdroji. Zdroj vyplní jen to,     co zná;
- * [tid], [tripMatch] a (u heuristiky) [cis]/[trip] doplní později VehicleHub.
+ * Jedna poloha vozu, nezávislá na zdroji (sloučená serverem). [tid], [tripMatch] a (u heuristiky)
+ * [cis]/[trip] doplní později VehicleHub.
  */
 data class Vehicle(
     val source: String,
@@ -153,6 +153,12 @@ data class Vehicle(
     val tripMatch: TripMatch = TripMatch.NONE,
     val station: Int = 0,
     val finalStation: Int = 0,
+    /** Zdroje, ze kterých server polohu sloučil (první = ten, jehož poloha vyhrála). */
+    val sources: List<String> = emptyList(),
+    /** ID vozu v jednotlivých zdrojích ("dpmul:451", "duk:300451"). */
+    val ids: List<String> = emptyList(),
+    /** Stabilní klíč vozu ze serveru: stejný i když se vítězný zdroj změní (DPMÚL 451 ↔ DÚK 300451). */
+    val serverUid: String = "",
 ) {
     init {
         if (id == 200 && (source == "duk" || source == "dpmul")) {
@@ -161,7 +167,7 @@ data class Vehicle(
     }
 
     /** Stabilní klíč napříč zdroji (čísla vozů se mezi zdroji mohou překrývat). */
-    val uid: String get() = "$source:" + if (id != 0) id.toString() else "$lat,$lng"
+    val uid: String get() = serverUid.ifEmpty { "$source:" + if (id != 0) id.toString() else "$lat,$lng" }
 
     fun ageSec(nowMs: Long = System.currentTimeMillis()): Long = maxOf(0L, (nowMs - observedAtMs) / 1000)
 }

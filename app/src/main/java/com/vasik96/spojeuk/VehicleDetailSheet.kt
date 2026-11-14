@@ -2,7 +2,28 @@
 
 package com.vasik96.spojeuk
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animate
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -21,7 +42,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Accessible
 import androidx.compose.material.icons.filled.AcUnit
-import androidx.compose.material.icons.filled.Accessible
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.Train
 import androidx.compose.material3.Button
@@ -30,8 +50,6 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -64,14 +82,24 @@ internal fun VehicleDetailBottomSheet(
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
 
-    val sheetState = rememberModalBottomSheetState(
-        skipPartiallyExpanded = true
-    )
+    // diagnostika: kolik ms od kliku do první kompozice sheetu / do začátku animace
+    val clickAt = appState.vehicleSelectedAtMs
+    androidx.compose.runtime.SideEffect {
+        android.util.Log.d("SheetLag", "composed +${android.os.SystemClock.elapsedRealtime() - clickAt} ms od kliku")
+    }
+
+    LaunchedEffect(Unit) {
+        androidx.compose.runtime.withFrameNanos { }
+        android.util.Log.d("SheetLag", "1. snímek po kliku +${android.os.SystemClock.elapsedRealtime() - clickAt} ms")
+        androidx.compose.runtime.withFrameNanos { }
+        android.util.Log.d("SheetLag", "2. snímek po kliku +${android.os.SystemClock.elapsedRealtime() - clickAt} ms")
+        androidx.compose.runtime.withFrameNanos { }
+        android.util.Log.d("SheetLag", "3. snímek po kliku +${android.os.SystemClock.elapsedRealtime() - clickAt} ms")
+    }
 
     var tripInfo by remember(vehicle.uid) { mutableStateOf<VehicleTripInfo?>(null) }
 
     val currentVehicle by rememberUpdatedState(vehicle)
-
 
     LaunchedEffect(vehicle.uid) {
         while (true) {
@@ -81,11 +109,8 @@ internal fun VehicleDetailBottomSheet(
             delay(10_000.milliseconds)
         }
     }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
-    ) {
+
+    InlineBottomSheet(onDismiss = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -116,7 +141,7 @@ internal fun VehicleDetailBottomSheet(
             ) {
                 Text(
                     if (vehicle.id != 0) {
-                        "ID vozidla: ${vehicle.uid}"
+                        "ID vozidla: ${vehicle.source}:${vehicle.id}"
                     } else {
                         "ID vozidla: není dostupné"
                     },
@@ -129,18 +154,6 @@ internal fun VehicleDetailBottomSheet(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-
-
-                // Trasa: ... nechat to tady kdyby nahodou byly zase nejaky trasy zniceny tak je to pro diagnostiku
-                /*
-                val routeInfo by produceState("zjišťuji…", vehicle.tid, vehicle.cis, vehicle.trip) {
-                    value = runCatching { api.routeSourceInfo(vehicle) }.getOrDefault("nelze zjistit")
-                }
-                Text(
-                    "Trasa: $routeInfo",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )*/
 
                 val ageSec by produceState(vehicle.ageSec(), vehicle) {
                     while (true) {
@@ -270,6 +283,91 @@ private fun FeatureChip(icon: androidx.compose.ui.graphics.vector.ImageVector, t
             Icon(icon, null, Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
             Text(text, style = MaterialTheme.typography.labelLarge)
+        }
+    }
+}
+
+/**
+ * Bottom sheet přímo v kompozici (bez Dialog okna). ModalBottomSheet otevírá nové okno nad mapou (GL surface),
+ * což na zařízení trvalo 0,5–1 s, než se vůbec začala hrát animace. Tohle naběhne hned.
+ * Scrim, tažení dolů pro zavření, tlačítko zpět.
+ */
+@Composable
+internal fun InlineBottomSheet(
+    onDismiss: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val shown = remember { Animatable(0f) }          // 0 = schováno, 1 = zobrazeno
+    var dragPx by remember { mutableFloatStateOf(0f) }
+    var heightPx by remember { mutableIntStateOf(0) }
+    var closing by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) { shown.animateTo(1f, tween(220, easing = androidx.compose.animation.core.LinearOutSlowInEasing)) }
+
+    fun dismiss() {
+        if (closing) return
+        closing = true
+        scope.launch {
+            shown.animateTo(0f, tween(200))
+            onDismiss()
+        }
+    }
+
+    BackHandler { dismiss() }
+
+    Box(Modifier.fillMaxSize()) {
+        // scrim
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = shown.value }
+                .background(Color.Black.copy(alpha = 0.32f))
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { dismiss() }
+        )
+
+        Surface(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .onSizeChanged { heightPx = it.height }
+                .graphicsLayer {
+                    alpha = if (heightPx == 0) 0f else 1f
+                    translationY = (1f - shown.value) * heightPx + dragPx
+                }
+                .pointerInput(Unit) { detectTapGestures { } }
+                .draggable(
+                    orientation = Orientation.Vertical,
+                    state = rememberDraggableState { d -> dragPx = (dragPx + d).coerceAtLeast(0f) },
+                    onDragStopped = { velocity ->
+                        if (dragPx > heightPx * 0.3f || velocity > 1500f) {
+                            closing = true
+                            scope.launch {
+                                animate(dragPx, heightPx.toFloat(), animationSpec = tween(160)) { v, _ -> dragPx = v }
+                                onDismiss()
+                            }
+                        } else {
+                            scope.launch { animate(dragPx, 0f, animationSpec = tween(160)) { v, _ -> dragPx = v } }
+                        }
+                    }
+                ),
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            tonalElevation = 1.dp,
+            shadowElevation = 8.dp
+        ) {
+            Column(Modifier.navigationBarsPadding()) {
+                // drag handle
+                Box(
+                    Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .padding(top = 10.dp, bottom = 4.dp)
+                        .width(32.dp)
+                        .height(4.dp)
+                        .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), RoundedCornerShape(2.dp))
+                )
+                content()
+            }
         }
     }
 }

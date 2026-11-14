@@ -44,6 +44,10 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Lifecycle
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -93,7 +97,7 @@ internal fun SpojeApp() {
     // spojení na routovací servery rovnou při startu (první hledání nejbližší zastávky pak není pomalé)
     LaunchedEffect(Unit) { runCatching { api.warmUpRouting() } }
 
-    // živé polohy rovnou při startu: DPMÚL API odpovídá 10-15 s, tak ať běží dřív, než uživatel otevře mapu
+    // živé polohy rovnou při startu, ať jsou na mapě hned při jejím otevření
     LaunchedEffect(api, appState.enabledVehicleSources) {
         api.prewarmVehicles()
         val curr = api.currentVehicles()
@@ -105,7 +109,28 @@ internal fun SpojeApp() {
         }
     }
 
-    // pomalý zdroj (DPMÚL) dokončil dotaz na pozadí dřív, než uživatel otevřel mapu
+    // po návratu do appky (minimalizace, zamčený telefon) se polohy stáhnou hned jednou, ne až za dalších pár sekund;
+    // zobrazené polohy mezitím zůstávají, a hub navíc hlídá, aby dotazy nechodily častěji než jednou za 2 s
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, api) {
+        var firstResume = true
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            if (firstResume) { firstResume = false; return@LifecycleEventObserver } // start appky řeší prewarm
+            scope.launch {
+                runCatching { api.vehiclePositions() }.onSuccess { list ->
+                    appState.updateVehicles(list)
+                    appState.heldCount = api.heldCount()
+                    appState.vehicleSource = api.sourceLabel()
+                    appState.vehiclesLoaded = true
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // (kompatibilita) dřív se tu čekalo na pomalý zdroj na pozadí; server už odpovídá hned
     LaunchedEffect(api) {
         api.vehicleUpdates.collect {
             if (appState.vehicles.isEmpty()) {
@@ -373,6 +398,11 @@ internal fun SpojeApp() {
                             }
                         }
                     }
+                }
+
+                // bottom sheet vozidla nad celým UI (i nad spodní lištou), ale bez Dialog okna => naběhne hned
+                if (appState.selectedTab == 1) {
+                    SelectedVehicleSheet(api, appState)
                 }
 
                 AnimatedVisibility(

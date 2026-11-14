@@ -339,6 +339,7 @@ internal class VehicleMotion(
     // Detekce stání na konečné / na místě
     private var isStationary = false
     private var stationaryFixCount = 0
+    private var realtimeMoveCount = 0
     private var lastFixPos: LatLng? = null
 
     // Poslední jistá pozice na trase (pro znovunalezení po výpadku) a počet fixů v řadě, které na trasu nesedly
@@ -428,6 +429,12 @@ internal class VehicleMotion(
         }
 
         val dtFixSec = if (lastFixRecvMs > 0L) ((now - lastFixRecvMs) / 1000.0).coerceIn(1.0, 30.0) else 6.0
+
+        if (lastFixPos != null && moveDist >= 8.0) {
+            realtimeMoveCount++
+        } else if (lastFixPos != null && moveDist < 4.0) {
+            realtimeMoveCount = 0
+        }
 
         val r = route
         if (!predict || r == null) {
@@ -577,19 +584,35 @@ internal class VehicleMotion(
         if (isStat) vCurrent = 0.0
 
         if (sFix > sCurr + 1.0 && !isStat) {
-            // Realtime pozice je napřed oproti predikci -> 1s animace k realtime pozici,
-            // od které pak predikce plynule pokračuje s tipováním, kde vůz je.
+            if (sFix - sCurr > 150.0) {
+                // Skok/výpadek/první načtení trasy s velkým odstupem (>150 m): okamžitá přesynchronizace sCurr na sFix (žádný zběsilý sprint po trase!)
+                sCurr = sFix
+                sLastFix = sFix
+                isCatchingUp = false
+                planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
+                to = targetPoint
+                transitioningToRoute = true
+            } else {
+                // Realtime pozice je mírně napřed oproti predikci -> krátká plynulá animace k realtime pozici po trase
+                planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
+                to = targetPoint
+                catchUpStartS = sCurr
+                catchUpEndS = sFix
+                catchUpStartPos = curPos
+                catchUpT0 = 0L
+                catchUpDurMs = ((sFix - sCurr) / 100.0 * 1000.0).coerceIn(FAST_ANIM_DURATION_MS, 3_000.0)
+                isCatchingUp = true
+                transitioningToRoute = false
+                isDwelling = false
+            }
+        } else if (sFix < sCurr - 150.0 && !isStat) {
+            // Predikce předběhla reálný fix o více než 150 m: okamžité přenastavení na sFix
+            sCurr = sFix
+            sLastFix = sFix
+            isCatchingUp = false
             planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
             to = targetPoint
-            catchUpStartS = sCurr
-            catchUpEndS = sFix
-            catchUpStartPos = curPos
-            catchUpT0 = 0L
-            // do 100 m za 1 s; delší doběh trvá úměrně déle (max. 3 s), jede se ale pořád PO TRASE
-            catchUpDurMs = ((sFix - sCurr) / 100.0 * 1000.0).coerceIn(FAST_ANIM_DURATION_MS, 3_000.0)
-            isCatchingUp = true
-            transitioningToRoute = false
-            isDwelling = false
+            transitioningToRoute = true
         } else if (isStat) {
             isCatchingUp = false
             transitioningToRoute = false
@@ -712,10 +735,12 @@ internal class VehicleMotion(
             return p
         }
 
-        // Predikce dopředu po trase: kompenzace latence serverových dat (~3.0 s pro busy, ~5.0 s pro vlaky)
+        // Predikce dopředu po trase: kompenzace latence serverových dat, max. 120 m dopředu před posledním ověřeným fixem
         val leadSec = if (isTrain) 5.0 else 3.0
         val timeSinceFixSec = ((now - lastFixRecvMs) / 1000.0).coerceAtLeast(0.0)
-        val currentTargetS = (sLastFix + vCruise * (timeSinceFixSec + leadSec)).coerceAtMost(totalMeters)
+        val currentTargetS = (sLastFix + vCruise * (timeSinceFixSec + leadSec))
+            .coerceAtMost(sLastFix + 120.0)
+            .coerceAtMost(totalMeters)
 
         if (isDwelling) {
             if (now - dwellStartMs >= dwellDurationMs || (!sLastFix.isNaN() && sLastFix > dwellStopDist + 40.0)) {
@@ -798,6 +823,7 @@ internal class VehicleKeyer {
 
     private data class Prev(
         val key: String,
+        val uid: String,
         val source: String,
         val id: Int,
         val cis: String,
@@ -857,6 +883,7 @@ internal class VehicleKeyer {
                 val old = prev[p]
 
                 when {
+                    v.serverUid.isNotEmpty() && v.uid == old.uid -> true
                     v.id != 0 && old.id != 0 && sameVehicleId(v.id, old.id) -> true
                     old.source == v.source && v.id != 0 -> old.id == v.id
                     old.source == v.source && v.cis.isNotBlank() && v.trip.isNotBlank() ->
@@ -1001,6 +1028,7 @@ internal class VehicleKeyer {
 
             Prev(
                 key = out[i]!!,
+                uid = v.uid,
                 source = v.source,
                 id = v.id,
                 cis = v.cis,

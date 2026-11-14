@@ -37,12 +37,27 @@ object TripMatchers {
 
 /** Doplní vozu spoj z jízdního řádu (tid, cis/trip, případně linku). */
 object TripEnricher {
-    fun enrich(v: Vehicle, source: VehicleSource, tt: Timetable): Vehicle {
-        val m = source.tripMatcher.match(v, tt) ?: return v
+    private val dpmulMatcher = TripMatchers.byPosition(DPMUL_AGENCY_KEYWORDS)
+
+    /**
+     * Vůz je už sloučený ze zdrojů, takže se strategie volí podle něj: vlak podle čísla vlaku, autobus podle
+     * přesného čísla spoje (cis + trip z DÚK) a když chybí a vůz zná DPMÚL (jen poloha), hádá se podle polohy.
+     */
+    private fun match(v: Vehicle, tt: Timetable): TripMatchResult? = when {
+        v.train -> TripMatchers.byTrainNumber.match(v, tt)
+        else -> TripMatchers.byCisNumber.match(v, tt)
+            ?: if (v.source == SourceIds.DPMUL || SourceIds.DPMUL in v.sources) dpmulMatcher.match(v, tt) else null
+    }
+
+    /** Linku ze spoje přebírají vozy z DÚK a vlaky; DPMÚL má vlastní (správné) označení linky. */
+    private fun adoptsTimetableLine(v: Vehicle) = v.source == SourceIds.DUK || v.source == SourceIds.TRAIN
+
+    fun enrich(v: Vehicle, tt: Timetable): Vehicle {
+        val m = match(v, tt) ?: return v
         val trip = tt.trips[m.tid] ?: return v
         var out = v.copy(tid = m.tid, tripMatch = if (m.exact) TripMatch.EXACT else TripMatch.HEURISTIC)
         if (!m.exact) out = out.copy(cis = trip.cis.ifBlank { v.cis }, trip = trip.num.ifBlank { v.trip })
-        if (source.adoptsTimetableLine && trip.line.isNotBlank() && trip.line != "?") out = out.copy(line = trip.line)
+        if (adoptsTimetableLine(v) && trip.line.isNotBlank() && trip.line != "?") out = out.copy(line = trip.line)
 
         if (v.agency.isBlank() && trip.agency.isNotBlank()) {
             out = out.copy(agency = trip.agency)

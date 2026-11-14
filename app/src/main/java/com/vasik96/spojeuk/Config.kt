@@ -1,6 +1,6 @@
 package com.vasik96.spojeuk
 
-// Všechny ladicí konstanty na jednom místě. Zdroje poloh mají své URL u sebe (PortaboSource, DpmulSource).
+// Všechny ladicí konstanty na jednom místě. Polohy vozidel čte appka jen z vlastního serveru (SERVER_IP, API v2).
 
 /** Jednotná verze aplikace (BuildConfig.VERSION_NAME z build.gradle.kts / gradle.properties). */
 val APP_VERSION: String get() = BuildConfig.VERSION_NAME
@@ -37,3 +37,6 @@ const val NEXT_DAY_CUTOFF = 6 * 3600  // spoje po půlnoci, které se ještě be
 val DPMUL_AGENCY_KEYWORDS = listOf("dopravni podnik mesta usti", "dpmul")
 
 const val SERVER_IP = "http://37.46.211.70:8787"
+
+/** Všechna vozidla sloučená ze zdrojů (DPMÚL, DÚK, Správa železnic). */
+const val API_VEHICLES_URL = "$SERVER_IP/api/vehicles"

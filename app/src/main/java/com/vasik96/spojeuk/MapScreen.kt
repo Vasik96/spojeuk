@@ -16,7 +16,10 @@ import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -79,6 +82,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
@@ -148,6 +158,9 @@ private fun Vehicle.inUsteckyKraj() = lat in USTECKY_LAT && lng in USTECKY_LNG
 // Viditelná oblast (pro vynechání markerů mimo obrazovku) se přepočítává jen občas.
 private const val GOOGLE_VIEW_REFRESH_MS = 250L
 
+/** Jak dlouho po kliku na vozidlo se pozastaví pohyb markerů (otevírání bottom sheetu). */
+private const val SHEET_OPEN_GRACE_MS = 900L
+
 @SuppressLint("MissingPermission")
 @Composable
 internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, api: TransitRepository, active: Boolean) {
@@ -206,7 +219,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         }
     }
 
-    // pomalý zdroj (DPMÚL) dokončil dotaz na pozadí: zobraz ho hned, ne až v dalším kole pollingu
+    // (kompatibilita) dřív se tu zobrazoval pomalý zdroj dokončený na pozadí; server už odpovídá hned
     LaunchedEffect(active) {
         if (!active) return@LaunchedEffect
         api.vehicleUpdates.collect {
@@ -347,7 +360,10 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             || appState.focusTrip != null
             || phase != 0
 
-    val target = locked ?: appState.selectedVehicle
+    // uid zvýrazněného vozidla se čte JEN když se opravdu něco zvýrazňuje (phase != 0).
+    // Jinak by každý klik na vozidlo (a každé rematch při aktualizaci dat) rekomponoval celou mapu
+    // se všemi markery => ~1 s zpoždění, než se vůbec objeví bottom sheet.
+    val targetUid: String? = if (phase != 0) (locked ?: appState.selectedVehicle)?.uid else null
 
     val keyer = remember { VehicleKeyer() }
     val routes = remember(api) { VehicleRoutes(api) }
@@ -358,20 +374,16 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val hideOthers = appState.hideOtherVehiclesOnMap
     val mapMode = appState.mapModeFilter
     val activeVehicles: List<Pair<String, Vehicle>> = remember(
-        keyed, strictMode, hideOthers, locked, target, mapMode
+        keyed, strictMode, hideOthers, locked, mapMode
     ) {
         if (strictMode && hideOthers && locked != null) {
             val match = keyed.firstOrNull { it.second.uid == locked.uid }
             listOf(match ?: ("locked_${locked.uid}" to locked))
         } else {
             keyed.filter { (_, x) ->
-                val isTarget = target != null && x.uid == target.uid
-                // vybrané vozidlo zůstane vidět i při jiném filtru
-                isTarget || (
-                        mapMode.accepts(x.train) && (
-                                x.source != SpravaZeleznicSource.ID ||
-                                        x.inUsteckyKraj()
-                                )
+                mapMode.accepts(x.train) && (
+                        x.source != SourceIds.TRAIN ||
+                                x.inUsteckyKraj()
                         )
             }
         }
@@ -392,6 +404,8 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         while (true) {
             withFrameNanos { }
             val now = SystemClock.elapsedRealtime()
+            // po kliku na vozidlo chvíli nic nepočítat / nepřesouvat markery, ať má hlavní vlákno volno na otevření sheetu
+            if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
             hub.tick(now)
             if (now - viewAt >= GOOGLE_VIEW_REFRESH_MS || view == null) {
                 viewAt = now
@@ -433,7 +447,47 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
     val scheme = if (useDarkMap) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT
 
-    Box(modifier = modifier.fillMaxSize()) {
+    // Google: onClick markeru chodí až po vypršení double-tap timeoutu (~250-300 ms). Tap proto vyhodnocujeme sami
+    // při zvednutí prstu (jen pozorujeme události, nic nespotřebováváme => mapa funguje normálně).
+    val googleDensity = LocalDensity.current.density
+    val latestActive by rememberUpdatedState(activeVehicles)
+    val tapSlopPx = LocalViewConfiguration.current.touchSlop
+    val googleTapModifier = Modifier.pointerInput(appState.mapProvider) {
+        if (appState.mapProvider != MapProvider.GOOGLE) return@pointerInput
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            var valid = true
+            while (true) {
+                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                if (ev.changes.size > 1) valid = false
+                val c = ev.changes.firstOrNull { it.id == down.id } ?: break
+                if ((c.position - down.position).getDistance() > tapSlopPx) valid = false
+                if (c.changedToUp()) {
+                    if (valid && c.uptimeMillis - down.uptimeMillis <= 400) {
+                        val proj = cameraPositionState.projection
+                        if (proj != null) {
+                            val radius = 28f * googleDensity
+                            var best: Vehicle? = null
+                            var bestSq = radius * radius
+                            for ((k, v) in latestActive) {
+                                val pos = hub.positionOf(k) ?: LatLng(v.lat, v.lng)
+                                val sp = proj.toScreenLocation(pos)
+                                val dx = sp.x - down.position.x
+                                val dy = sp.y - down.position.y
+                                val d = dx * dx + dy * dy
+                                if (d <= bestSq) { bestSq = d; best = v }
+                            }
+                            best?.let { appState.selectVehicle(it) }
+                        }
+                    }
+                    break
+                }
+                if (!c.pressed) break
+            }
+        }
+    }
+
+    Box(modifier = modifier.fillMaxSize().then(googleTapModifier)) {
         if (appState.mapProvider == MapProvider.GOOGLE) {
             GoogleMap(
                 modifier = Modifier.fillMaxSize(),
@@ -560,16 +614,19 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
                 for ((vkey, v) in activeVehicles) {
                     key(vkey) {
-                        val iconPhase = if (target != null && v.uid == target.uid) phase else 0
+                        val iconPhase = if (targetUid != null && v.uid == targetUid) phase else 0
+                        val isStale = v.ageSec() >= 60
+                        val alpha = if (isStale) 0.65f else 1.0f
                         val icon = remember(v.line, v.train, v.delay > 3, iconPhase) {
                             markerDescriptor(context, v.line, v.train, v.delay, iconPhase)
                         }
                         Marker(
                             state = hub.markerState(vkey, v),
                             icon = icon,
+                            alpha = alpha,
                             anchor = Offset(0.5f, 0.5f),
                             zIndex = if (iconPhase != 0) 3f else 2f,
-                            onClick = { appState.selectedVehicle = v; true }
+                            onClick = { appState.selectVehicleLate(v); true }
                         )
                     }
                 }
@@ -584,7 +641,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 primaryColor = MaterialTheme.colorScheme.primary,
                 showFullRoute = showFullRoute,
                 phase = phase,
-                target = target,
+                targetUid = targetUid,
                 onMapReady = { maplibreMapRef = it },
                 onStyleLoaded = { isMapReady = true },
                 onMapDisposed = {
@@ -730,12 +787,6 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
         ) { Icon(Icons.Default.MyLocation, contentDescription = "Moje poloha") }
 
-        if (active) {
-            appState.selectedVehicle?.let { v ->
-                VehicleDetailBottomSheet(v, api, appState) { appState.selectedVehicle = null }
-            }
-        }
-
         AnimatedVisibility(
             visible = !isMapReady,
             enter = fadeIn(tween(150)),
@@ -799,6 +850,7 @@ private fun ensureVehicleLayer(style: Style) {
                 PropertyFactory.iconImage(Expression.get("img")),
                 PropertyFactory.iconAllowOverlap(true),
                 PropertyFactory.iconIgnorePlacement(true),
+                PropertyFactory.iconOpacity(Expression.coalesce(Expression.get("opacity"), Expression.literal(1.0f))),
                 // vyšší hodnota = kreslí se výš (zvýrazněné vozidlo nahoře)
                 PropertyFactory.symbolSortKey(Expression.get("sort"))
             )
@@ -824,7 +876,7 @@ private fun MapLibreScreenContent(
     primaryColor: Color,
     showFullRoute: Boolean,
     phase: Int,
-    target: Vehicle?,
+    targetUid: String?,
     hasLocationPermission: Boolean,
     onMapReady: (MapLibreMap) -> Unit,
     onStyleLoaded: () -> Unit = {},
@@ -893,7 +945,7 @@ private fun MapLibreScreenContent(
     // ── stav vozidel ──
     val latestVehicles by rememberUpdatedState(activeVehicles)
     val latestPhase by rememberUpdatedState(phase)
-    val latestTarget by rememberUpdatedState(target)
+    val latestTarget by rememberUpdatedState(targetUid)
 
     val dirty = remember { AtomicBoolean(true) }
     // kamera se pohnula => přepočítat, která vozidla jsou ve viditelné oblasti
@@ -931,29 +983,75 @@ private fun MapLibreScreenContent(
                     }
 
                     // klik na vozidlo: výpočet vzdálenosti v Kotlinu (zcela async / neblokující, žádné queryRenderedFeatures)
-                    m.addOnMapClickListener { latLng ->
-                        if (m.style?.getLayer(VEH_LAYER) == null) return@addOnMapClickListener false
-                        val clickPt = m.projection.toScreenLocation(latLng)
+                    fun pickVehicle(latLng: MapLibreLatLng): Boolean {
+                        if (m.style?.getLayer(VEH_LAYER) == null) return false
+                        // POZOR: toScreenLocation je JNI volání do nativní mapy a při každém vozidle blokovalo hlavní vlákno
+                        // (soupeří s renderem, který každých 33 ms dostává nový GeoJSON) => ~1 s lagu po kliku.
+                        // Projekci proto voláme jen 3x (klik + dva posuny) a zbytek počítáme lokální lineární aproximací.
+                        val proj = m.projection
+                        val eps = 0.001
+                        val c0 = proj.toScreenLocation(latLng)
+                        val cLat = proj.toScreenLocation(MapLibreLatLng(latLng.latitude + eps, latLng.longitude))
+                        val cLng = proj.toScreenLocation(MapLibreLatLng(latLng.latitude, latLng.longitude + eps))
+                        val pxPerLatX = (cLat.x - c0.x) / eps
+                        val pxPerLatY = (cLat.y - c0.y) / eps
+                        val pxPerLngX = (cLng.x - c0.x) / eps
+                        val pxPerLngY = (cLng.y - c0.y) / eps
                         val radiusPx = 28f * density
+                        val radiusSq = (radiusPx * radiusPx).toDouble()
                         var clickedVehicle: Vehicle? = null
-                        var minSq = Float.MAX_VALUE
+                        var minSq = Double.MAX_VALUE
 
                         for ((k, v) in latestVehicles) {
                             val pos = hub.positionOf(k) ?: LatLng(v.lat, v.lng)
-                            val vehPt = m.projection.toScreenLocation(MapLibreLatLng(pos.latitude, pos.longitude))
-                            val dx = vehPt.x - clickPt.x
-                            val dy = vehPt.y - clickPt.y
+                            val dLat = pos.latitude - latLng.latitude
+                            val dLng = pos.longitude - latLng.longitude
+                            val dx = dLat * pxPerLatX + dLng * pxPerLngX
+                            val dy = dLat * pxPerLatY + dLng * pxPerLngY
                             val distSq = dx * dx + dy * dy
-                            if (distSq <= radiusPx * radiusPx && distSq < minSq) {
+                            if (distSq <= radiusSq && distSq < minSq) {
                                 minSq = distSq
                                 clickedVehicle = v
                             }
                         }
 
                         if (clickedVehicle != null) {
-                            appState.selectedVehicle = clickedVehicle
-                            true
-                        } else false
+                            appState.selectVehicle(clickedVehicle)
+                            return true
+                        }
+                        return false
+                    }
+
+                    // OnMapClickListener v MapLibre chodí až z onSingleTapConfirmed, tj. po vypršení timeoutu double-tapu
+                    // (~300-500 ms) => sheet se zdánlivě "nic nedělá". Tap proto vyhodnocujeme sami hned při zvednutí prstu.
+                    // Listener vrací false, takže mapa dál zpracovává gesta normálně.
+                    val tapSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+                    var downX = 0f
+                    var downY = 0f
+                    var downAt = 0L
+                    var tapValid = false
+                    mapView.setOnTouchListener { _, ev ->
+                        when (ev.actionMasked) {
+                            android.view.MotionEvent.ACTION_DOWN -> {
+                                downX = ev.x; downY = ev.y
+                                downAt = ev.eventTime
+                                tapValid = true
+                            }
+                            android.view.MotionEvent.ACTION_POINTER_DOWN -> tapValid = false
+                            android.view.MotionEvent.ACTION_MOVE -> {
+                                if (tapValid && (kotlin.math.abs(ev.x - downX) > tapSlop || kotlin.math.abs(ev.y - downY) > tapSlop)) {
+                                    tapValid = false
+                                }
+                            }
+                            android.view.MotionEvent.ACTION_CANCEL -> tapValid = false
+                            android.view.MotionEvent.ACTION_UP -> {
+                                if (tapValid && ev.eventTime - downAt <= android.view.ViewConfiguration.getLongPressTimeout()) {
+                                    pickVehicle(m.projection.fromScreenLocation(android.graphics.PointF(ev.x, ev.y)))
+                                }
+                                tapValid = false
+                            }
+                        }
+                        false
                     }
 
                     map = m
@@ -968,7 +1066,7 @@ private fun MapLibreScreenContent(
     )
 
     // změna vozidel / zvýraznění => překreslit zdroj
-    LaunchedEffect(activeVehicles, phase, target) { dirty.set(true) }
+    LaunchedEffect(activeVehicles, phase) { dirty.set(true) }
 
     LaunchedEffect(map) {
         val m = map ?: return@LaunchedEffect
@@ -1172,6 +1270,7 @@ private fun MapLibreScreenContent(
         while (true) {
             withFrameNanos { }
             val now = SystemClock.elapsedRealtime()
+            if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
             if (now - lastPush < VEHICLE_UPDATE_INTERVAL_MS) continue
 
             val moved = hub.tick(now)
@@ -1193,7 +1292,7 @@ private fun MapLibreScreenContent(
                 val list = ArrayList<VehicleDraw>(vehicles.size)
                 val missing = LinkedHashMap<String, Vehicle>()
                 for ((k, v) in vehicles) {
-                    val iconPhase = if (tgt != null && v.uid == tgt.uid) ph else 0
+                    val iconPhase = if (tgt != null && v.uid == tgt) ph else 0
                     val imgId = "veh|${v.line}|${v.train}|${v.delay > 3}|$iconPhase"
                     list += VehicleDraw(k, imgId, if (iconPhase != 0) 2 else 1)
                     if (!addedImages.contains(imgId) && imgId !in missing) missing[imgId] = v
@@ -1203,7 +1302,7 @@ private fun MapLibreScreenContent(
                 if (missing.isNotEmpty()) {
                     val newBitmaps = withContext(Dispatchers.Default) {
                         missing.map { (imgId, v) ->
-                            val iconPhase = if (tgt != null && v.uid == tgt.uid) ph else 0
+                            val iconPhase = if (tgt != null && v.uid == tgt) ph else 0
                             val bmp = markerBitmap(context, v.line, v.train, v.delay, iconPhase)
                                 .copy(Bitmap.Config.ARGB_8888, false).apply {
                                     setDensity(context.resources.displayMetrics.densityDpi)
@@ -1241,10 +1340,13 @@ private fun MapLibreScreenContent(
             for (d in draws) {
                 val p = hub.positionOf(d.key) ?: continue
                 if (view != null && !view.contains(p.latitude, p.longitude)) continue
+                val v = latestVehicles.firstOrNull { it.first == d.key }?.second
+                val isStale = v != null && v.ageSec() >= 60
                 features += Feature.fromGeometry(Point.fromLngLat(p.longitude, p.latitude)).also {
                     it.addStringProperty("img", d.imgId)
                     it.addStringProperty("key", d.key)
                     it.addNumberProperty("sort", d.sort)
+                    it.addNumberProperty("opacity", if (isStale) 0.65f else 1.0f)
                 }
             }
 
@@ -1339,5 +1441,13 @@ private fun sourceLabelText(label: String, normal: Color, bad: Color) = buildAnn
         if (i > 0) withStyle(SpanStyle(color = normal)) { append(", ") }
         val stale = "zastaral" in part.lowercase()
         withStyle(SpanStyle(color = if (stale) bad else normal)) { append(part) }
+    }
+}
+
+/** Čtení selectedVehicle je izolované tady, aby se při výběru / rematch nerekomponovala celá mapa. */
+@Composable
+internal fun SelectedVehicleSheet(api: TransitRepository, appState: SpojeAppState) {
+    appState.selectedVehicle?.let { v ->
+        VehicleDetailBottomSheet(v, api, appState) { appState.selectedVehicle = null }
     }
 }

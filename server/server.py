@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+# THIS SERVER IS DEPRECATED, refer to the rust server on https://github.com/Vasik96/spojeuk-server
+
 """spoje-feed: drží poslední známé polohy vozidel z Portabo GetTraffic (DÚK) a z API DPMÚL.
 
 DÚK (Portabo): každých POLL_S sekund stáhne feed, zapamatuje si každé použitelné vozidlo (podle ID) a když
