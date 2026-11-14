@@ -201,9 +201,18 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     // polling poloh
     LaunchedEffect(active) {
         if (!active) return@LaunchedEffect
-        if (appState.vehicles.isEmpty()) appState.vehiclesLoaded = false
+        // Pokud již máme vozidla z paměti/cache repozitáře, ihned je zobrazit, ať banner neukazuje spinner
+        val curr = api.currentVehicles()
+        if (curr.isNotEmpty()) {
+            appState.updateVehicles(curr)
+            appState.heldCount = api.heldCount()
+            appState.vehicleSource = api.sourceLabel()
+            appState.vehiclesLoaded = true
+        } else if (appState.vehicles.isEmpty()) {
+            appState.vehiclesLoaded = false
+        }
         while (true) {
-            runCatching { api.vehiclePositions() }
+            runCatching { api.vehiclePositions(maxAgeMs = 4_000) }
                 .onSuccess {
                     appState.updateVehicles(it)
                     appState.heldCount = api.heldCount()
@@ -219,15 +228,18 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         }
     }
 
-    // (kompatibilita) dřív se tu zobrazoval pomalý zdroj dokončený na pozadí; server už odpovídá hned
+    // Aktualizace poloh ihned, jakmile dorazí nové z hubu (na pozadí z launch prewarmu nebo refreshu)
     LaunchedEffect(active) {
         if (!active) return@LaunchedEffect
         api.vehicleUpdates.collect {
-            appState.updateVehicles(api.currentVehicles())
-            appState.heldCount = api.heldCount()
-            appState.vehicleSource = api.sourceLabel()
-            appState.mapError = null
-            appState.vehiclesLoaded = true
+            val curr = api.currentVehicles()
+            if (curr.isNotEmpty()) {
+                appState.updateVehicles(curr)
+                appState.heldCount = api.heldCount()
+                appState.vehicleSource = api.sourceLabel()
+                appState.mapError = null
+                appState.vehiclesLoaded = true
+            }
         }
     }
 

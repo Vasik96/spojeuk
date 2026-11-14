@@ -1,5 +1,6 @@
 package com.vasik96.spojeuk
 
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -45,6 +46,9 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
         .connectTimeout(4, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
         .callTimeout(10, TimeUnit.SECONDS)
+        .fastFallback(true)
+        .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
+        .retryOnConnectionFailure(true)
         .build()
 
     /** Surové tělo poslední úspěšné odpovědi (hub ho ukládá na disk, ať polohy přežijí restart appky). */

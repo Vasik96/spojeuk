@@ -87,8 +87,17 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 internal fun SpojeApp() {
     val context = LocalContext.current
     val appState = remember { SpojeAppState(context) }
-    val api = remember { TransitRepository(context) }
+    val api = remember { TransitRepository.get(context) }
     val scope = rememberCoroutineScope()
+
+    // Inicializovat vozidla v appState ihned z paměti/cache repozitáře (bez čekání na síť)
+    val initialVehicles = remember(api) { api.currentVehicles() }
+    if (initialVehicles.isNotEmpty() && appState.vehicles.isEmpty()) {
+        appState.updateVehicles(initialVehicles)
+        appState.heldCount = api.heldCount()
+        appState.vehicleSource = api.sourceLabel()
+        appState.vehiclesLoaded = true
+    }
 
     LaunchedEffect(api, appState) {
         api.setEnabledVehicleSources(appState.enabledVehicleSources)
@@ -101,7 +110,7 @@ internal fun SpojeApp() {
     LaunchedEffect(api, appState.enabledVehicleSources) {
         api.prewarmVehicles()
         val curr = api.currentVehicles()
-        if (curr.isNotEmpty() && appState.vehicles.isEmpty()) {
+        if (curr.isNotEmpty()) {
             appState.updateVehicles(curr)
             appState.heldCount = api.heldCount()
             appState.vehicleSource = api.sourceLabel()
@@ -130,17 +139,15 @@ internal fun SpojeApp() {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // (kompatibilita) dřív se tu čekalo na pomalý zdroj na pozadí; server už odpovídá hned
+    // Poslouchat aktualizace z repozitáře (jak z prewarmu při startu, tak z cache nebo periodického refreshu)
     LaunchedEffect(api) {
         api.vehicleUpdates.collect {
-            if (appState.vehicles.isEmpty()) {
-                val curr = api.currentVehicles()
-                if (curr.isNotEmpty()) {
-                    appState.updateVehicles(curr)
-                    appState.heldCount = api.heldCount()
-                    appState.vehicleSource = api.sourceLabel()
-                    appState.vehiclesLoaded = true
-                }
+            val curr = api.currentVehicles()
+            if (curr.isNotEmpty()) {
+                appState.updateVehicles(curr)
+                appState.heldCount = api.heldCount()
+                appState.vehicleSource = api.sourceLabel()
+                appState.vehiclesLoaded = true
             }
         }
     }

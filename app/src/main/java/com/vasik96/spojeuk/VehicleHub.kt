@@ -8,6 +8,7 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -99,12 +100,9 @@ class VehicleHub(
     @Volatile
     private var lastError: String? = null
 
-    /**
-     * Zůstává kvůli kompatibilitě s UI. Server odpovídá hned, takže se už nic nedotahuje na pozadí
-     * a tenhle tok nic nevysílá (data si UI bere při každém kole pollingu).
-     */
-    val updates: SharedFlow<Unit> =
-        MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST).asSharedFlow()
+    private val _updates = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    /** Tok upozorňující na aktualizaci vozidel (z cache nebo po dokončení dotazu). */
+    val updates: SharedFlow<Unit> = _updates.asSharedFlow()
 
     @Volatile
     private var enabledSourceIds: Set<String>? = null
@@ -159,6 +157,7 @@ class VehicleHub(
         val result = build(snap, now)
         fleet = result
         builtAtMs = now
+        _updates.tryEmit(Unit)
         return result
     }
 
@@ -240,11 +239,16 @@ class VehicleHub(
             val snap = VehicleApi.parse(f.readText(), savedAt)
             snapshot = snap
             fleet = build(snap, System.currentTimeMillis())
+            _updates.tryEmit(Unit)
         }
     }
 
     init {
         loadCache()
+        // Okamžitě při startu spustit refresh na pozadí, ať jsou data co nejrychleji čerstvá
+        scope.launch(Dispatchers.IO) {
+            runCatching { refresh() }
+        }
     }
 
     private companion object {
@@ -253,7 +257,7 @@ class VehicleHub(
         const val SERVER_STALE_MS = 20_000L
         const val KEEP_MS = 30 * 60_000L
         const val CACHE_SAVE_EVERY_MS = 30_000L
-        const val CACHE_MAX_AGE_MS = 10 * 60_000L
+        const val CACHE_MAX_AGE_MS = 30 * 60_000L
 
         /** Zdroje, které server zná (pořadí = pořadí v nastavení). */
         val SOURCE_NAMES = linkedMapOf(

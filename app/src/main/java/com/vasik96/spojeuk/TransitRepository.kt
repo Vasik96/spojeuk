@@ -269,8 +269,15 @@ class TransitRepository(context: Context? = null) {
         runCatching { hub.refresh() }
     }
 
-    /** Sloučené polohy ze všech zdrojů. Vyhodí výjimku, dokud server ještě nikdy neodpověděl. */
-    suspend fun vehiclePositions(): List<Vehicle> = hub.refresh().vehicles
+    /** Spustí stažení poloh asynchronně na pozadí hned při spuštění appky. */
+    fun prewarmVehiclesAsync() {
+        scope.launch {
+            runCatching { hub.refresh() }
+        }
+    }
+
+    /** Sloučené polohy ze všech zdrojů. S [maxAgeMs] > 0 vrátí stávající, pokud jsou dostatečně čerstvé. */
+    suspend fun vehiclePositions(maxAgeMs: Long = 0): List<Vehicle> = hub.refresh(maxAgeMs).vehicles
 
     suspend fun updateRealtime(log: (String) -> Unit = {}): List<Vehicle> {
         log("Obnovuji živá data vozidel…")
@@ -397,8 +404,16 @@ class TransitRepository(context: Context? = null) {
     suspend fun refineByRoad(lat: Double, lng: Double, cands: List<Pair<Stop, Double>>): Pair<Stop, Double>? =
         withContext(Dispatchers.IO) { stopLocator.refineByRoad(lat, lng, cands) }
 
-    private companion object {
+    companion object {
         const val TAG = "TransitRepository"
+
+        @Volatile
+        private var instance: TransitRepository? = null
+
+        fun get(context: Context): TransitRepository =
+            instance ?: synchronized(this) {
+                instance ?: TransitRepository(context.applicationContext).also { instance = it }
+            }
     }
 }
 

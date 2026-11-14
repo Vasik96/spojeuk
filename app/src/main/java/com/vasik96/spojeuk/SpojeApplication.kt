@@ -7,5 +7,7 @@ class SpojeApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         MapLibre.getInstance(this)
+        // Okamžitě při startu aplikace inicializovat repozitář a začít stahovat polohy vozidel
+        TransitRepository.get(this).prewarmVehiclesAsync()
     }
 }
