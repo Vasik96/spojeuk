@@ -35,6 +35,11 @@ android {
             "CARTO_API_KEY",
             "\"${localProperties.getProperty("CARTO_API_KEY") ?: ""}\""
         )
+        buildConfigField(
+            "String",
+            "MAPYCZ_API_KEY",
+            "\"${localProperties.getProperty("MAPYCZ_API_KEY") ?: ""}\""
+        )
     }
 
     testOptions {

@@ -198,6 +198,13 @@ private fun SettingsMain(
                                     selected = (appState.mapProvider == provider),
                                     onClick = {
                                         appState.updateMapProvider(provider)
+                                        if (provider == MapProvider.MAPYCZ && BuildConfig.MAPYCZ_API_KEY.isBlank()) {
+                                            android.widget.Toast.makeText(
+                                                appState.context,
+                                                "Chybí MAPYCZ_API_KEY v local.properties, zobrazí se OpenStreetMap",
+                                                android.widget.Toast.LENGTH_LONG
+                                            ).show()
+                                        }
                                         showMapProviderDialog = false
                                     },
                                     role = Role.RadioButton

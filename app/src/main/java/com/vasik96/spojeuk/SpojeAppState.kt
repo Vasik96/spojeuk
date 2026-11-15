@@ -56,7 +56,8 @@ enum class MapTheme(val label: String) {
 }
 
 enum class MapProvider(val label: String) {
-    MAPLIBRE("MapLibre (OpenStreetMap)"),
+    OPENSTREETMAP("OpenStreetMap"),
+    MAPYCZ("Mapy.cz"),
     GOOGLE("Google Maps")
 
 }
@@ -337,7 +338,13 @@ class SpojeAppState(
     }
 
     var mapProvider by mutableStateOf(
-        runCatching { MapProvider.valueOf(settingsPrefs.getString("map_provider", "MAPLIBRE") ?: "MAPLIBRE") }.getOrDefault(MapProvider.MAPLIBRE)
+        // "MAPLIBRE" je stará uložená hodnota (před přejmenováním na OpenStreetMap)
+        runCatching {
+            when (val saved = settingsPrefs.getString("map_provider", null)) {
+                null, "MAPLIBRE" -> MapProvider.OPENSTREETMAP
+                else -> MapProvider.valueOf(saved)
+            }
+        }.getOrDefault(MapProvider.OPENSTREETMAP)
     )
 
     fun updateMapProvider(provider: MapProvider) {

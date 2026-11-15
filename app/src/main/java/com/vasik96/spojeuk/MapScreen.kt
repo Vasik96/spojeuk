@@ -29,6 +29,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.material3.Surface
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -670,6 +671,23 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             )
         }
 
+        // Mapy.cz vyžaduje uvedení zdroje dat (logo Mapy.cz viz poznámka v README)
+        if (appState.mapProvider == MapProvider.MAPYCZ && BuildConfig.MAPYCZ_API_KEY.isNotBlank()) {
+            Text(
+                "© Seznam.cz a.s. a další, © OpenStreetMap",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(6.dp)
+                    .background(
+                        MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+                        RoundedCornerShape(6.dp)
+                    )
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+        }
+
         var showHeldInfo by remember { mutableStateOf(false) }
 
         ElevatedCard(
@@ -842,6 +860,27 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 }
 
 
+/** Mapy.cz (api.mapy.com) nemá vektorový styl ani tmavou variantu => rastrové dlaždice jako MapLibre style JSON. */
+private fun mapyStyleJson(dark: Boolean): String {
+    val tiles = "https://api.mapy.com/v1/maptiles/basic/256@2x/{z}/{x}/{y}?apikey=${BuildConfig.MAPYCZ_API_KEY}"
+    // tmavý režim: inverze jasu + otočení odstínu zpět (aproximace tmavé mapy z rastru)
+    val paint = if (dark)
+        """{"raster-brightness-min":1,"raster-brightness-max":0,"raster-hue-rotate":180,"raster-saturation":-0.35,"raster-contrast":-0.1}"""
+    else "{}"
+    return """
+        {"version":8,
+         "sources":{"mapy":{"type":"raster","tiles":["$tiles"],"tileSize":256,"maxzoom":19,
+            "attribution":"© Seznam.cz a.s. a další, © OpenStreetMap"}},
+         "layers":[{"id":"mapy-layer","type":"raster","source":"mapy","paint":$paint}]}
+    """.trimIndent()
+}
+
+private fun mapStyleBuilder(provider: MapProvider, dark: Boolean): Style.Builder =
+    if (provider == MapProvider.MAPYCZ && BuildConfig.MAPYCZ_API_KEY.isNotBlank())
+        Style.Builder().fromJson(mapyStyleJson(dark))
+    else
+        Style.Builder().fromUri(cartoStyleUrl(dark))
+
 private fun cartoStyleUrl(dark: Boolean): String {
     val name = if (dark) "dark-matter-gl-style" else "voyager-gl-style"
     return "https://basemaps.cartocdn.com/gl/$name/style.json?key=${BuildConfig.CARTO_API_KEY}"
@@ -921,7 +960,7 @@ private fun MapLibreScreenContent(
 
     var map by remember { mutableStateOf<MapLibreMap?>(null) }
     var styleVersion by remember { mutableIntStateOf(0) }
-    var appliedDark by remember { mutableStateOf<Boolean?>(null) }
+    var appliedStyleKey by remember { mutableStateOf<String?>(null) }
 
     // ── lifecycle (onDestroy se zavolá právě jednou) ──
     DisposableEffect(lifecycleOwner, mapView) {
@@ -1100,15 +1139,18 @@ private fun MapLibreScreenContent(
     }
 
     // ── styl se nastavuje jen jednou a jen při změně tématu ──
-    LaunchedEffect(useDarkMap, map) {
+    LaunchedEffect(useDarkMap, map, appState.mapProvider) {
         val m = map ?: return@LaunchedEffect
-        if (appliedDark == useDarkMap) {
+        val provider = appState.mapProvider
+        val rasterMapy = provider == MapProvider.MAPYCZ && BuildConfig.MAPYCZ_API_KEY.isNotBlank()
+        val key = "${if (rasterMapy) "mapy" else "carto"}:$useDarkMap"
+        if (appliedStyleKey == key) {
             if (m.style?.isFullyLoaded == true) onStyleLoaded()
             return@LaunchedEffect
         }
-        appliedDark = useDarkMap
-        m.setStyle(Style.Builder().fromUri(cartoStyleUrl(useDarkMap))) { style ->
-            if (useDarkMap) softenDark(style)
+        appliedStyleKey = key
+        m.setStyle(mapStyleBuilder(provider, useDarkMap)) { style ->
+            if (useDarkMap && !rasterMapy) softenDark(style)
             ensureVehicleLayer(style)
             dirty.set(true)
             styleVersion++
