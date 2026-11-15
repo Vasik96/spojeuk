@@ -1,10 +1,20 @@
 package com.vasik96.spojeuk
 
+import android.os.SystemClock
+import android.util.Log
+import okhttp3.Call
 import okhttp3.ConnectionPool
+import okhttp3.EventListener
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.UnknownHostException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /** Identifikátory zdrojů poloh tak, jak je posílá server (pole `source` / `sources`). */
@@ -36,16 +46,78 @@ data class ApiSnapshot(
     val receivedMs: Long,
 )
 
+/** Do logcatu (tag VehicleApi) vypíše, kde se u dotazu ztrácí čas: DNS / TCP / TLS / odpověď serveru / chyba. */
+private class TimingListener : EventListener() {
+    private val t0 = SystemClock.elapsedRealtime()
+    private var mark = t0
+    private val parts = StringBuilder()
+
+    private fun lap(name: String) {
+        val now = SystemClock.elapsedRealtime()
+        parts.append(name).append('=').append(now - mark).append("ms ")
+        mark = now
+    }
+
+    override fun dnsStart(call: Call, domainName: String) { mark = SystemClock.elapsedRealtime() }
+    override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<InetAddress>) {
+        lap("dns(${inetAddressList.joinToString { it.hostAddress ?: "?" }})")
+    }
+    override fun connectStart(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy) { mark = SystemClock.elapsedRealtime() }
+    override fun secureConnectEnd(call: Call, handshake: okhttp3.Handshake?) { lap("tls") }
+    override fun connectEnd(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy, protocol: okhttp3.Protocol?) { lap("connect($protocol)") }
+    override fun connectFailed(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy, protocol: okhttp3.Protocol?, ioe: IOException) {
+        lap("connectFAILED(${inetSocketAddress.address?.hostAddress}: ${ioe.javaClass.simpleName})")
+    }
+    override fun requestHeadersEnd(call: Call, request: Request) { mark = SystemClock.elapsedRealtime() }
+    override fun responseHeadersStart(call: Call) { lap("server-wait") }
+    override fun callEnd(call: Call) {
+        Log.d("VehicleApi", "OK celkem ${SystemClock.elapsedRealtime() - t0} ms: $parts")
+    }
+    override fun callFailed(call: Call, ioe: IOException) {
+        Log.w("VehicleApi", "SELHALO po ${SystemClock.elapsedRealtime() - t0} ms (${ioe.javaClass.simpleName}: ${ioe.message}): $parts")
+    }
+}
+
 /**
  * Klient vlastního serveru (API v2). Server sám dotahuje DPMÚL, DÚK i Správu železnic a vrací jedno sloučené pole
  * vozidel, appka už nepouští dotazy na třetí strany.
  */
 class VehicleApi(private val url: String = API_VEHICLES_URL) {
 
+    /**
+     * DNS s vlastní cache: IPv4 adresy mají přednost (rozbité IPv6 jinak zdržuje spojení) a úspěšný překlad se drží
+     * [DNS_TTL_MS], takže pomalé / nespolehlivé DNS (DuckDNS, Private DNS) neplatí každý dotaz. Když překlad selže,
+     * použije se poslední známá adresa. Po chybě spojení se cache zahodí ([invalidate]), aby se zachytila změna IP.
+     */
+    private class FallbackDns : Dns {
+        private class Entry(val addrs: List<InetAddress>, val atMs: Long)
+        private val cache = ConcurrentHashMap<String, Entry>()
+
+        fun invalidate() = cache.clear()
+
+        override fun lookup(hostname: String): List<InetAddress> {
+            val now = System.currentTimeMillis()
+            cache[hostname]?.let { if (now - it.atMs < DNS_TTL_MS) return it.addrs }
+            return try {
+                val sorted = Dns.SYSTEM.lookup(hostname).sortedBy { if (it is Inet4Address) 0 else 1 }
+                if (sorted.isNotEmpty()) cache[hostname] = Entry(sorted, now)
+                sorted
+            } catch (e: UnknownHostException) {
+                cache[hostname]?.addrs ?: throw e
+            }
+        }
+    }
+
+    private val dns = FallbackDns()
+
     private val client = OkHttpClient.Builder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .callTimeout(10, TimeUnit.SECONDS)
+        .dns(dns)
+        // delší než dřív: studená mobilní síť po startu / uspání potřebuje pár sekund na probuzení rádia
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .callTimeout(15, TimeUnit.SECONDS)
+        .eventListenerFactory { TimingListener() }
+        .pingInterval(10, TimeUnit.SECONDS)   // rozpozná mrtvé HTTP/2 spojení (po změně sítě / uspání) dřív než timeout
         .fastFallback(true)
         .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
         .retryOnConnectionFailure(true)
@@ -56,22 +128,36 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
     var lastBody: String = ""
         private set
 
+    /** Zahodí pooled spojení, ať další dotaz naváže čisté (po změně sítě nebo po selhání). */
+    fun resetConnections() {
+        client.connectionPool.evictAll()
+        dns.invalidate()
+    }
+
     /** Blokující dotaz (volat z IO). Vyhodí výjimku při chybě sítě / HTTP / JSON. */
     fun fetch(): ApiSnapshot {
         val request = Request.Builder().url(url)
             .header("User-Agent", USER_AGENT)
             .header("Accept", "application/json")
             .build()
-        return client.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) error("HTTP ${resp.code}")
-            val body = resp.body?.string().orEmpty()
-            val snap = parse(body, System.currentTimeMillis())
-            lastBody = body
-            snap
+        try {
+            return client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) error("HTTP ${resp.code}")
+                val body = resp.body?.string().orEmpty()
+                val snap = parse(body, System.currentTimeMillis())
+                lastBody = body
+                snap
+            }
+        } catch (e: Exception) {
+            // zaseknuté / mrtvé spojení by se jinak znovu použilo pro každý další dotaz, dokud se appka nerestartuje
+            resetConnections()
+            throw e
         }
     }
 
     companion object {
+        private const val DNS_TTL_MS = 5 * 60_000L
+
         fun parse(body: String, nowMs: Long): ApiSnapshot {
             val root = JSONObject(body)
             val arr = root.optJSONArray("vehicles") ?: JSONArray()

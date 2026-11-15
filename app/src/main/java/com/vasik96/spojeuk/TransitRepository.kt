@@ -269,6 +269,12 @@ class TransitRepository(context: Context? = null) {
         runCatching { hub.refresh() }
     }
 
+    /** Poslední dotaz na server poloh selhal (zobrazené polohy jsou jen z minula). */
+    fun vehicleFetchFailing(): Boolean = hub.isFailing
+
+    /** Volá se, když se objeví / změní síť: zahodí stará spojení a hned stáhne polohy. */
+    fun onNetworkAvailable() = hub.onNetworkAvailable()
+
     /** Spustí stažení poloh asynchronně na pozadí hned při spuštění appky. */
     fun prewarmVehiclesAsync() {
         scope.launch {

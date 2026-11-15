@@ -72,7 +72,7 @@ class HeadingTracker(private val minMoveM: Double = 15.0) {
 class VehicleHub(
     private val api: VehicleApi,
     @Suppress("unused") private val scope: CoroutineScope,
-    /** Sem se ukládá poslední odpověď serveru, ať jsou polohy hned k dispozici i po restartu appky. */
+    /** Dřívější cache poloh na disku; už se neukládá, soubor se jen smaže. */
     private val cacheFile: File? = null,
     private val timetable: () -> Timetable?,
 ) {
@@ -86,6 +86,7 @@ class VehicleHub(
     @Volatile
     private var lastSuccessMs = 0L
 
+    /** Kdy skončil poslední dotaz (úspěšný i neúspěšný); slouží k tomu, aby se souběžná volání nepřetáčela za sebou. */
     @Volatile
     private var lastFetchMs = 0L
 
@@ -100,6 +101,13 @@ class VehicleHub(
 
     @Volatile
     private var initialFetchDone = false
+
+    /** Aspoň jednou server odpověděl (na rozdíl od [initialFetchDone], které se nastaví i po vzdání startovních pokusů). */
+    @Volatile
+    private var everSucceeded = false
+
+    /** Poslední dotaz na server selhal (polohy se zatím drží z minula). */
+    val isFailing: Boolean get() = lastError != null
 
     @Volatile
     private var lastError: String? = null
@@ -128,34 +136,48 @@ class VehicleHub(
     /**
      * Zeptá se serveru a vrátí sloučený stav. S [maxAgeMs] > 0 vrátí poslední stav, pokud je dost čerstvý.
      * Dotazy nechodí častěji než jednou za [MIN_FETCH_INTERVAL_MS], i když se refresh volá víckrát (návrat do appky,
-     * polling, změna nastavení). Když server nejde, polohy se nemažou: drží se poslední známé (zdroje se označí jako
-     * zastaralé a stáří roste) až do [KEEP_MS]. Výjimku vyhodí jen tehdy, když server ještě nikdy neodpověděl.
+     * polling, změna nastavení). Když server nejde, drží se poslední známé polohy jen [KEEP_MS] (zdroje se označí jako zastaralé). Výjimku vyhodí jen tehdy, když server ještě nikdy neodpověděl.
      */
     suspend fun refresh(maxAgeMs: Long = 0): Fleet {
         val now = System.currentTimeMillis()
         if (maxAgeMs > 0 && fleet !== Fleet.EMPTY && lastSuccessMs > 0 && now - lastSuccessMs < maxAgeMs) return fleet
         return fetchMutex.withLock {
             val t = System.currentTimeMillis()
-            // souběžné volání už mohlo dotaz udělat
-            if (fleet !== Fleet.EMPTY && t - lastFetchMs < MIN_FETCH_INTERVAL_MS) return@withLock fleet
-            lastFetchMs = t
+            // souběžné volání už mohlo dotaz udělat (úspěšný i neúspěšný) – nečekat za něj znovu na další timeout
+            if (t - lastFetchMs < MIN_FETCH_INTERVAL_MS) {
+                if (fleet !== Fleet.EMPTY) return@withLock fleet
+                if (snapshot == null && lastError != null) throw IllegalStateException(lastError)
+            }
             try {
-                val raw = withContext(Dispatchers.IO) { api.fetch().also { saveCache(api.lastBody) } }
+                val raw = withContext(Dispatchers.IO) { api.fetch() }
                 val snap = raw.copy(vehicles = raw.vehicles.map { headings.track(it) })
                 snapshot = snap
                 lastError = null
                 initialFetchDone = true
+                everSucceeded = true
                 lastSuccessMs = System.currentTimeMillis()
                 withContext(Dispatchers.Default) { rebuild(snap, System.currentTimeMillis()) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                lastError = e.message
+                lastError = e.message ?: e.javaClass.simpleName
                 Log.w(TAG, "dotaz na server poloh selhal: ${e.message}")
                 val old = snapshot ?: throw IllegalStateException(e.message ?: "Server poloh neodpovídá")
                 withContext(Dispatchers.Default) { rebuild(old, System.currentTimeMillis()) }
+            } finally {
+                lastFetchMs = System.currentTimeMillis()
             }
         }
+    }
+
+    /**
+     * Síť se objevila / změnila (appka mohla startovat bez připojení, přepnutí Wi-Fi ↔ data): zahodí stará spojení
+     * a hned zkusí stáhnout polohy, bez čekání na další kolo pollingu.
+     */
+    fun onNetworkAvailable() {
+        api.resetConnections()
+        lastFetchMs = 0L
+        scope.launch(Dispatchers.IO) { runCatching { refresh() } }
     }
 
     @Synchronized
@@ -171,7 +193,7 @@ class VehicleHub(
         val active = snap.sources.filter { enabled == null || it.id in enabled }
         if (enabled != null && active.isEmpty()) return Fleet.EMPTY
 
-        // server nedostupný: poslední polohy se drží, ale zdroje se hlásí jako zastaralé; po KEEP_MS se zahodí.
+        // server nedostupný: poslední polohy se drží jen krátce (KEEP_MS), pak se zahodí.
         // Považovat zdroje za zastaralé až po úspěšném prvním stažení nebo po selhání opakovaných pokusů při startu.
         val serverStale = initialFetchDone && (now - snap.receivedMs > SERVER_STALE_MS)
         val dropped = now - snap.receivedMs > KEEP_MS
@@ -223,60 +245,38 @@ class VehicleHub(
         if (covered) 0 else r.heldCount
     }
 
-    // ───────── poslední odpověď na disku ─────────
-
-    @Volatile private var lastSavedMs = 0L
-
-    private fun saveCache(body: String) {
-        val f = cacheFile ?: return
-        val now = System.currentTimeMillis()
-        if (body.isEmpty() || now - lastSavedMs < CACHE_SAVE_EVERY_MS) return
-        lastSavedMs = now
-        runCatching { f.writeText(body) }
-    }
-
-    /** Po startu appky hned zobrazí poslední známé polohy (nejvýš [CACHE_MAX_AGE_MS] staré); čerstvé se stáhnou hned potom. */
-    private fun loadCache() {
-        val f = cacheFile ?: return
-        runCatching {
-            if (!f.exists()) return
-            val savedAt = f.lastModified()
-            if (System.currentTimeMillis() - savedAt > CACHE_MAX_AGE_MS) return
-            val snap = VehicleApi.parse(f.readText(), savedAt)
-            snapshot = snap
-            fleet = build(snap, System.currentTimeMillis())
-            _updates.tryEmit(Unit)
-        }
-    }
-
     init {
-        loadCache()
+        // starý soubor s polohami z minula už se nepoužívá: po startu se nikdy nezobrazují staré polohy
+        cacheFile?.let { runCatching { it.delete() } }
         // Okamžitě při startu spustit refresh na pozadí; při neúspěchu zopakovat s krátkým odstupem
         scope.launch(Dispatchers.IO) {
             var attempts = 0
-            while (!initialFetchDone && attempts < 3) {
+            while (!everSucceeded && attempts < STARTUP_MAX_ATTEMPTS) {
                 attempts++
                 runCatching { refresh() }
-                if (!initialFetchDone && attempts < 3) {
-                    delay(1_500L * attempts)
+                if (everSucceeded) break
+                if (attempts == STARTUP_GIVE_UP_STALE_AFTER && !initialFetchDone) {
+                    // po pár neúspěších označit polohy z cache jako zastaralé, ale dál zkoušet
+                    initialFetchDone = true
+                    snapshot?.let { snap ->
+                        withContext(Dispatchers.Default) { rebuild(snap, System.currentTimeMillis()) }
+                    }
                 }
+                // víc než MIN_FETCH_INTERVAL_MS, jinak by se další pokus zahodil jako "příliš brzy"
+                delay((MIN_FETCH_INTERVAL_MS + 1_000L * attempts).coerceAtMost(8_000L))
             }
-            if (!initialFetchDone) {
-                initialFetchDone = true
-                snapshot?.let { snap ->
-                    withContext(Dispatchers.Default) { rebuild(snap, System.currentTimeMillis()) }
-                }
-            }
+            initialFetchDone = true
         }
     }
 
     private companion object {
         const val TAG = "VehicleHub"
         const val MIN_FETCH_INTERVAL_MS = 2_000L
+        const val STARTUP_MAX_ATTEMPTS = 15
+        const val STARTUP_GIVE_UP_STALE_AFTER = 3
         const val SERVER_STALE_MS = 20_000L
-        const val KEEP_MS = 30 * 60_000L
-        const val CACHE_SAVE_EVERY_MS = 30_000L
-        const val CACHE_MAX_AGE_MS = 30 * 60_000L
+        /** Jak dlouho se po výpadku serveru drží poslední polohy v paměti (krátký škytnutí sítě); pak se mapa vyprázdní. */
+        const val KEEP_MS = 30_000L
 
         /** Zdroje, které server zná (pořadí = pořadí v nastavení). */
         val SOURCE_NAMES = linkedMapOf(

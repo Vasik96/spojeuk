@@ -219,14 +219,15 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     appState.updateVehicles(it)
                     appState.heldCount = api.heldCount()
                     appState.vehicleSource = api.sourceLabel()
-                    appState.mapError = null
+                    appState.mapError = if (api.vehicleFetchFailing()) "Polohy vozidel se nepodařilo načíst" else null
                 }
                 .onFailure {
                     if (it is CancellationException) throw it
                     appState.mapError = "Polohy vozidel se nepodařilo načíst"
                 }
             appState.vehiclesLoaded = true
-            delay(6_000)
+            // při výpadku zkoušet častěji, ať se polohy vrátí hned, jak server / síť zase jede
+            delay(if (api.vehicleFetchFailing()) 2_500 else 6_000)
         }
     }
 

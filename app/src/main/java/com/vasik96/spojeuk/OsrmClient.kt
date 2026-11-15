@@ -36,19 +36,24 @@ class OsrmClient(private val cacheDir: File) {
         }
     }
 
-    /** Trasa po silnici přes [stops]; při chybě vrátí původní zastávky (přímé úsečky). */
+    /**
+     * Trasa po silnici přes [stops]. Jako waypointy se posílají jen zastávky vzdálené aspoň [MIN_GAP_M] od předchozí
+     * (stejně jako na webu): každá další zastávka je další šance, že ji OSRM nenajde na silnici v okolí 30 m a odmítne
+     * celý dotaz (NoSegment) – celá linka by pak skončila jako rovné čáry. Když dotaz selže, zkusí se větší poloměr
+     * a až nakonec se rovně nakreslí jen ten úsek, který opravdu selhal; nepovedená trasa se neukládá do cache.
+     */
     fun pathFor(stops: List<Pair<Double, Double>>): List<Pair<Double, Double>> {
         if (stops.size < 2) return stops
 
-        // Zastávky spoje jako waypointy (vynecháme jen totožné zastávky < 10 m od sebe)
         val way = ArrayList<Pair<Double, Double>>()
         way.add(stops.first())
-        for (i in 1 until stops.size) {
-            if (distM(way.last(), stops[i]) >= 10.0) way.add(stops[i])
+        for (i in 1 until stops.size - 1) {
+            if (distM(way.last(), stops[i]) >= MIN_GAP_M) way.add(stops[i])
         }
-        if (way.size < 2) return stops
+        way.add(stops.last())
+        if (way.size < 2 || (way.size == 2 && distM(way[0], way[1]) < 10.0)) return stops
 
-        val key = md5("v3;" + way.joinToString(";") { "${it.first},${it.second}" })
+        val key = md5("v4;" + way.joinToString(";") { "${it.first},${it.second}" })
         val cacheFile = File(cacheDir, "routes/$key.json")
 
         if (cacheFile.exists()) {
@@ -59,44 +64,62 @@ class OsrmClient(private val cacheDir: File) {
                     val p = json.getJSONArray(i)
                     res.add(p.getDouble(0) to p.getDouble(1))
                 }
-                return res
+                if (res.size >= 2) return res
             }
         }
 
-        try {
-            val out = ArrayList<Pair<Double, Double>>()
-            for (i in 0 until way.size - 1 step 80) {
-                val chunk = way.subList(i, minOf(way.size, i + 81))
-                val coordsStr = chunk.joinToString(";") { String.format(Locale.US, "%.6f,%.6f", it.second, it.first) }
-                val radStr = List(chunk.size) { "30" }.joinToString(";")
-                val url = "https://router.project-osrm.org/route/v1/driving/$coordsStr" +
-                        "?overview=full&geometries=geojson&continue_straight=false&radiuses=$radStr"
-                val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
+        val out = ArrayList<Pair<Double, Double>>()
+        var allOk = true
+        var i = 0
+        while (i < way.size - 1) {
+            val chunk = way.subList(i, minOf(way.size, i + CHUNK + 1))
+            val routed = routeChunk(chunk)
+            if (routed != null) out.addAll(routed)
+            else { allOk = false; out.addAll(chunk) }   // jen tento úsek rovně, zbytek zůstane po silnici
+            i += CHUNK
+        }
+        if (out.size < 2) return stops
 
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return stops
-                    val body = resp.body?.string() ?: return stops
-                    val routes = JSONObject(body).optJSONArray("routes") ?: return stops
-                    if (routes.length() == 0) return stops
-                    val coords = routes.getJSONObject(0).optJSONObject("geometry")
-                        ?.optJSONArray("coordinates") ?: return stops
+        if (allOk) {
+            runCatching {
+                cacheFile.parentFile?.mkdirs()
+                val arr = JSONArray()
+                for (pt in out) arr.put(JSONArray().put(pt.first).put(pt.second))
+                cacheFile.writeText(arr.toString())
+            }
+        }
+        return out
+    }
+
+    /** Jeden OSRM dotaz přes [chunk]; při selhání s větším poloměrem a po chybě sítě ještě jednou. Null = nepovedlo se. */
+    private fun routeChunk(chunk: List<Pair<Double, Double>>): List<Pair<Double, Double>>? {
+        val coordsStr = chunk.joinToString(";") { String.format(Locale.US, "%.6f,%.6f", it.second, it.first) }
+        for (radius in RADII_M) {
+            val radStr = List(chunk.size) { radius.toString() }.joinToString(";")
+            val url = "https://router.project-osrm.org/route/v1/driving/$coordsStr" +
+                    "?overview=full&geometries=geojson&continue_straight=false&radiuses=$radStr"
+            try {
+                val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
+                val res = client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null     // typicky 400 NoSegment: zkusí se větší poloměr
+                    val body = resp.body?.string() ?: return@use null
+                    val routes = JSONObject(body).optJSONArray("routes")
+                    if (routes == null || routes.length() == 0) return@use null
+                    val coords = routes.getJSONObject(0).optJSONObject("geometry")?.optJSONArray("coordinates")
+                        ?: return@use null
+                    val list = ArrayList<Pair<Double, Double>>(coords.length())
                     for (j in 0 until coords.length()) {
                         val pt = coords.getJSONArray(j)
-                        out.add(pt.getDouble(1) to pt.getDouble(0))
+                        list.add(pt.getDouble(1) to pt.getDouble(0))
                     }
+                    list.takeIf { it.size >= 2 }
                 }
+                if (res != null) return res
+            } catch (e: Exception) {
+                android.util.Log.w("OsrmClient", "OSRM dotaz selhal: ${e.message}")
             }
-            if (out.isNotEmpty()) {
-                runCatching {
-                    cacheFile.parentFile?.mkdirs()
-                    val arr = JSONArray()
-                    for (pt in out) arr.put(JSONArray().put(pt.first).put(pt.second))
-                    cacheFile.writeText(arr.toString())
-                }
-                return out
-            }
-        } catch (e: Exception) { }
-        return stops
+        }
+        return null
     }
 
     private fun distM(a: Pair<Double, Double>, b: Pair<Double, Double>): Double =
@@ -198,6 +221,11 @@ class OsrmClient(private val cacheDir: File) {
 }
 
 private const val ROAD_ATTEMPTS = 3
+
+/** Zastávky blíž než tohle k předchozímu waypointu se do OSRM neposílají (stejně jako na webu). */
+private const val MIN_GAP_M = 700.0
+private const val CHUNK = 80
+private val RADII_M = listOf(30, 200)
 private val ROAD_HOSTS = listOf("https://routing.openstreetmap.de/", "https://router.project-osrm.org/")
 
 data class WalkRoute(
@@ -205,4 +233,3 @@ data class WalkRoute(
     val distanceM: Double,
     val minutes: Int
 )
-

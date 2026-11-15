@@ -293,6 +293,15 @@ internal class PathMeasure(
 /** Délka animace bez predikce z bodu A do bodu B (1 s). */
 private const val FAST_ANIM_DURATION_MS = 1_000.0
 
+/** Nejvýš o kolik metrů se vozidlo předběhne před poslední ověřený fix. */
+private const val MAX_LEAD_M = 120.0
+
+/** Jak dlouho po posledním fixu se do predikce ještě počítá čas (pak vůz čeká na další fix). */
+private const val MAX_PREDICT_SINCE_FIX_S = 12.0
+
+/** Poloha starší než tohle (s) se už nepředpovídá, vůz zůstává tam, kde ho server naposledy viděl. */
+private const val MAX_PREDICT_DATA_AGE_S = 45.0
+
 /** Skok delší než tohle není jízda (výměna vozu za jiný, chyba zdroje): bez animace. */
 private const val TELEPORT_M = 3_000.0
 
@@ -737,10 +746,15 @@ internal class VehicleMotion(
 
         // Predikce dopředu po trase: kompenzace latence serverových dat, max. 120 m dopředu před posledním ověřeným fixem
         val leadSec = if (isTrain) 5.0 else 3.0
-        val timeSinceFixSec = ((now - lastFixRecvMs) / 1000.0).coerceAtLeast(0.0)
-        val currentTargetS = (sLastFix + vCruise * (timeSinceFixSec + leadSec))
-            .coerceAtMost(sLastFix + 120.0)
-            .coerceAtMost(totalMeters)
+        // Čas od posledního fixu se do predikce počítá jen omezeně (MAX_PREDICT_SINCE_FIX_S): když nové fixy
+        // nechodí (server / síť nejde, poloha se nemění), vůz nesmí jet dál po trase až na konečnou.
+        val timeSinceFixSec = ((now - lastFixRecvMs) / 1000.0).coerceIn(0.0, MAX_PREDICT_SINCE_FIX_S)
+        // Stáří samotné polohy (ne kdy dorazila): stará poloha (cache po startu, držená z minula) se nepředpovídá vůbec,
+        // vůz mohl dávno stát nebo jet jinam.
+        val dataAgeSec = if (fixObsMs in 1..System.currentTimeMillis()) (System.currentTimeMillis() - fixObsMs) / 1000.0 else 0.0
+        val leadM = if (dataAgeSec > MAX_PREDICT_DATA_AGE_S) 0.0
+        else (vCruise * (timeSinceFixSec + leadSec)).coerceAtMost(MAX_LEAD_M)
+        val currentTargetS = (sLastFix + leadM).coerceAtMost(totalMeters)
 
         if (isDwelling) {
             if (now - dwellStartMs >= dwellDurationMs || (!sLastFix.isNaN() && sLastFix > dwellStopDist + 40.0)) {
@@ -755,7 +769,8 @@ internal class VehicleMotion(
         val err = currentTargetS - sCurr
         val catchUpFactor = when {
             err > 0 -> 1.0 + (err / 200.0).coerceAtMost(0.20)
-            err < 0 -> (1.0 + err / 200.0).coerceAtLeast(0.4)
+            // před cílem predikce vůz zpomalí až zastaví a počká na další fix (dřív jel dál aspoň 40 % rychlosti donekonečna)
+            err < 0 -> (1.0 + err / 40.0).coerceAtLeast(0.0)
             else -> 1.0
         }
         var targetV = vCruise * catchUpFactor
@@ -806,7 +821,14 @@ internal class VehicleMotion(
             vCurrent = (vCurrent - maxAccel * 1.5).coerceAtLeast(targetV)
         }
 
-        sCurr = (sCurr + vCurrent * dtSec).coerceIn(0.0, totalMeters)
+        val nextS = (sCurr + vCurrent * dtSec).coerceIn(0.0, totalMeters)
+        if (nextS > currentTargetS) {
+            // tvrdý strop: dál než predikovaný cíl se nikdy nejede (couvat se taky nezačne, o srovnání se postará další fix)
+            sCurr = kotlin.math.max(sCurr, currentTargetS)
+            vCurrent = 0.0
+        } else {
+            sCurr = nextS
+        }
         val p = r.pointAt(sCurr)
         shown = p
         return p
