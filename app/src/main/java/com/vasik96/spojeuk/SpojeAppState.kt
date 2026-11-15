@@ -12,6 +12,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.content.edit
@@ -167,6 +168,105 @@ class SpojeAppState(
         set(value) {
             journeyWalks = if (value != null) listOf(value) else emptyList()
         }
+
+    @Volatile
+    private var routeJob: Job? = null
+
+    val hasRoute: Boolean
+        get() = tripRoute.isNotEmpty() || fullRoute.isNotEmpty() || tripRouteSegments.isNotEmpty() || walkRoute != null || journeyWalks.isNotEmpty()
+
+    fun clearRoute() {
+        routeJob?.cancel()
+        routeJob = null
+        tripRoute = emptyList()
+        tripRouteSegments = emptyList()
+        fullRoute = emptyList()
+        tripStops = emptyList()
+        focusedTripVehicle = null
+        focusedTripRef = null
+        highlightedTrip = null
+        focusTrip = null
+        walkRoute = null
+        journeyWalks = emptyList()
+        routeLoading = false
+    }
+
+    fun loadJourneyRoute(api: TransitRepository, journey: Journey, scope: CoroutineScope, ref: TripRef) {
+        routeJob?.cancel()
+        selectedVehicle = null
+        focusedTripVehicle = null
+        focusedTripRef = ref
+        tripRoute = emptyList()
+        tripRouteSegments = emptyList()
+        fullRoute = emptyList()
+        tripStops = emptyList()
+        journeyWalks = emptyList()
+        routeLoading = true
+        vehiclesLoaded = vehicles.isNotEmpty()
+        focusTrip = ref
+        highlightedTrip = ref
+        selectedTab = 1
+
+        val job = scope.launch(Dispatchers.Default) {
+            try {
+                val segments = api.journeySegments(journey)
+                val points = api.journeyGeometry(journey)
+                val full = api.firstLegFullRoute(journey)
+                val stops = api.firstLegStopLocations(journey)
+                val walks = api.journeyWalks(journey)
+                val segLatLng = segments.map { seg -> seg.map { LatLng(it.first, it.second) } }
+                val ptsLatLng = points.map { LatLng(it.first, it.second) }
+                val fullLatLng = full.map { LatLng(it.first, it.second) }
+                val stopsLatLng = stops.map { LatLng(it.first, it.second) }
+                if (!isActive) return@launch
+                withContext(Dispatchers.Main) {
+                    if (!isActive) return@withContext
+                    tripRouteSegments = segLatLng
+                    tripRoute = ptsLatLng
+                    fullRoute = fullLatLng
+                    tripStops = stopsLatLng
+                    journeyWalks = walks
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("SpojeAppState", "Chyba při načítání trasy spojení: ${e.message}")
+            } finally {
+                withContext(Dispatchers.Main) {
+                    routeLoading = false
+                }
+            }
+        }
+        routeJob = job
+    }
+
+    fun loadVehicleRoute(api: TransitRepository, vehicle: Vehicle, scope: CoroutineScope, ctx: Context, onDismiss: () -> Unit) {
+        routeJob?.cancel()
+        routeLoading = true
+        val job = scope.launch {
+            try {
+                walkRoute = null
+                val points = api.tripGeometry(vehicle)
+                val stops = api.tripStopLocations(vehicle)
+                if (!isActive) return@launch
+                if (points.isNotEmpty()) {
+                    tripRouteSegments = emptyList()
+                    tripRoute = points.map { LatLng(it.first, it.second) }
+                    tripStops = stops.map { LatLng(it.first, it.second) }
+                    onDismiss()
+                } else {
+                    android.widget.Toast.makeText(ctx, "Trasu se nepodařilo určit", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("SpojeAppState", "Chyba při načítání trasy spoje: ${e.message}")
+            } finally {
+                routeLoading = false
+            }
+        }
+        routeJob = job
+    }
 
     // Settings & Preferences
     private val settingsPrefs = context.getSharedPreferences("app_settings_prefs", Context.MODE_PRIVATE)

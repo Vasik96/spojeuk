@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -83,7 +84,7 @@ class VehicleHub(
         private set
 
     @Volatile
-    private var builtAtMs = 0L
+    private var lastSuccessMs = 0L
 
     @Volatile
     private var lastFetchMs = 0L
@@ -98,6 +99,9 @@ class VehicleHub(
     @Volatile private var enrichedFor: Timetable? = null
 
     @Volatile
+    private var initialFetchDone = false
+
+    @Volatile
     private var lastError: String? = null
 
     private val _updates = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
@@ -110,7 +114,7 @@ class VehicleHub(
     @Synchronized
     fun setEnabledSources(ids: Set<String>?) {
         enabledSourceIds = ids?.toSet()
-        builtAtMs = 0L
+        lastSuccessMs = 0L
         // výběr se projeví hned z poslední odpovědi, bez čekání na síť
         val snap = snapshot
         fleet = if (snap == null) Fleet.EMPTY else runCatching { build(snap, System.currentTimeMillis()) }.getOrDefault(Fleet.EMPTY)
@@ -129,7 +133,7 @@ class VehicleHub(
      */
     suspend fun refresh(maxAgeMs: Long = 0): Fleet {
         val now = System.currentTimeMillis()
-        if (maxAgeMs > 0 && fleet !== Fleet.EMPTY && now - builtAtMs < maxAgeMs) return fleet
+        if (maxAgeMs > 0 && fleet !== Fleet.EMPTY && lastSuccessMs > 0 && now - lastSuccessMs < maxAgeMs) return fleet
         return fetchMutex.withLock {
             val t = System.currentTimeMillis()
             // souběžné volání už mohlo dotaz udělat
@@ -140,6 +144,8 @@ class VehicleHub(
                 val snap = raw.copy(vehicles = raw.vehicles.map { headings.track(it) })
                 snapshot = snap
                 lastError = null
+                initialFetchDone = true
+                lastSuccessMs = System.currentTimeMillis()
                 withContext(Dispatchers.Default) { rebuild(snap, System.currentTimeMillis()) }
             } catch (e: CancellationException) {
                 throw e
@@ -156,7 +162,6 @@ class VehicleHub(
     private fun rebuild(snap: ApiSnapshot, now: Long): Fleet {
         val result = build(snap, now)
         fleet = result
-        builtAtMs = now
         _updates.tryEmit(Unit)
         return result
     }
@@ -166,8 +171,9 @@ class VehicleHub(
         val active = snap.sources.filter { enabled == null || it.id in enabled }
         if (enabled != null && active.isEmpty()) return Fleet.EMPTY
 
-        // server nedostupný: poslední polohy se drží, ale zdroje se hlásí jako zastaralé; po KEEP_MS se zahodí
-        val serverStale = now - snap.receivedMs > SERVER_STALE_MS
+        // server nedostupný: poslední polohy se drží, ale zdroje se hlásí jako zastaralé; po KEEP_MS se zahodí.
+        // Považovat zdroje za zastaralé až po úspěšném prvním stažení nebo po selhání opakovaných pokusů při startu.
+        val serverStale = initialFetchDone && (now - snap.receivedMs > SERVER_STALE_MS)
         val dropped = now - snap.receivedMs > KEEP_MS
 
         val vehicles = if (dropped) emptyList() else {
@@ -245,9 +251,22 @@ class VehicleHub(
 
     init {
         loadCache()
-        // Okamžitě při startu spustit refresh na pozadí, ať jsou data co nejrychleji čerstvá
+        // Okamžitě při startu spustit refresh na pozadí; při neúspěchu zopakovat s krátkým odstupem
         scope.launch(Dispatchers.IO) {
-            runCatching { refresh() }
+            var attempts = 0
+            while (!initialFetchDone && attempts < 3) {
+                attempts++
+                runCatching { refresh() }
+                if (!initialFetchDone && attempts < 3) {
+                    delay(1_500L * attempts)
+                }
+            }
+            if (!initialFetchDone) {
+                initialFetchDone = true
+                snapshot?.let { snap ->
+                    withContext(Dispatchers.Default) { rebuild(snap, System.currentTimeMillis()) }
+                }
+            }
         }
     }
 

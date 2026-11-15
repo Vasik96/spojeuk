@@ -7,8 +7,6 @@ import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
 import java.util.Locale
-import java.util.concurrent.ExecutorCompletionService
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -111,8 +109,7 @@ class OsrmClient(private val cacheDir: File) {
 
     /**
      * Vzdálenosti z bodu `from` ke každému bodu v `to` (metry). null jen když selžou všechny pokusy.
-     * Dělá až [ROAD_ATTEMPTS] kol; v každém kole se dotazují oba servery současně (pěší a auto)
-     * a bere se první platná odpověď, takže jeden pomalý/nedostupný server nic nezpůsobí.
+     * Přednost má vždy pěší trasování (routed-foot); auto trasování je jen záloha při výpadku pěšího serveru.
      */
     fun roadDistances(
         from: Pair<Double, Double>,
@@ -123,26 +120,19 @@ class OsrmClient(private val cacheDir: File) {
             String.format(Locale.US, "%.6f,%.6f", it.second, it.first)
         }
         val dests = (1..to.size).joinToString(";")
-        val urls = listOf(
-            "https://routing.openstreetmap.de/routed-foot/table/v1/foot/$coords" +
-                    "?sources=0&destinations=$dests&annotations=distance",
-            "https://router.project-osrm.org/table/v1/driving/$coords" +
-                    "?sources=0&destinations=$dests&annotations=distance"
-        )
+        val footUrl = "https://routing.openstreetmap.de/routed-foot/table/v1/foot/$coords" +
+                "?sources=0&destinations=$dests&annotations=distance"
+        val drivingUrl = "https://router.project-osrm.org/table/v1/driving/$coords" +
+                "?sources=0&destinations=$dests&annotations=distance"
 
-        val pool = Executors.newFixedThreadPool(urls.size)
-        try {
-            repeat(ROAD_ATTEMPTS) { attempt ->
-                val cs = ExecutorCompletionService<List<Double?>?>(pool)
-                urls.forEach { u -> cs.submit { fetchTable(u, to.size) } }
-                repeat(urls.size) {
-                    val res = runCatching { cs.take().get() }.getOrNull()
-                    if (res != null) return res
-                }
-                if (attempt < ROAD_ATTEMPTS - 1) Thread.sleep(250L * (attempt + 1))
-            }
-        } finally {
-            pool.shutdownNow()
+        repeat(ROAD_ATTEMPTS) { attempt ->
+            val footRes = fetchTable(footUrl, to.size)
+            if (footRes != null) return footRes
+
+            val drivingRes = fetchTable(drivingUrl, to.size)
+            if (drivingRes != null) return drivingRes
+
+            if (attempt < ROAD_ATTEMPTS - 1) Thread.sleep(200L * (attempt + 1))
         }
         return null
     }

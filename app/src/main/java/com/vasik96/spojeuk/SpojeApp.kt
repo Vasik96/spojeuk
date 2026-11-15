@@ -110,12 +110,10 @@ internal fun SpojeApp() {
     LaunchedEffect(api, appState.enabledVehicleSources) {
         api.prewarmVehicles()
         val curr = api.currentVehicles()
-        if (curr.isNotEmpty()) {
-            appState.updateVehicles(curr)
-            appState.heldCount = api.heldCount()
-            appState.vehicleSource = api.sourceLabel()
-            appState.vehiclesLoaded = true
-        }
+        appState.updateVehicles(curr)
+        appState.heldCount = api.heldCount()
+        appState.vehicleSource = api.sourceLabel()
+        appState.vehiclesLoaded = true
     }
 
     // po návratu do appky (minimalizace, zamčený telefon) se polohy stáhnou hned jednou, ne až za dalších pár sekund;
@@ -143,12 +141,10 @@ internal fun SpojeApp() {
     LaunchedEffect(api) {
         api.vehicleUpdates.collect {
             val curr = api.currentVehicles()
-            if (curr.isNotEmpty()) {
-                appState.updateVehicles(curr)
-                appState.heldCount = api.heldCount()
-                appState.vehicleSource = api.sourceLabel()
-                appState.vehiclesLoaded = true
-            }
+            appState.updateVehicles(curr)
+            appState.heldCount = api.heldCount()
+            appState.vehicleSource = api.sourceLabel()
+            appState.vehiclesLoaded = true
         }
     }
 
@@ -345,38 +341,7 @@ internal fun SpojeApp() {
                                                 .toEpochMilli(),
                                             tid = journey.rawLegs.firstOrNull { it.kind == "ride" }?.tid ?: 0
                                         )
-                                        appState.selectedVehicle = null
-                                        appState.focusedTripVehicle = null
-                                        appState.focusedTripRef = ref
-                                        appState.tripRoute = emptyList()
-                                        appState.tripRouteSegments = emptyList()
-                                        appState.fullRoute = emptyList()
-                                        appState.tripStops = emptyList()
-                                        appState.journeyWalks = emptyList()
-                                        appState.routeLoading = true
-                                        appState.vehiclesLoaded = appState.vehicles.isNotEmpty()
-                                        appState.focusTrip = ref
-                                        appState.highlightedTrip = ref
-                                        appState.selectedTab = 1
-                                        scope.launch(Dispatchers.Default) {
-                                            val segments = api.journeySegments(journey)
-                                            val points = api.journeyGeometry(journey)
-                                            val full = api.firstLegFullRoute(journey)
-                                            val stops = api.firstLegStopLocations(journey)
-                                            val walks = api.journeyWalks(journey)
-                                            val segLatLng = segments.map { seg -> seg.map { LatLng(it.first, it.second) } }
-                                            val ptsLatLng = points.map { LatLng(it.first, it.second) }
-                                            val fullLatLng = full.map { LatLng(it.first, it.second) }
-                                            val stopsLatLng = stops.map { LatLng(it.first, it.second) }
-                                            withContext(Dispatchers.Main) {
-                                                appState.tripRouteSegments = segLatLng
-                                                appState.tripRoute = ptsLatLng
-                                                appState.fullRoute = fullLatLng
-                                                appState.tripStops = stopsLatLng
-                                                appState.journeyWalks = walks
-                                                appState.routeLoading = false
-                                            }
-                                        }
+                                        appState.loadJourneyRoute(api, journey, scope, ref)
                                     }
                                 )
                             }

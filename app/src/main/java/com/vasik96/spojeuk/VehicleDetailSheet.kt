@@ -174,18 +174,25 @@ internal fun VehicleDetailBottomSheet(
                 onClick = {
                     scope.launch {
                         appState.routeLoading = true
-                        appState.walkRoute = null
-                        val points = api.tripGeometry(vehicle)
-                        val stops = api.tripStopLocations(vehicle)
-                        if (points.isNotEmpty()) {
-                            appState.tripRouteSegments = emptyList()
-                            appState.tripRoute = points.map { LatLng(it.first, it.second) }
-                            appState.tripStops = stops.map { LatLng(it.first, it.second) }
-                            onDismiss()
-                        } else {
-                            android.widget.Toast.makeText(ctx, "Trasu se nepodařilo určit", android.widget.Toast.LENGTH_SHORT).show()
+                        try {
+                            appState.walkRoute = null
+                            val points = api.tripGeometry(vehicle)
+                            val stops = api.tripStopLocations(vehicle)
+                            if (points.isNotEmpty()) {
+                                appState.tripRouteSegments = emptyList()
+                                appState.tripRoute = points.map { LatLng(it.first, it.second) }
+                                appState.tripStops = stops.map { LatLng(it.first, it.second) }
+                                onDismiss()
+                            } else {
+                                android.widget.Toast.makeText(ctx, "Trasu se nepodařilo určit", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            android.util.Log.w("VehicleDetailSheet", "Chyba při načítání trasy: ${e.message}")
+                        } finally {
+                            appState.routeLoading = false
                         }
-                        appState.routeLoading = false
                     }
                 },
                 enabled = !appState.routeLoading && vehicle.state != 255,

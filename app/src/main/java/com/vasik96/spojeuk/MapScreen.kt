@@ -208,7 +208,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             appState.heldCount = api.heldCount()
             appState.vehicleSource = api.sourceLabel()
             appState.vehiclesLoaded = true
-        } else if (appState.vehicles.isEmpty()) {
+        } else if (appState.vehicles.isNotEmpty()) {
+            appState.vehiclesLoaded = true
+        } else {
             appState.vehiclesLoaded = false
         }
         while (true) {
@@ -233,13 +235,11 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         if (!active) return@LaunchedEffect
         api.vehicleUpdates.collect {
             val curr = api.currentVehicles()
-            if (curr.isNotEmpty()) {
-                appState.updateVehicles(curr)
-                appState.heldCount = api.heldCount()
-                appState.vehicleSource = api.sourceLabel()
-                appState.mapError = null
-                appState.vehiclesLoaded = true
-            }
+            appState.updateVehicles(curr)
+            appState.heldCount = api.heldCount()
+            appState.vehicleSource = api.sourceLabel()
+            appState.mapError = null
+            appState.vehiclesLoaded = true
         }
     }
 
