@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit
 object SourceIds {
     const val DPMUL = "dpmul"
     const val DUK = "duk"
+    const val DPMD = "dpmd"
     const val TRAIN = "train" // Správa železnic
 }
 

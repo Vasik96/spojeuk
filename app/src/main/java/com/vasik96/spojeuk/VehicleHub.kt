@@ -283,12 +283,14 @@ class VehicleHub(
         val SOURCE_NAMES = linkedMapOf(
             SourceIds.DPMUL to "DPMÚL",
             SourceIds.DUK to "DÚK",
+            SourceIds.DPMD to "DPMD",
             SourceIds.TRAIN to "Správa Železnic",
         )
 
         val SOURCE_SEGMENTS = mapOf(
             SourceIds.DPMUL to setOf(Segment.CITY),
             SourceIds.DUK to setOf(Segment.CITY, Segment.REGIONAL),
+            SourceIds.DPMD to setOf(Segment.CITY),
             SourceIds.TRAIN to setOf(Segment.REGIONAL),
         )
     }

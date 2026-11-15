@@ -124,6 +124,17 @@ internal fun SpojeApp() {
         val observer = LifecycleEventObserver { _, event ->
             if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
             if (firstResume) { firstResume = false; return@LifecycleEventObserver } // start appky řeší prewarm
+
+            // 1. Okamžitě načíst minulé vozy z RAM, aby obrazovka/mapa nebyla prázdná
+            val cached = api.currentVehicles()
+            if (cached.isNotEmpty()) {
+                appState.updateVehicles(cached)
+                appState.heldCount = api.heldCount()
+                appState.vehicleSource = api.sourceLabel()
+                appState.vehiclesLoaded = true
+            }
+
+            // 2. Hned requestnout čerstvá data ze serveru
             scope.launch {
                 runCatching { api.vehiclePositions() }.onSuccess { list ->
                     appState.updateVehicles(list)
