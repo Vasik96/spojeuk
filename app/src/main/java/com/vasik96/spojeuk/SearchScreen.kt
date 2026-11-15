@@ -158,12 +158,38 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDateTime
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.SelectableDates
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import kotlin.time.Duration.Companion.milliseconds
 
 private const val FIRST_PAGE = 8
 private const val MORE_PAGE = 6
 
 private const val WALK_MAX_MIN = 20
+
+private val DEPART_FMT = DateTimeFormatter.ofPattern("EEE d. M.", java.util.Locale.forLanguageTag("cs"))
+
+private fun departChipLabel(dt: LocalDateTime): String {
+    val today = todayPrague()
+    val day = when (dt.toLocalDate()) {
+        today -> "Dnes"
+        today.plusDays(1) -> "Zítra"
+        else -> dt.format(DEPART_FMT)
+    }
+    return "$day ${dt.format(DateTimeFormatter.ofPattern("HH:mm"))}"
+}
 
 // stará poloha by předvyplnila špatnou zastávku
 private const val FIX_MAX_AGE_MS = 3 * 60_000L
@@ -508,7 +534,7 @@ internal fun SearchScreen(
             appState.refreshUsage()
         }
 
-        val s = api.newSearch(a.name, b.name, modeFilter = appState.modeFilter)
+        val s = api.newSearch(a.name, b.name, modeFilter = appState.modeFilter, departAt = appState.departAt)
         appState.search = s
         appState.journeys = emptyList()
         appState.searched = true
@@ -754,6 +780,70 @@ internal fun SearchScreen(
         label = "swapRotation"
     )
 
+    // ───── výběr data a času odjezdu ─────
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
+    var pickedDate by remember { mutableStateOf<LocalDate?>(null) }
+
+    if (showDatePicker) {
+        val todayUtcMs = todayPrague().atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        val initial = (appState.departAt?.toLocalDate() ?: todayPrague())
+            .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        val dateState = rememberDatePickerState(
+            initialSelectedDateMillis = initial,
+            selectableDates = object : SelectableDates {
+                override fun isSelectableDate(utcTimeMillis: Long): Boolean = utcTimeMillis >= todayUtcMs
+            }
+        )
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    enabled = dateState.selectedDateMillis != null,
+                    onClick = {
+                        dateState.selectedDateMillis?.let { ms ->
+                            pickedDate = Instant.ofEpochMilli(ms).atZone(ZoneOffset.UTC).toLocalDate()
+                            showDatePicker = false
+                            showTimePicker = true
+                        }
+                    }
+                ) { Text("Další") }
+            },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("Zrušit") } }
+        ) {
+            DatePicker(state = dateState)
+        }
+    }
+
+    if (showTimePicker) {
+        val base = appState.departAt?.toLocalTime() ?: nowPrague().toLocalTime()
+        val timeState = rememberTimePickerState(
+            initialHour = base.hour,
+            initialMinute = base.minute,
+            is24Hour = true
+        )
+        AlertDialog(
+            onDismissRequest = { showTimePicker = false },
+            title = { Text("Čas odjezdu") },
+            text = {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    TimePicker(state = timeState)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val d = pickedDate ?: todayPrague()
+                    appState.departAt = LocalDateTime.of(d, LocalTime.of(timeState.hour, timeState.minute))
+                    showTimePicker = false
+                    if (appState.from != null && appState.to != null) runSearch()
+                }) { Text("Hotovo") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTimePicker = false; showDatePicker = true }) { Text("Zpět") }
+            }
+        )
+    }
+
     val searchCard: @Composable () -> Unit = {
         ElevatedCard(
             shape = RoundedCornerShape(28.dp),
@@ -854,6 +944,31 @@ internal fun SearchScreen(
                             }
                         )
                     }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = appState.departAt == null,
+                        onClick = {
+                            if (appState.departAt != null) {
+                                appState.departAt = null
+                                if (appState.from != null && appState.to != null && appState.searched) runSearch()
+                            }
+                        },
+                        label = { Text("Teď") },
+                        leadingIcon = { Icon(Icons.Default.Schedule, null, Modifier.size(18.dp)) }
+                    )
+                    FilterChip(
+                        selected = appState.departAt != null,
+                        onClick = { showDatePicker = true },
+                        label = { Text(appState.departAt?.let { departChipLabel(it) } ?: "Vybrat datum a čas") },
+                        leadingIcon = { Icon(Icons.Default.CalendarMonth, null, Modifier.size(18.dp)) }
+                    )
                 }
 
                 Button(
@@ -1536,6 +1651,15 @@ private fun JourneyCard(
                             color = colors.primary,
                             fontWeight = FontWeight.Medium
                         )
+
+                        depDayLabel(j, now)?.let { label ->
+                            Text(
+                                "· $label",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
 
                         Text(
                             "· ",

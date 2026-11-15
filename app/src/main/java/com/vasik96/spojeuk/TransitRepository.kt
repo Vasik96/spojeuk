@@ -160,8 +160,13 @@ class TransitRepository(context: Context? = null) {
 
     // ───────────────────────── vyhledávání spojení ─────────────────────────
 
-    fun newSearch(fromName: String, toName: String, modeFilter: ModeFilter = ModeFilter.ALL): JourneySearch =
-        JourneySearch(this, fromName, toName, modeFilter)
+    /** [departAt] = zvolený čas odjezdu; null = hned teď. */
+    fun newSearch(
+        fromName: String,
+        toName: String,
+        modeFilter: ModeFilter = ModeFilter.ALL,
+        departAt: LocalDateTime? = null,
+    ): JourneySearch = JourneySearch(this, fromName, toName, modeFilter, departAt)
 
     suspend fun searchConnections(
         fromName: String,
@@ -443,26 +448,30 @@ class TransitRepository(context: Context? = null) {
     }
 }
 
+/** Jak daleko dopředu se dá ve výsledcích scrollovat. */
+private const val SEARCH_SPAN_HOURS = 24L
+
 /** Stránkování výsledků hledání (načíst další / dřívější). */
 class JourneySearch(
     private val api: TransitRepository,
     private val fromName: String,
     private val toName: String,
     private val modeFilter: ModeFilter = ModeFilter.ALL,
+    private val departAt: LocalDateTime? = null,
 ) {
     private val currentJourneys = mutableListOf<Journey>()
     private val mutex = Mutex()
-    private val startTime: LocalDateTime = nowPrague().withSecond(0).withNano(0)
+    private val startTime: LocalDateTime = (departAt ?: nowPrague()).withSecond(0).withNano(0)
 
-    /** Konec hledání dopředu: 04:00 následujícího dne. */
-    private val cutoff: LocalDateTime = startTime.toLocalDate().plusDays(1).atStartOfDay().plusHours(4)
+    /** Konec hledání dopředu: 24 hodin od začátku hledání. */
+    private val cutoff: LocalDateTime = startTime.plusHours(SEARCH_SPAN_HOURS)
 
     var hasMore: Boolean = true
         private set
     var hasEarlier: Boolean = true
         private set
 
-    fun fresh(): JourneySearch = JourneySearch(api, fromName, toName, modeFilter)
+    fun fresh(): JourneySearch = JourneySearch(api, fromName, toName, modeFilter, departAt)
 
     suspend fun loadMore(minNew: Int = 1): List<Journey> = withContext(Dispatchers.IO) {
         mutex.withLock {

@@ -387,31 +387,36 @@ class Planner(val tt: Timetable) {
         horizonHours: Int = 14,
         modeFilter: ModeFilter = ModeFilter.ALL
     ): List<Journey> {
-        val day = start.toLocalDate()
-        val n = net(day)
-        val midnight = day.atStartOfDay()
-        var tSec = maxOf(0, Duration.between(midnight, start).seconds.toInt())
-        val tEndSec = if (end != null) {
-            Duration.between(midnight, end).seconds.toInt()
-        } else {
-            tSec + horizonHours * 3600
-        }
-
         val srcs = tt.places[fromPlace] ?: emptyList()
         val dsts = (tt.places[toPlace] ?: emptyList()).toSet()
         if (srcs.isEmpty() || dsts.isEmpty()) return emptyList()
 
+        val endDt = end ?: start.plusHours(horizonHours.toLong())
+        val lastDay = endDt.toLocalDate()
         val out = HashMap<String, Journey>()
-        var runs = 0
 
-        while (out.size < count && tSec <= tEndSec && runs < 40) {
-            val js = n.raptor(srcs, dsts, tSec, modeFilter = modeFilter)
-            if (js.isEmpty()) break
-            for (j in js) {
-                if (j.dep <= tEndSec) out[j.key] = j
+        // Okno se prochází po dnech: každý den má vlastní jízdní řád (Net), takže hledání
+        // může pokračovat přes půlnoc a nekončí u přesahu z předchozího dne.
+        var day = start.toLocalDate()
+        while (!day.isAfter(lastDay) && out.size < count) {
+            val n = net(day)
+            val midnight = day.atStartOfDay()
+            var tSec = maxOf(0, Duration.between(midnight, start).seconds.toInt())
+            var tEndSec = Duration.between(midnight, endDt).seconds.toInt()
+            // pokud okno pokračuje dalším dnem, tenhle den se bere jen do půlnoci (zbytek přinese jeho vlastní řád)
+            if (day.isBefore(lastDay)) tEndSec = minOf(tEndSec, 86_399)
+
+            var runs = 0
+            while (out.size < count && tSec <= tEndSec && runs < 40) {
+                val js = n.raptor(srcs, dsts, tSec, modeFilter = modeFilter)
+                if (js.isEmpty()) break
+                for (j in js) {
+                    if (j.dep <= tEndSec) out[j.key] = j
+                }
+                tSec = (js.minByOrNull { it.dep }?.dep ?: tSec) + 1
+                runs++
             }
-            tSec = (js.minByOrNull { it.dep }?.dep ?: tSec) + 1
-            runs++
+            day = day.plusDays(1)
         }
         val pruned = prune(out.values.toList())
         return if (modeFilter == ModeFilter.ALL) {

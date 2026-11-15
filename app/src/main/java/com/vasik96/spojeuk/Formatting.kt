@@ -18,6 +18,17 @@ internal fun departsIn(j: Journey, now: LocalDateTime): String {
     }
 }
 
+/** Štítek dne, když spoj nejede dnes ("zítra", "pá 20. 11."); jinak null. */
+internal fun depDayLabel(j: Journey, now: LocalDateTime): String? {
+    val d = j.depDt.toLocalDate()
+    val today = now.toLocalDate()
+    return when (d) {
+        today -> null
+        today.plusDays(1) -> "zítra"
+        else -> d.format(java.time.format.DateTimeFormatter.ofPattern("EEE d. M.", java.util.Locale.forLanguageTag("cs")))
+    }
+}
+
 /** "Ústí nad Labem,Divadlo" → ("Divadlo", "Ústí nad Labem") */
 internal fun splitStopName(name: String): Pair<String, String> {
     val i = name.indexOf(',')
