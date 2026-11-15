@@ -151,6 +151,8 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -207,6 +209,43 @@ internal fun SearchScreen(
     var isSearchCardVisible by remember { mutableStateOf(true) }
     val context = LocalContext.current
     var locatingTarget by remember { mutableStateOf<String?>(null) }
+    // spinner u "Odkud" od úplného začátku (už při první kompozici), dokud předvyplnění neskončí
+    var autoFillPending by remember {
+        mutableStateOf(
+            !appState.autoFillDone && appState.from == null && appState.to == null &&
+                    appState.fromQuery.isBlank() && appState.toQuery.isBlank() &&
+                    (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED)
+        )
+    }
+    fun endAutoFillIndicator() {
+        autoFillPending = false
+        if (locatingTarget == "from") locatingTarget = null
+    }
+
+    /**
+     * Nejbližší zastávky + pořadí po silnici, sdílené mezi předpočítáním (hned po zjištění polohy) a předvyplněním.
+     * Díky tomu OSRM běží už během načítání zastávek a předvyplnění pak často nečeká vůbec.
+     */
+    fun nearestFor(lat: Double, lng: Double): Deferred<NearestResult> {
+        val k = appState.nearestKey
+        val j = appState.nearestJob
+        if (k != null && j != null && !j.isCancelled &&
+            System.currentTimeMillis() - appState.nearestKeyTime < FIX_MAX_AGE_MS &&
+            Geo.distanceM(lat, lng, k.first, k.second) < 30.0
+        ) return j
+        val job = scope.async {
+            val cands = runCatching { api.nearestCandidates(lat, lng, 6) }.getOrNull().orEmpty()
+            val refined = if (cands.size > 1) runCatching { api.refineByRoad(lat, lng, cands) }.getOrNull() else null
+            // neúspěšný výsledek se nekešuje, další pokus začne znovu
+            if (cands.size > 1 && refined == null) appState.nearestKey = null
+            NearestResult(cands, refined)
+        }
+        appState.nearestKey = lat to lng
+        appState.nearestKeyTime = System.currentTimeMillis()
+        appState.nearestJob = job
+        return job
+    }
     var pendingLocation by remember { mutableStateOf<Pair<String, (Stop) -> Unit>?>(null) }
 
     LaunchedEffect(Unit) {
@@ -254,10 +293,13 @@ internal fun SearchScreen(
         if (granted) {
             val fresh = appState.userLoc != null &&
                     System.currentTimeMillis() - appState.userLocTime < FIX_MAX_AGE_MS
-            if (!fresh) requestFix(context, FIX_MAX_AGE_MS) { loc ->
+            if (fresh) {
+                appState.userLoc?.let { if (!appState.autoFillDone) nearestFor(it.first, it.second) }
+            } else requestFix(context, FIX_MAX_AGE_MS) { loc ->
                 if (loc != null) {
                     appState.userLoc = loc.latitude to loc.longitude
                     appState.userLocTime = System.currentTimeMillis()
+                    if (!appState.autoFillDone) nearestFor(loc.latitude, loc.longitude)
                 }
             }
         }
@@ -330,43 +372,70 @@ internal fun SearchScreen(
     // ───── předvyplnění odkud/kam podle polohy a historie ─────
     fun applyAutoFill(lat: Double, lng: Double) {
         scope.launch {
-            appState.userLoc = lat to lng
-            appState.userLocTime = System.currentTimeMillis()
-            if (appState.autoFillDone) return@launch
-            val untouched = appState.from == null && appState.to == null &&
-                    appState.fromQuery.isBlank() && appState.toQuery.isBlank()
-            if (!untouched) return@launch
+            try {
+                appState.userLoc = lat to lng
+                appState.userLocTime = System.currentTimeMillis()
+                if (appState.autoFillDone) return@launch
+                val untouched = appState.from == null && appState.to == null &&
+                        appState.fromQuery.isBlank() && appState.toQuery.isBlank()
+                if (!untouched) return@launch
 
-            // širší výběr kandidátů vzdušnou čarou, ať se nevyřadí zastávka, která je po cestě blíž
-            val cands = runCatching { api.nearestCandidates(lat, lng, 6) }.getOrNull().orEmpty()
-            if (cands.isEmpty()) return@launch
+                // širší výběr kandidátů vzdušnou čarou, ať se nevyřadí zastávka, která je po cestě blíž
+                // (zpřesnění po silnici běží možná už od zjištění polohy; OsrmClient si při chybě sám zkusí víc pokusů)
+                val res = runCatching { nearestFor(lat, lng).await() }.getOrNull() ?: return@launch
+                val cands = res.cands
+                if (cands.isEmpty()) return@launch
+                val refined: Pair<Stop, Double>? = res.refined
+                val best = refined ?: cands[0]
 
-            // zpřesnění po silnici; OsrmClient si při chybě sám zkusí víc pokusů i záložní server
-            val refined: List<Pair<Stop, Double>>? =
-                if (cands.size > 1) runCatching { api.refineByRoad(lat, lng, cands) }.getOrNull()
-                    ?.let { listOf(it) }
-                else null
-            val best = refined?.firstOrNull() ?: cands[0]
+                // limit až na vzdálenost po silnici
+                if (best.second > 700.0) return@launch
 
-            // limit až na vzdálenost po silnici
-            if (best.second > 700.0) return@launch
+                // vyplní odkud/kam podle zvolené nejbližší zastávky a historie
+                fun fill(best: Pair<Stop, Double>): Boolean {
+                    // pro historii použij pořadí podle silnice: nejlepší první
+                    val ordered = listOf(best) + cands.filter { it.first.name != best.first.name }
+                    val near = ordered.filter { it.second <= 700.0 || it === best }
 
-            // pro historii použij pořadí podle silnice: nejlepší první
-            val ordered = listOf(best) + cands.filter { it.first.name != best.first.name }
-            val near = ordered.filter { it.second <= 700.0 || it === best }
+                    val sug = appState.history.suggest(near.map { it.first.name to it.second })
+                    val fromName = sug?.first ?: best.first.name
+                    val from = appState.stops.firstOrNull { it.name == fromName } ?: return false
+                    val to = sug?.second?.let { n -> appState.stops.firstOrNull { it.name == n } }
 
-            val sug = appState.history.suggest(near.map { it.first.name to it.second })
-            val fromName = sug?.first ?: best.first.name
-            val from = appState.stops.firstOrNull { it.name == fromName } ?: return@launch
-            val to = sug?.second?.let { n -> appState.stops.firstOrNull { it.name == n } }
+                    appState.from = from
+                    appState.fromQuery = myLocLabel(from.name)
+                    if (to != null) {
+                        appState.to = to
+                        appState.toQuery = stopLabel(to.name)
+                    }
+                    appState.autoFillDone = true
+                    return true
+                }
 
-            appState.from = from
-            appState.fromQuery = myLocLabel(from.name)
-            if (to != null) {
-                appState.to = to
-                appState.toQuery = stopLabel(to.name)
+                if (!fill(best)) return@launch
+                endAutoFillIndicator()
+
+                // OSRM selhal, předvyplnilo se vzdušnou čarou (rychle, ale může vybrat špatnou zastávku).
+                // Na pozadí se zkusí zjistit pořadí po silnici a když uživatel mezitím nic neměnil, opraví se to.
+                if (refined == null && cands.size > 1) {
+                    val setFrom = appState.from
+                    val setFromQ = appState.fromQuery
+                    val setTo = appState.to
+                    val setToQ = appState.toQuery
+                    for (round in 0 until 4) {
+                        delay(2_500L)
+                        val unchanged = appState.from == setFrom && appState.fromQuery == setFromQ &&
+                                appState.to == setTo && appState.toQuery == setToQ
+                        if (!unchanged) return@launch
+                        val better = runCatching { api.refineByRoad(lat, lng, cands) }.getOrNull() ?: continue
+                        if (better.second <= 700.0 && better.first.name != best.first.name) fill(better)
+                        return@launch
+                    }
+                }
+            } finally {
+                // indikátor načítání vždy zmizí, ať skončí předvyplnění kdekoliv
+                endAutoFillIndicator()
             }
-            appState.autoFillDone = true
         }
     }
 
@@ -378,7 +447,10 @@ internal fun SearchScreen(
             applyAutoFill(known.first, known.second)
             return
         }
-        requestFix(context, FIX_MAX_AGE_MS) { loc -> if (loc != null) applyAutoFill(loc.latitude, loc.longitude) }
+        requestFix(context, FIX_MAX_AGE_MS) { loc ->
+            if (loc != null) applyAutoFill(loc.latitude, loc.longitude)
+            else endAutoFillIndicator()
+        }
     }
 
     val autoFillPermission = rememberLauncherForActivityResult(
@@ -390,7 +462,8 @@ internal fun SearchScreen(
     }
 
     LaunchedEffect(appState.indexedStops.isNotEmpty()) {
-        if (appState.indexedStops.isEmpty() || appState.autoFillDone) return@LaunchedEffect
+        if (appState.autoFillDone) { endAutoFillIndicator(); return@LaunchedEffect }
+        if (appState.indexedStops.isEmpty()) return@LaunchedEffect
         val granted =
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
                     ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -707,7 +780,8 @@ internal fun SearchScreen(
                     indexedStops = appState.indexedStops,
                     originLat = origin.first,
                     originLng = origin.second,
-                    stopsLoading = appState.stopsLoading || locatingTarget == "from",
+                    stopsLoading = appState.stopsLoading || locatingTarget == "from" ||
+                            (autoFillPending && appState.from == null && appState.fromQuery.isBlank()),
                     onRemoveUsed = { removeUsed(it) },
                     onMyLocation = {
                         useMyLocation("from") { s -> appState.from = s; appState.fromQuery = myLocLabel(s.name) }

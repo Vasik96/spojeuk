@@ -10,12 +10,16 @@ import androidx.compose.runtime.setValue
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.content.edit
+
+/** [refined] = nejbližší po silnici; null když OSRM selhal (pak jen vzdušná čára v [cands]). */
+class NearestResult(val cands: List<Pair<Stop, Double>>, val refined: Pair<Stop, Double>?)
 
 internal val UstiCenter = LatLng(50.6606, 14.0323)
 
@@ -153,6 +157,11 @@ class SpojeAppState(
     var userLocTime: Long = 0L
     /** Druhy dopravy na zastávkách pro filtr ve výběru zastávky; null dokud se nespočítají. */
     var stopModes by mutableStateOf<StopModes?>(null)
+
+    /** Předpočítaná nejbližší zastávka (kandidáti + pořadí po silnici), ať předvyplnění nečeká na OSRM. */
+    var nearestKey: Pair<Double, Double>? = null
+    var nearestKeyTime: Long = 0L
+    var nearestJob: Deferred<NearestResult>? = null
 
     var autoFillDone = false      // předvyplnění proběhlo
     var autoFillAsked = false     // o oprávnění jsme už žádali

@@ -7,6 +7,8 @@ import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -26,14 +28,21 @@ class OsrmClient(private val cacheDir: File) {
         .callTimeout(5, TimeUnit.SECONDS)
         .build()
 
-    /** Předehřátí spojení (DNS + TLS), aby první hledání nejbližší zastávky nebylo pomalé. */
+    // vlákna pro souběžné dotazy (daemon, ať nebrání ukončení procesu)
+    private val raceExecutor = Executors.newCachedThreadPool { r ->
+        Thread(r, "osrm-race").apply { isDaemon = true }
+    }
+
+    /** Předehřátí spojení (DNS + TLS) všech serverů najednou, aby první hledání nejbližší zastávky nebylo pomalé. */
     fun warmUp() {
-        for (host in ROAD_HOSTS) {
-            runCatching {
-                val req = Request.Builder().url(host).head().header("User-Agent", USER_AGENT).build()
-                fastClient.newCall(req).execute().close()
-            }
-        }
+        ROAD_HOSTS.map { host ->
+            CompletableFuture.runAsync({
+                runCatching {
+                    val req = Request.Builder().url(host).head().header("User-Agent", USER_AGENT).build()
+                    fastClient.newCall(req).execute().close()
+                }
+            }, raceExecutor)
+        }.forEach { runCatching { it.get(6, TimeUnit.SECONDS) } }
     }
 
     /**
@@ -149,15 +158,30 @@ class OsrmClient(private val cacheDir: File) {
                 "?sources=0&destinations=$dests&annotations=distance"
 
         repeat(ROAD_ATTEMPTS) { attempt ->
-            val footRes = fetchTable(footUrl, to.size)
-            if (footRes != null) return footRes
-
-            val drivingRes = fetchTable(drivingUrl, to.size)
-            if (drivingRes != null) return drivingRes
-
+            raceTables(footUrl, drivingUrl, to.size)?.let { return it }
             if (attempt < ROAD_ATTEMPTS - 1) Thread.sleep(200L * (attempt + 1))
         }
         return null
+    }
+
+    /**
+     * Pěší a auto server se ptají SOUČASNĚ, ne jeden po druhém (dřív se na pomalý/mrtvý pěší server čekalo
+     * celý timeout, než se vůbec zkusil druhý). Pěší výsledek má přednost; když dorazí jako první, vrací se hned.
+     * Když dorazí první auto, počká se na pěší už jen krátce ([FOOT_GRACE_MS]), aby se výsledek neprotahoval.
+     */
+    private fun raceTables(footUrl: String, drivingUrl: String, n: Int): List<Double?>? {
+        val foot = CompletableFuture.supplyAsync({ fetchTable(footUrl, n) }, raceExecutor)
+        val driving = CompletableFuture.supplyAsync({ fetchTable(drivingUrl, n) }, raceExecutor)
+
+        fun CompletableFuture<List<Double?>?>.await(ms: Long): List<Double?>? =
+            try { get(ms, TimeUnit.MILLISECONDS) } catch (e: Exception) { null }
+
+        runCatching { CompletableFuture.anyOf(foot, driving).get(RACE_MAX_MS, TimeUnit.MILLISECONDS) }
+
+        if (foot.isDone) return foot.await(0) ?: driving.await(RACE_MAX_MS)
+        // první dorazilo auto
+        val d = driving.await(0) ?: return foot.await(RACE_MAX_MS)
+        return foot.await(FOOT_GRACE_MS) ?: d
     }
 
     private fun fetchTable(url: String, n: Int): List<Double?>? = try {
@@ -221,6 +245,8 @@ class OsrmClient(private val cacheDir: File) {
 }
 
 private const val ROAD_ATTEMPTS = 3
+private const val FOOT_GRACE_MS = 600L
+private const val RACE_MAX_MS = 6_000L
 
 /** Zastávky blíž než tohle k předchozímu waypointu se do OSRM neposílají (stejně jako na webu). */
 private const val MIN_GAP_M = 700.0

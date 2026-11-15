@@ -56,10 +56,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -68,9 +70,29 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
+
 @Composable
-internal fun Wavy(size: Dp, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.primary) {
-    CircularWavyProgressIndicator(modifier = modifier.size(size), color = color)
+internal fun Wavy(
+    size: Dp,
+    modifier: Modifier = Modifier,
+    color: Color = MaterialTheme.colorScheme.primary,
+) {
+    val density = LocalDensity.current
+    val strokeWidth = size / 8 // thinner stroke scales with size
+    val stroke = remember(size) {
+        Stroke(
+            width = with(density) { strokeWidth.toPx() },
+            cap = StrokeCap.Round,
+        )
+    }
+
+    CircularWavyProgressIndicator(
+        modifier = modifier.size(size),
+        color = color,
+        stroke = stroke,
+        trackStroke = stroke,
+        wavelength = size / 3, // ~12-13 waves around the circle instead of ~4
+    )
 }
 
 @Composable

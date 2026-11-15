@@ -203,7 +203,7 @@ class DukDirectTest {
         val vDukStale = Vehicle(
             source = "duk",
             lat = 50.66, lng = 14.04, line = "11", delay = 10,
-            observedAtMs = nowMs - 300_000L, // 5 minut zastaralé
+            observedAtMs = nowMs - 350_000L, // více než 5 minut zastaralé
             tid = 100, tripMatch = TripMatch.EXACT, state = 0
         )
 

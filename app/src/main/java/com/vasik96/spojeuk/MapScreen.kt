@@ -44,6 +44,8 @@ import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.size
@@ -227,7 +229,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 }
             appState.vehiclesLoaded = true
             // při výpadku zkoušet častěji, ať se polohy vrátí hned, jak server / síť zase jede
-            delay(if (api.vehicleFetchFailing()) 2_500 else 6_000)
+            delay((if (api.vehicleFetchFailing()) 2_500 else 6_000).milliseconds)
         }
     }
 
@@ -748,9 +750,18 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 icon = { Icon(Icons.Default.Info, null) },
                 title = { Text("Zdroje dat") },
                 text = {
-                    Text(
-                        "Některé zdroje nemusí poskytovat aktuální polohu – ty starší jsou označené červeně. Přesné stáří dat najdete v detailu konkrétního vozidla."
-                    )
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        Text(
+                            "Některé zdroje nemusí poskytovat aktuální polohu – ty starší jsou označené červeně. Přesné stáří dat najdete v detailu konkrétního vozidla."
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text("Diagnostika spojení", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            FeedDiag.text(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 },
                 confirmButton = {
                     TextButton(onClick = { showHeldInfo = false }) { Text("Rozumím") }

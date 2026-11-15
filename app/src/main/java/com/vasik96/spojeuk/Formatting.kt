@@ -42,3 +42,10 @@ internal fun ageLabel(s: Long): String = when {
 internal fun stopLabel(name: String): String = splitStopName(name).first.ifBlank { name }
 
 internal fun myLocLabel(name: String) = "Moje poloha (${stopLabel(name)})"
+
+internal fun formatLastUpdate(ms: Long): String {
+    if (ms <= 0L) return "Nikdy"
+    val dt = LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(ms), PRAGUE_ZONE)
+    val formatter = java.time.format.DateTimeFormatter.ofPattern("d. M. yyyy HH:mm", java.util.Locale.forLanguageTag("cs"))
+    return dt.format(formatter)
+}

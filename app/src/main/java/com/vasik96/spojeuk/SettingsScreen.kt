@@ -751,6 +751,11 @@ private fun DataUpdatesScreen(
     val scope = rememberCoroutineScope()
     val timetableMeta = remember(appState.isUpdatingData) { api.getTimetableMeta() }
     val shapesMeta = remember(appState.isUpdatingData) { api.getShapesMeta() }
+    val lastTimetableUpdate = remember(appState.isUpdatingData) { api.getLastTimetableUpdateMs() }
+    val lastShapesUpdate = remember(appState.isUpdatingData) { api.getLastShapesUpdateMs() }
+    val lastRealtimeUpdate = remember(appState.isUpdatingData) { api.getLastRealtimeUpdateMs() }
+    val lastOsrmClear = remember(appState.isUpdatingData) { api.getLastOsrmClearMs() }
+    val lastCompleteUpdate = remember(appState.isUpdatingData) { api.getLastCompleteUpdateMs() }
 
     Column(
         modifier = modifier
@@ -871,6 +876,14 @@ private fun DataUpdatesScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
                         )
+                        if (lastCompleteUpdate > 0L) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Poslední kompletní update: ${formatLastUpdate(lastCompleteUpdate)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.9f)
+                            )
+                        }
                     }
                 }
 
@@ -899,40 +912,67 @@ private fun DataUpdatesScreen(
             color = MaterialTheme.colorScheme.onBackground
         )
 
+        val timetableBadge = buildString {
+            val tag = timetableMeta["tag"]
+            val built = timetableMeta["built"]
+            if (tag != null) append("Verze $tag")
+            else if (built != null) append("Sestaveno $built")
+            if (lastTimetableUpdate > 0L) {
+                if (isNotEmpty()) append(" • ")
+                append("Staženo: ${formatLastUpdate(lastTimetableUpdate)}")
+            }
+        }.ifBlank {
+            if (lastTimetableUpdate > 0L) "Staženo: ${formatLastUpdate(lastTimetableUpdate)}" else null
+        }
+
         SettingUpdateItemCard(
             title = "Jízdní řády a spojení (GTFS)",
             description = "Stáhnout nejnovější databázi spojů, linek a zastávek z GitHubu.",
-            infoBadge = timetableMeta["tag"]?.let { "Verze $it" } ?: timetableMeta["built"]?.let { "Sestaveno $it" },
+            infoBadge = timetableBadge,
             icon = Icons.Default.DirectionsBus,
             buttonText = "Aktualizovat JŘ",
             enabled = !appState.isUpdatingData,
             onClick = { appState.performUpdateTimetable(api, scope) }
         )
 
+        val shapesBadge = buildString {
+            if (shapesMeta != null) append("Sestaveno $shapesMeta")
+            if (lastShapesUpdate > 0L) {
+                if (isNotEmpty()) append(" • ")
+                append("Staženo: ${formatLastUpdate(lastShapesUpdate)}")
+            }
+        }.ifBlank {
+            if (lastShapesUpdate > 0L) "Staženo: ${formatLastUpdate(lastShapesUpdate)}" else null
+        }
+
         SettingUpdateItemCard(
             title = "Trasy a geometrie linek (Shapes)",
             description = "Stáhnout přesné tvary tras pro zobrazení linek na mapě.",
-            infoBadge = shapesMeta?.let { "Sestaveno $it" },
+            infoBadge = shapesBadge,
             icon = Icons.Default.Route,
             buttonText = "Aktualizovat trasy",
             enabled = !appState.isUpdatingData,
             onClick = { appState.performUpdateShapes(api, scope) }
         )
 
+        val realtimeBadge = if (lastRealtimeUpdate > 0L) "Poslední obnova: ${formatLastUpdate(lastRealtimeUpdate)}" else "Aktuální polohy"
+
         SettingUpdateItemCard(
             title = "Živá poloha vozidel (Realtime)",
             description = "Obnovit okamžité polohy autobusů, trolejbusů a vlaků.",
-            infoBadge = "Aktuální polohy",
+            infoBadge = realtimeBadge,
             icon = Icons.Default.LocationOn,
             buttonText = "Obnovit polohy",
             enabled = !appState.isUpdatingData,
             onClick = { appState.performUpdateRealtime(api, scope) }
         )
 
+        val osrmBadge = if (lastOsrmClear > 0L) "Poslední čištění: ${formatLastUpdate(lastOsrmClear)}" else null
+
         SettingUpdateItemCard(
             title = "Cache pěších a silničních tras (OSRM)",
             description = "Vymazat a obnovit uložené trasy OSRM v zařízení.",
-            infoBadge = null,
+            infoBadge = osrmBadge,
             icon = Icons.Default.DeleteSweep,
             buttonText = "Vyčistit cache",
             enabled = !appState.isUpdatingData,

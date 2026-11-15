@@ -32,7 +32,7 @@ data class Fleet(
         val now = java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(nowMs), PRAGUE_ZONE)
         val rel = secondsSinceMidnight(day, now)
         if (rel < leg.t0 - 3600 || rel > leg.t1 + 3600) return null
-        val candidates = byTid[leg.tid]?.filter { it.state != 255 && it.delay > -30 && it.ageSec(nowMs) <= 180 } ?: return null
+        val candidates = byTid[leg.tid]?.filter { it.state != 255 && it.delay > -30 && it.ageSec(nowMs) <= 300 } ?: return null
         return candidates.firstOrNull { it.tripMatch == TripMatch.EXACT }
             ?: candidates.firstOrNull { it.tripMatch == TripMatch.HEURISTIC }
     }
@@ -200,8 +200,9 @@ class VehicleHub(
 
         val vehicles = if (dropped) emptyList() else {
             val all = enrichedVehicles(snap, timetable())
-            if (enabled == null) all
-            else all.filter { v -> v.sources.ifEmpty { listOf(v.source) }.any { it in enabled } }
+            val filtered = all.filter { v -> v.ageSec(now) <= 300 }
+            if (enabled == null) filtered
+            else filtered.filter { v -> v.sources.ifEmpty { listOf(v.source) }.any { it in enabled } }
         }
         val reports = active.map { report(it, snap, serverStale, dropped) }
         return Fleet(vehicles, reports, SourceLabel.build(reports), warningCount(reports))

@@ -92,8 +92,16 @@ class TransitRepository(context: Context? = null) {
     fun getTimetableMeta(): Map<String, String> = store.meta()
     fun getShapesMeta(): String? = shapes.getBuiltDate()
 
-    suspend fun updateTimetable(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): Unit =
+    fun getLastTimetableUpdateMs(): Long = autoPolicy?.lastTimetableUpdateMs ?: 0L
+    fun getLastShapesUpdateMs(): Long = autoPolicy?.lastShapesUpdateMs ?: 0L
+    fun getLastRealtimeUpdateMs(): Long = autoPolicy?.lastRealtimeUpdateMs ?: 0L
+    fun getLastOsrmClearMs(): Long = autoPolicy?.lastOsrmClearMs ?: 0L
+    fun getLastCompleteUpdateMs(): Long = autoPolicy?.lastSuccessMs ?: 0L
+
+    suspend fun updateTimetable(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): Unit {
         store.stageUpdate(log, progress)
+        autoPolicy?.lastTimetableUpdateMs = System.currentTimeMillis()
+    }
 
     suspend fun updateShapes(log: (String) -> Unit = {}, forceDownload: Boolean = false): Boolean =
         withContext(Dispatchers.IO) {
@@ -101,6 +109,7 @@ class TransitRepository(context: Context? = null) {
             val updated = shapes.sync(http, force = true, forceDownload = forceDownload)
             runCatching { trainShapes.sync(http, force = true, forceDownload = forceDownload) }
                 .onFailure { Log.w(TAG, "sync tras vlaků selhal: ${it.message}") }
+            autoPolicy?.lastShapesUpdateMs = System.currentTimeMillis()
             log(if (updated) "Trasy spojů byly aktualizovány." else "Trasy spojů jsou již aktuální.")
             updated
         }
@@ -108,6 +117,7 @@ class TransitRepository(context: Context? = null) {
     fun clearOsrmCache(log: (String) -> Unit = {}): Int {
         log("Čistím cache OSRM tras…")
         val count = osrm.clearCache()
+        autoPolicy?.lastOsrmClearMs = System.currentTimeMillis()
         log("Cache tras vyčištěna ($count souborů smazáno).")
         return count
     }
@@ -134,6 +144,15 @@ class TransitRepository(context: Context? = null) {
         log("4/4: Čistím cache tras OSRM…")
         progress(0.95f)
         clearOsrmCache(log = { log("4/4: $it") })
+
+        val now = System.currentTimeMillis()
+        autoPolicy?.let {
+            it.lastTimetableUpdateMs = now
+            it.lastShapesUpdateMs = now
+            it.lastRealtimeUpdateMs = now
+            it.lastOsrmClearMs = now
+            it.lastSuccessMs = now
+        }
 
         progress(1.0f)
         log("Kompletní aktualizace dat byla úspěšně dokončena!")
@@ -288,6 +307,7 @@ class TransitRepository(context: Context? = null) {
     suspend fun updateRealtime(log: (String) -> Unit = {}): List<Vehicle> {
         log("Obnovuji živá data vozidel…")
         val vehicles = vehiclePositions()
+        autoPolicy?.lastRealtimeUpdateMs = System.currentTimeMillis()
         log("Živá data obnovena (${vehicles.size} vozidel).")
         return vehicles
     }

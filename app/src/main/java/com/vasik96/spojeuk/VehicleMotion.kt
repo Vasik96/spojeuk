@@ -631,9 +631,11 @@ internal class VehicleMotion(
         lastFixRecvMs = now
         lastFixPos = np
 
-        val ageSec = if (obsMs > 0 && obsMs <= System.currentTimeMillis()) {
-            ((System.currentTimeMillis() - obsMs) / 1000.0).coerceIn(0.0, 4.0)
-        } else 0.0
+        val ageSec = when {
+            obsMs <= 0 -> 0.0
+            obsMs > 10_000_000_000L -> ((System.currentTimeMillis() - obsMs) / 1000.0).coerceIn(0.0, 4.0)
+            else -> ((SystemClock.elapsedRealtime() - obsMs) / 1000.0).coerceIn(0.0, 4.0)
+        }
 
         val extrapolatedS = (sFix + vCruise * ageSec).coerceAtMost(r.totalMeters)
         sTarget = extrapolatedS
@@ -751,7 +753,11 @@ internal class VehicleMotion(
         val timeSinceFixSec = ((now - lastFixRecvMs) / 1000.0).coerceIn(0.0, MAX_PREDICT_SINCE_FIX_S)
         // Stáří samotné polohy (ne kdy dorazila): stará poloha (cache po startu, držená z minula) se nepředpovídá vůbec,
         // vůz mohl dávno stát nebo jet jinam.
-        val dataAgeSec = if (fixObsMs in 1..System.currentTimeMillis()) (System.currentTimeMillis() - fixObsMs) / 1000.0 else 0.0
+        val dataAgeSec = when {
+            fixObsMs <= 0 -> 0.0
+            fixObsMs > 10_000_000_000L -> ((System.currentTimeMillis() - fixObsMs) / 1000.0).coerceAtLeast(0.0)
+            else -> ((SystemClock.elapsedRealtime() - fixObsMs) / 1000.0).coerceAtLeast(0.0)
+        }
         val leadM = if (dataAgeSec > MAX_PREDICT_DATA_AGE_S) 0.0
         else (vCruise * (timeSinceFixSec + leadSec)).coerceAtMost(MAX_LEAD_M)
         val currentTargetS = (sLastFix + leadM).coerceAtMost(totalMeters)

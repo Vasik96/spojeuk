@@ -12,6 +12,37 @@ class AutoUpdatePolicy(private val context: Context) {
         get() = prefs.getLong("last_success_ms", 0L)
         set(v) = prefs.edit { putLong("last_success_ms", v) }
 
+    var lastTimetableUpdateMs: Long
+        get() = prefs.getLong("last_timetable_update_ms", 0L).let {
+            if (it == 0L) {
+                val f = java.io.File(java.io.File(context.filesDir, "spojeuk"), "static.sqlite")
+                if (f.exists()) f.lastModified() else 0L
+            } else it
+        }
+        set(v) = prefs.edit { putLong("last_timetable_update_ms", v) }
+
+    var lastShapesUpdateMs: Long
+        get() = prefs.getLong("last_shapes_update_ms", 0L).let {
+            if (it == 0L) {
+                val f = java.io.File(java.io.File(context.filesDir, "spojeuk"), "shapes.sqlite")
+                if (f.exists()) f.lastModified() else 0L
+            } else it
+        }
+        set(v) = prefs.edit { putLong("last_shapes_update_ms", v) }
+
+    var lastRealtimeUpdateMs: Long
+        get() = prefs.getLong("last_realtime_update_ms", 0L).let {
+            if (it == 0L) {
+                val f = java.io.File(context.filesDir, "last_vehicles.json")
+                if (f.exists()) f.lastModified() else 0L
+            } else it
+        }
+        set(v) = prefs.edit { putLong("last_realtime_update_ms", v) }
+
+    var lastOsrmClearMs: Long
+        get() = prefs.getLong("last_osrm_clear_ms", 0L)
+        set(v) = prefs.edit { putLong("last_osrm_clear_ms", v) }
+
     fun isDue(now: Long = System.currentTimeMillis()): Boolean =
         now - lastSuccessMs >= INTERVAL_MS
 

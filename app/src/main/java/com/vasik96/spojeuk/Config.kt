@@ -38,5 +38,11 @@ val DPMUL_AGENCY_KEYWORDS = listOf("dopravni podnik mesta usti", "dpmul")
 
 const val SERVER_IP = "https://feed.spojeuk.duckdns.org"
 
+/**
+ * Záložní IP serveru poloh, použije se jen když systémové DNS pro [SERVER_IP] nestihne odpovědět nebo selže
+ * (DuckDNS / Private DNS / mobilní síť po startu). Drž ji v souladu s A záznamem v DuckDNS.
+ */
+val FEED_FALLBACK_IPS = listOf("37.46.211.70")
+
 /** Všechna vozidla sloučená ze zdrojů (DPMÚL, DÚK, Správa železnic). */
 const val API_VEHICLES_URL = "$SERVER_IP/api/vehicles"

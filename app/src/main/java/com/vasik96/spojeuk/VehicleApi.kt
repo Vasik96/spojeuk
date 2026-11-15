@@ -15,6 +15,11 @@ import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
 
 /** Identifikátory zdrojů poloh tak, jak je posílá server (pole `source` / `sources`). */
@@ -46,6 +51,21 @@ data class ApiSnapshot(
     val receivedMs: Long,
 )
 
+/** Posledních pár řádků o dotazech na server poloh, k zobrazení v appce (bez adb / logcatu). */
+object FeedDiag {
+    private val lines = java.util.ArrayDeque<String>()
+    private val fmt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+
+    @Synchronized
+    fun add(msg: String) {
+        lines.addFirst("${fmt.format(java.util.Date())}  $msg")
+        while (lines.size > 8) lines.removeLast()
+    }
+
+    @Synchronized
+    fun text(): String = if (lines.isEmpty()) "zatím žádný dotaz" else lines.joinToString("\n")
+}
+
 /** Do logcatu (tag VehicleApi) vypíše, kde se u dotazu ztrácí čas: DNS / TCP / TLS / odpověď serveru / chyba. */
 private class TimingListener : EventListener() {
     private val t0 = SystemClock.elapsedRealtime()
@@ -72,9 +92,11 @@ private class TimingListener : EventListener() {
     override fun responseHeadersStart(call: Call) { lap("server-wait") }
     override fun callEnd(call: Call) {
         Log.d("VehicleApi", "OK celkem ${SystemClock.elapsedRealtime() - t0} ms: $parts")
+        FeedDiag.add("OK ${SystemClock.elapsedRealtime() - t0} ms: $parts")
     }
     override fun callFailed(call: Call, ioe: IOException) {
         Log.w("VehicleApi", "SELHALO po ${SystemClock.elapsedRealtime() - t0} ms (${ioe.javaClass.simpleName}: ${ioe.message}): $parts")
+        FeedDiag.add("SELHALO ${SystemClock.elapsedRealtime() - t0} ms ${ioe.javaClass.simpleName}: ${ioe.message}: $parts")
     }
 }
 
@@ -85,30 +107,54 @@ private class TimingListener : EventListener() {
 class VehicleApi(private val url: String = API_VEHICLES_URL) {
 
     /**
-     * DNS s vlastní cache: IPv4 adresy mají přednost (rozbité IPv6 jinak zdržuje spojení) a úspěšný překlad se drží
-     * [DNS_TTL_MS], takže pomalé / nespolehlivé DNS (DuckDNS, Private DNS) neplatí každý dotaz. Když překlad selže,
-     * použije se poslední známá adresa. Po chybě spojení se cache zahodí ([invalidate]), aby se zachytila změna IP.
+     * DNS, které se nesmí zaseknout:
+     *  - překlad běží na vlastním vlákně a čeká se na něj jen [DNS_WAIT_MS]; když systémové DNS (DuckDNS, Private DNS,
+     *    mobilní síť po startu) váhá, použije se poslední známá adresa serveru, nebo pevná záložní IP z [FEED_FALLBACK_IPS];
+     *  - úspěšný překlad se drží [DNS_TTL_MS], takže se DNS neplatí při každém dotazu;
+     *  - IPv4 má přednost (rozbité IPv6 jinak zdržuje spojení).
+     * Po chybě spojení se cache jen označí jako prošlá ([invalidate]), adresy zůstávají jako záloha.
      */
-    private class FallbackDns : Dns {
+    private class FallbackDns(private val fallbackIps: List<String>) : Dns {
         private class Entry(val addrs: List<InetAddress>, val atMs: Long)
         private val cache = ConcurrentHashMap<String, Entry>()
 
-        fun invalidate() = cache.clear()
+        fun invalidate() { cache.replaceAll { _, e -> Entry(e.addrs, 0L) } }
+
+        private fun fallback(host: String): List<InetAddress> =
+            cache[host]?.addrs ?: fallbackIps.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
 
         override fun lookup(hostname: String): List<InetAddress> {
             val now = System.currentTimeMillis()
             cache[hostname]?.let { if (now - it.atMs < DNS_TTL_MS) return it.addrs }
-            return try {
-                val sorted = Dns.SYSTEM.lookup(hostname).sortedBy { if (it is Inet4Address) 0 else 1 }
-                if (sorted.isNotEmpty()) cache[hostname] = Entry(sorted, now)
-                sorted
-            } catch (e: UnknownHostException) {
-                cache[hostname]?.addrs ?: throw e
+
+            val future = DNS_POOL.submit<List<InetAddress>> {
+                Dns.SYSTEM.lookup(hostname)
+                    .sortedBy { if (it is Inet4Address) 0 else 1 }
+                    .also { if (it.isNotEmpty()) cache[hostname] = Entry(it, System.currentTimeMillis()) }
+            }
+            try {
+                return future.get(DNS_WAIT_MS, TimeUnit.MILLISECONDS)
+            } catch (e: TimeoutException) {
+                Log.w("VehicleApi", "DNS pro $hostname trvá přes $DNS_WAIT_MS ms, použiju záložní adresu")
+                FeedDiag.add("DNS pomalé (>$DNS_WAIT_MS ms), záloha: ${fallback(hostname).joinToString { it.hostAddress ?: "?" }}")
+                val fb = fallback(hostname)
+                if (fb.isNotEmpty()) return fb
+                return try {
+                    future.get(DNS_MAX_WAIT_MS - DNS_WAIT_MS, TimeUnit.MILLISECONDS)
+                } catch (e2: Exception) {
+                    throw UnknownHostException("DNS pro $hostname neodpovědělo")
+                }
+            } catch (e: ExecutionException) {
+                Log.w("VehicleApi", "DNS pro $hostname selhalo: ${e.cause?.message}")
+                FeedDiag.add("DNS selhalo: ${e.cause?.message}")
+                val fb = fallback(hostname)
+                if (fb.isNotEmpty()) return fb
+                throw (e.cause as? UnknownHostException) ?: UnknownHostException(hostname)
             }
         }
     }
 
-    private val dns = FallbackDns()
+    private val dns = FallbackDns(FEED_FALLBACK_IPS)
 
     private val client = OkHttpClient.Builder()
         .dns(dns)
@@ -134,29 +180,98 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
         dns.invalidate()
     }
 
-    /** Blokující dotaz (volat z IO). Vyhodí výjimku při chybě sítě / HTTP / JSON. */
+    /** Klient pro záložní pokusy: vlastní pool spojení, ať se nepoužije stejné (možná zaseknuté) HTTP/2 spojení. */
+    private val hedgeClient by lazy {
+        client.newBuilder().connectionPool(ConnectionPool(2, 1, TimeUnit.MINUTES)).build()
+    }
+
+    /**
+     * Blokující dotaz (volat z IO). Vyhodí výjimku při chybě sítě / HTTP / JSON.
+     *
+     * Dotaz se "zajišťuje": když první pokus do [HEDGE_AFTER_MS] neodpoví (zasekl se DNS / spojení / TLS, mrtvé pooled
+     * spojení), spustí se vedle něj další na čistém spojení (a po dalších [HEDGE_AFTER_MS] třetí). Platí první úspěšná
+     * odpověď, ostatní se zruší. Když pokus rovnou selže, nastoupí hned další bez čekání. Celkem nejvýš [TOTAL_BUDGET_MS].
+     */
     fun fetch(): ApiSnapshot {
         val request = Request.Builder().url(url)
             .header("User-Agent", USER_AGENT)
             .header("Accept", "application/json")
             .build()
+
+        class Outcome(val snap: ApiSnapshot?, val body: String?, val error: Exception?)
+
+        val results = LinkedBlockingQueue<Outcome>()
+        val calls = CopyOnWriteArrayList<Call>()
+        var started = 0
+        var failed = 0
+        var lastError: Exception? = null
+        val t0 = SystemClock.elapsedRealtime()
+
+        fun launch() {
+            val c = if (started == 0) client else hedgeClient
+            val call = c.newCall(request)
+            started++
+            calls.add(call)
+            ATTEMPT_POOL.execute {
+                results.add(
+                    try {
+                        call.execute().use { resp ->
+                            if (!resp.isSuccessful) error("HTTP ${resp.code}")
+                            val body = resp.body?.string().orEmpty()
+                            Outcome(parse(body, System.currentTimeMillis()), body, null)
+                        }
+                    } catch (e: Exception) {
+                        Outcome(null, null, e)
+                    }
+                )
+            }
+        }
+
+        launch()
         try {
-            return client.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) error("HTTP ${resp.code}")
-                val body = resp.body?.string().orEmpty()
-                val snap = parse(body, System.currentTimeMillis())
-                lastBody = body
-                snap
+            while (true) {
+                val remaining = TOTAL_BUDGET_MS - (SystemClock.elapsedRealtime() - t0)
+                if (remaining <= 0) throw lastError ?: IOException("Server poloh neodpověděl včas")
+                val wait = if (started < MAX_ATTEMPTS) minOf(HEDGE_AFTER_MS, remaining) else remaining
+                val r = results.poll(wait, TimeUnit.MILLISECONDS)
+                if (r == null) {
+                    if (started < MAX_ATTEMPTS) launch()   // pomalé: zkusit ještě jednou vedle
+                    continue
+                }
+                if (r.snap != null) {
+                    lastBody = r.body.orEmpty()
+                    if (started > 1) {
+                        Log.i("VehicleApi", "odpověď po ${SystemClock.elapsedRealtime() - t0} ms (pokusů: $started)")
+                        FeedDiag.add("odpověď po ${SystemClock.elapsedRealtime() - t0} ms, pokusů: $started")
+                    }
+                    return r.snap
+                }
+                failed++
+                lastError = r.error
+                if (failed >= started) {
+                    if (started >= MAX_ATTEMPTS) throw lastError ?: IOException("Server poloh neodpovídá")
+                    launch()   // vše dosud selhalo: hned další pokus, bez čekání
+                }
             }
         } catch (e: Exception) {
             // zaseknuté / mrtvé spojení by se jinak znovu použilo pro každý další dotaz, dokud se appka nerestartuje
             resetConnections()
             throw e
+        } finally {
+            calls.forEach { runCatching { it.cancel() } }
         }
     }
 
     companion object {
         private const val DNS_TTL_MS = 5 * 60_000L
+        private const val DNS_WAIT_MS = 2_500L
+        private const val DNS_MAX_WAIT_MS = 10_000L
+        private const val HEDGE_AFTER_MS = 2_500L
+        private const val MAX_ATTEMPTS = 3
+        private const val TOTAL_BUDGET_MS = 15_000L
+
+        private val DNS_POOL = Executors.newCachedThreadPool { r -> Thread(r, "vehicle-dns").apply { isDaemon = true } }
+        private val ATTEMPT_POOL = Executors.newCachedThreadPool { r -> Thread(r, "vehicle-fetch").apply { isDaemon = true } }
 
         fun parse(body: String, nowMs: Long): ApiSnapshot {
             val root = JSONObject(body)
