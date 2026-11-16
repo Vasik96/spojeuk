@@ -102,6 +102,7 @@ import androidx.core.graphics.createBitmap
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.CameraPosition
@@ -201,6 +202,8 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         isMapReady = false
     }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+
     // polling poloh
     LaunchedEffect(active) {
         if (!active) return@LaunchedEffect
@@ -216,22 +219,26 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         } else {
             appState.vehiclesLoaded = false
         }
-        while (true) {
-            runCatching { api.vehiclePositions(maxAgeMs = 4_000) }
-                .onSuccess {
-                    appState.updateVehicles(it)
-                    appState.heldCount = api.heldCount()
-                    appState.vehicleSource = api.sourceLabel()
-                    appState.mapError = if (api.vehicleFetchFailing()) "Polohy vozidel se nepodařilo načíst" else null
-                }
-                .onFailure {
-                    if (it is CancellationException) throw it
-                    appState.mapError = "Polohy vozidel se nepodařilo načíst"
-                }
-            appState.vehiclesLoaded = true
-            // při výpadku zkoušet častěji, ať se polohy vrátí hned, jak server / síť zase jede
-            delay((if (api.vehicleFetchFailing()) 2_500 else 6_000).milliseconds)
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                runCatching { api.vehiclePositions(maxAgeMs = 4_000) }
+                    .onSuccess {
+                        appState.updateVehicles(it)
+                        appState.heldCount = api.heldCount()
+                        appState.vehicleSource = api.sourceLabel()
+                        appState.mapError =
+                            if (api.vehicleFetchFailing()) "Polohy vozidel se nepodařilo načíst" else null
+                    }
+                    .onFailure {
+                        if (it is CancellationException) throw it
+                        appState.mapError = "Polohy vozidel se nepodařilo načíst"
+                    }
+                appState.vehiclesLoaded = true
+                // při výpadku zkoušet častěji, ať se polohy vrátí hned, jak server / síť zase jede
+                delay((if (api.vehicleFetchFailing()) 2_500 else 6_000).milliseconds)
+            }
         }
+
     }
 
     // Aktualizace poloh ihned, jakmile dorazí nové z hubu (na pozadí z launch prewarmu nebo refreshu)

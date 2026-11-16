@@ -118,40 +118,35 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
     private class FallbackDns(private val fallbackIps: List<String>) : Dns {
         private class Entry(val addrs: List<InetAddress>, val atMs: Long)
         private val cache = ConcurrentHashMap<String, Entry>()
+        private val refreshing = ConcurrentHashMap.newKeySet<String>()
+
+        init {
+            // studený start: hned mám co použít
+            val seed = fallbackIps.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
+            if (seed.isNotEmpty()) cache[HOST_SEED] = Entry(seed, 0L)
+        }
 
         fun invalidate() { cache.replaceAll { _, e -> Entry(e.addrs, 0L) } }
 
-        private fun fallback(host: String): List<InetAddress> =
-            cache[host]?.addrs ?: fallbackIps.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
+        private fun refreshAsync(host: String) {
+            if (!refreshing.add(host)) return
+            DNS_POOL.execute {
+                try {
+                    val r = Dns.SYSTEM.lookup(host).sortedBy { if (it is Inet4Address) 0 else 1 }
+                    if (r.isNotEmpty()) cache[host] = Entry(r, System.currentTimeMillis())
+                } catch (e: Exception) {
+                    Log.w("VehicleApi", "DNS refresh selhal: ${e.message}")
+                } finally { refreshing.remove(host) }
+            }
+        }
 
         override fun lookup(hostname: String): List<InetAddress> {
-            val now = System.currentTimeMillis()
-            cache[hostname]?.let { if (now - it.atMs < DNS_TTL_MS) return it.addrs }
-
-            val future = DNS_POOL.submit<List<InetAddress>> {
-                Dns.SYSTEM.lookup(hostname)
-                    .sortedBy { if (it is Inet4Address) 0 else 1 }
-                    .also { if (it.isNotEmpty()) cache[hostname] = Entry(it, System.currentTimeMillis()) }
+            val e = cache[hostname] ?: cache[HOST_SEED]?.also { cache[hostname] = it }
+            if (e != null) {
+                if (System.currentTimeMillis() - e.atMs >= DNS_TTL_MS) refreshAsync(hostname)
+                return e.addrs                    // okamžitě, bez čekání na DNS
             }
-            try {
-                return future.get(DNS_WAIT_MS, TimeUnit.MILLISECONDS)
-            } catch (e: TimeoutException) {
-                Log.w("VehicleApi", "DNS pro $hostname trvá přes $DNS_WAIT_MS ms, použiju záložní adresu")
-                FeedDiag.add("DNS pomalé (>$DNS_WAIT_MS ms), záloha: ${fallback(hostname).joinToString { it.hostAddress ?: "?" }}")
-                val fb = fallback(hostname)
-                if (fb.isNotEmpty()) return fb
-                return try {
-                    future.get(DNS_MAX_WAIT_MS - DNS_WAIT_MS, TimeUnit.MILLISECONDS)
-                } catch (e2: Exception) {
-                    throw UnknownHostException("DNS pro $hostname neodpovědělo")
-                }
-            } catch (e: ExecutionException) {
-                Log.w("VehicleApi", "DNS pro $hostname selhalo: ${e.cause?.message}")
-                FeedDiag.add("DNS selhalo: ${e.cause?.message}")
-                val fb = fallback(hostname)
-                if (fb.isNotEmpty()) return fb
-                throw (e.cause as? UnknownHostException) ?: UnknownHostException(hostname)
-            }
+            return Dns.SYSTEM.lookup(hostname)    // úplně bez zálohy: nic jiného nezbývá
         }
     }
 
@@ -267,6 +262,7 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
         private const val DNS_TTL_MS = 5 * 60_000L
         private const val DNS_WAIT_MS = 2_500L
         private const val DNS_MAX_WAIT_MS = 10_000L
+        private const val HOST_SEED = "_seed"
         private const val HEDGE_AFTER_MS = 2_500L
         private const val MAX_ATTEMPTS = 3
         private const val TOTAL_BUDGET_MS = 15_000L
