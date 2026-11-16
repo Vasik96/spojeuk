@@ -65,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import com.google.android.gms.maps.model.LatLng
+import androidx.compose.runtime.withFrameNanos
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -210,8 +211,10 @@ internal fun SpojeApp() {
     // Mapa se vytvoří v pozadí po ustálení startu (nebo ihned při přechodu na ni) a pak zůstane naživu
     var mapVisited by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        // Počkat na úplné ustálení po startu, aby nebrzdila první zobrazení
-        delay(2500.milliseconds)
+        // Mapa se vytvoří hned, jak je venku první snímek a hlavní vlákno nemá co dělat (schovaná pod překryvem);
+        // žádný pevný časovač. Když uživatel klepne dřív, vytvoří se při klepnutí (viz níže).
+        withFrameNanos { }
+        awaitMainThreadIdle()
         mapVisited = true
     }
     LaunchedEffect(appState.selectedTab) {

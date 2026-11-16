@@ -11,6 +11,9 @@ import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.LatLng
 import java.util.concurrent.ConcurrentHashMap
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.withScale
+import androidx.core.graphics.drawable.toDrawable
 
 // Ikony vozů a šipky na trase pro Google Maps. Až přibudou další mapové providery,
 // bitmapy se dají použít beze změny, jen BitmapDescriptor je specifický pro Google.
@@ -70,7 +73,7 @@ private fun createLineMarkerDrawable(
     val widthPx = maxOf((36 * density).toInt(), (textWidthPx + effectivePadDp * density).toInt())
     val heightPx = (heightDp * density).toInt()
 
-    val bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
+    val bitmap = createBitmap(widthPx, heightPx)
     val canvas = Canvas(bitmap)
 
     val bgColor = when {
@@ -102,7 +105,7 @@ private fun createLineMarkerDrawable(
     val textY = (heightPx / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
     canvas.drawText(displayLine, widthPx / 2f, textY, textPaint)
 
-    val drawable = BitmapDrawable(context.resources, bitmap)
+    val drawable = bitmap.toDrawable(context.resources)
     markerIconCache[key] = drawable
     return drawable
 }
@@ -132,38 +135,36 @@ private val arrowDescCache = ConcurrentHashMap<String, BitmapDescriptor>()
 internal fun routeArrowDescriptor(primaryColor: Int, scale: Float): BitmapDescriptor {
     val size = (96 * scale).toInt().coerceAtLeast(18)
     return arrowDescCache.getOrPut("$primaryColor:$size") {
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(size, size)
         val canvas = Canvas(bitmap)
 
         // Souřadnice se škálují společně s bitmapou.
-        canvas.save()
-        canvas.scale(size / 72f, size / 72f)
+        canvas.withScale(size / 72f, size / 72f) {
+            val path = android.graphics.Path().apply {
+                moveTo(13f, 43f)
+                lineTo(36f, 15f)
+                lineTo(59f, 43f)
+            }
 
-        val path = android.graphics.Path().apply {
-            moveTo(13f, 43f)
-            lineTo(36f, 15f)
-            lineTo(59f, 43f)
+            val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.BLACK
+                style = Paint.Style.STROKE
+                strokeWidth = 18f
+                strokeJoin = Paint.Join.ROUND
+                strokeCap = Paint.Cap.ROUND
+            }
+            drawPath(path, borderPaint)
+
+            val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = primaryColor
+                style = Paint.Style.STROKE
+                strokeWidth = 11f
+                strokeJoin = Paint.Join.ROUND
+                strokeCap = Paint.Cap.ROUND
+            }
+            drawPath(path, arrowPaint)
+
         }
-
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.BLACK
-            style = Paint.Style.STROKE
-            strokeWidth = 18f
-            strokeJoin = Paint.Join.ROUND
-            strokeCap = Paint.Cap.ROUND
-        }
-        canvas.drawPath(path, borderPaint)
-
-        val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = primaryColor
-            style = Paint.Style.STROKE
-            strokeWidth = 11f
-            strokeJoin = Paint.Join.ROUND
-            strokeCap = Paint.Cap.ROUND
-        }
-        canvas.drawPath(path, arrowPaint)
-
-        canvas.restore()
 
         BitmapDescriptorFactory.fromBitmap(bitmap)
     }
@@ -241,7 +242,7 @@ internal fun routeStartBitmap(ctx: Context): Bitmap {
     cachedStartBitmap?.let { return it }
     val density = ctx.resources.displayMetrics.density
     val sizePx = (24 * density).toInt()
-    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val bitmap = createBitmap(sizePx, sizePx)
     val canvas = Canvas(bitmap)
 
     val strokePx = 3f * density
@@ -290,7 +291,7 @@ internal fun routeEndBitmap(ctx: Context): Bitmap {
     cachedEndBitmap?.let { return it }
     val density = ctx.resources.displayMetrics.density
     val sizePx = (24 * density).toInt()
-    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val bitmap = createBitmap(sizePx, sizePx)
     val canvas = Canvas(bitmap)
 
     val strokePx = 3f * density
@@ -330,9 +331,18 @@ internal fun routeEndBitmap(ctx: Context): Bitmap {
 /** Kruh pro mezilehlé zastávky na trase (bílý s modrým okrajem a bodem). */
 internal fun routeStopDescriptor(ctx: Context): BitmapDescriptor {
     stopDesc?.let { return it }
+    val desc = BitmapDescriptorFactory.fromBitmap(routeStopBitmap(ctx))
+    stopDesc = desc
+    return desc
+}
+
+private var cachedStopBitmap: Bitmap? = null
+
+internal fun routeStopBitmap(ctx: Context): Bitmap {
+    cachedStopBitmap?.let { return it }
     val density = ctx.resources.displayMetrics.density
     val sizePx = (16 * density).toInt()
-    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val bitmap = createBitmap(sizePx, sizePx)
     val canvas = Canvas(bitmap)
 
     val strokePx = 2.5f * density
@@ -358,7 +368,6 @@ internal fun routeStopDescriptor(ctx: Context): BitmapDescriptor {
     }
     canvas.drawCircle(center, center, 2.5f * density, dotPaint)
 
-    val desc = BitmapDescriptorFactory.fromBitmap(bitmap)
-    stopDesc = desc
-    return desc
+    cachedStopBitmap = bitmap
+    return bitmap
 }

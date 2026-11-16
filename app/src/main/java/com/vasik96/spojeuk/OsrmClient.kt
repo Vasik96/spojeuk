@@ -1,10 +1,15 @@
 package com.vasik96.spojeuk
 
+import android.os.SystemClock
+import android.util.Log
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.InetAddress
+import java.util.concurrent.ConcurrentHashMap
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
@@ -15,8 +20,11 @@ import java.util.concurrent.TimeUnit
  * Klient pro OSRM (veřejný router.project-osrm.org): trasa po silnici přes zastávky
  * (s cache na disku) a vzdálenosti po silnici pro hledání nejbližší zastávky.
  */
-class OsrmClient(private val cacheDir: File) {
+class OsrmClient(private val cacheDir: File, private val context: android.content.Context? = null) {
+    @Volatile private var lastNetLogMs = 0L
+
     private val client = OkHttpClient.Builder()
+        .dns(StaleDns)
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
@@ -37,9 +45,15 @@ class OsrmClient(private val cacheDir: File) {
     fun warmUp() {
         ROAD_HOSTS.map { host ->
             CompletableFuture.runAsync({
-                runCatching {
+                val t0 = SystemClock.elapsedRealtime()
+                try {
                     val req = Request.Builder().url(host).head().header("User-Agent", USER_AGENT).build()
-                    fastClient.newCall(req).execute().close()
+                    fastClient.newCall(req).execute().use { resp ->
+                        Log.d(TAG, "warmUp $host HTTP ${resp.code} za ${SystemClock.elapsedRealtime() - t0} ms")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "warmUp $host selhal za ${SystemClock.elapsedRealtime() - t0} ms: ${describe(e)}")
+                    logNetworkState("warmUp")
                 }
             }, raceExecutor)
         }.forEach { runCatching { it.get(6, TimeUnit.SECONDS) } }
@@ -107,10 +121,14 @@ class OsrmClient(private val cacheDir: File) {
             val radStr = List(chunk.size) { radius.toString() }.joinToString(";")
             val url = "https://router.project-osrm.org/route/v1/driving/$coordsStr" +
                     "?overview=full&geometries=geojson&continue_straight=false&radiuses=$radStr"
+            val t0 = SystemClock.elapsedRealtime()
             try {
                 val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
                 val res = client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use null     // typicky 400 NoSegment: zkusí se větší poloměr
+                    if (!resp.isSuccessful) {
+                        Log.w(TAG, "route r=$radius HTTP ${resp.code} za ${SystemClock.elapsedRealtime() - t0} ms (${chunk.size} bodů)")
+                        return@use null     // typicky 400 NoSegment: zkusí se větší poloměr
+                    }
                     val body = resp.body?.string() ?: return@use null
                     val routes = JSONObject(body).optJSONArray("routes")
                     if (routes == null || routes.length() == 0) return@use null
@@ -123,9 +141,13 @@ class OsrmClient(private val cacheDir: File) {
                     }
                     list.takeIf { it.size >= 2 }
                 }
-                if (res != null) return res
+                if (res != null) {
+                    Log.d(TAG, "route r=$radius OK za ${SystemClock.elapsedRealtime() - t0} ms (${chunk.size} bodů, ${res.size} bodů trasy)")
+                    return res
+                }
             } catch (e: Exception) {
-                android.util.Log.w("OsrmClient", "OSRM dotaz selhal: ${e.message}")
+                Log.w(TAG, "route r=$radius selhal za ${SystemClock.elapsedRealtime() - t0} ms (${chunk.size} bodů): ${describe(e)}")
+                logNetworkState("route")
             }
         }
         return null
@@ -140,8 +162,12 @@ class OsrmClient(private val cacheDir: File) {
     }
 
     /**
-     * Vzdálenosti z bodu `from` ke každému bodu v `to` (metry). null jen když selžou všechny pokusy.
-     * Přednost má vždy pěší trasování (routed-foot); auto trasování je jen záloha při výpadku pěšího serveru.
+     * Vzdálenosti z bodu `from` ke každému bodu v `to` (metry). null, když nejde ani pěší, ani auto server
+     * (volající pak použije vzdušnou čáru).
+     *
+     * Pořadí: pěší server (routed-foot) -> autový server -> null. Oba se ptají SOUČASNĚ, takže pád jednoho nic
+     * nezdržuje. Celé to je omezené na [RACE_MAX_MS]; opakuje se jen když oba selhaly rychle (chyba sítě / HTTP),
+     * ne když se čekalo na timeout.
      */
     fun roadDistances(
         from: Pair<Double, Double>,
@@ -158,45 +184,97 @@ class OsrmClient(private val cacheDir: File) {
                 "?sources=0&destinations=$dests&annotations=distance"
 
         repeat(ROAD_ATTEMPTS) { attempt ->
+            val t0 = SystemClock.elapsedRealtime()
             raceTables(footUrl, drivingUrl, to.size)?.let { return it }
-            if (attempt < ROAD_ATTEMPTS - 1) Thread.sleep(200L * (attempt + 1))
+            val took = SystemClock.elapsedRealtime() - t0
+            // po timeoutu se neopakuje (to by trvalo dvakrát tak dlouho), jen po rychlém selhání
+            if (took > RETRY_ONLY_IF_FASTER_MS) return null
+            if (attempt < ROAD_ATTEMPTS - 1) Thread.sleep(150L)
         }
         return null
     }
 
     /**
-     * Pěší a auto server se ptají SOUČASNĚ, ne jeden po druhém (dřív se na pomalý/mrtvý pěší server čekalo
-     * celý timeout, než se vůbec zkusil druhý). Pěší výsledek má přednost; když dorazí jako první, vrací se hned.
-     * Když dorazí první auto, počká se na pěší už jen krátce ([FOOT_GRACE_MS]), aby se výsledek neprotahoval.
+     * Pěší a auto server najednou. Výsledek:
+     *  1. pěší odpověděl platně -> hned pěší;
+     *  2. pěší selhal -> auto (pokud ještě nedorazilo, počká se na něj do limitu);
+     *  3. auto dorazilo dřív a pěší jen ještě běží -> krátce se počká na pěší ([FOOT_GRACE_MS]), jinak auto;
+     *  4. nic -> null.
      */
     private fun raceTables(footUrl: String, drivingUrl: String, n: Int): List<Double?>? {
-        val foot = CompletableFuture.supplyAsync({ fetchTable(footUrl, n) }, raceExecutor)
-        val driving = CompletableFuture.supplyAsync({ fetchTable(drivingUrl, n) }, raceExecutor)
+        val foot = CompletableFuture.supplyAsync({ fetchTable("foot", footUrl, n) }, raceExecutor)
+        val car = CompletableFuture.supplyAsync({ fetchTable("car", drivingUrl, n) }, raceExecutor)
+        val deadline = SystemClock.elapsedRealtime() + RACE_MAX_MS
+        fun left() = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
 
         fun CompletableFuture<List<Double?>?>.await(ms: Long): List<Double?>? =
             try { get(ms, TimeUnit.MILLISECONDS) } catch (e: Exception) { null }
 
-        runCatching { CompletableFuture.anyOf(foot, driving).get(RACE_MAX_MS, TimeUnit.MILLISECONDS) }
+        // počkat na prvního, kdo skončí (úspěšně i neúspěšně)
+        runCatching { CompletableFuture.anyOf(foot, car).get(left(), TimeUnit.MILLISECONDS) }
 
-        if (foot.isDone) return foot.await(0) ?: driving.await(RACE_MAX_MS)
-        // první dorazilo auto
-        val d = driving.await(0) ?: return foot.await(RACE_MAX_MS)
-        return foot.await(FOOT_GRACE_MS) ?: d
+        foot.getNow(null)?.let { return it }                       // 1.
+        if (foot.isDone) return car.await(left())                  // 2. pěší selhal
+        car.getNow(null)?.let { c -> return foot.await(FOOT_GRACE_MS) ?: c }   // 3.
+        return foot.await(left()) ?: car.getNow(null)              // auto selhalo / nic: čekat na pěší do limitu
     }
 
-    private fun fetchTable(url: String, n: Int): List<Double?>? = try {
-        val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
-        fastClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return null
-            val body = resp.body?.string() ?: return null
-            val row = JSONObject(body).optJSONArray("distances")?.optJSONArray(0) ?: return null
-            if (row.length() < n) return null
-            val list = List(n) { i -> if (row.isNull(i)) null else row.getDouble(i) }
-            // odpověď, kde není žádná platná vzdálenost, ber jako neúspěch (zkusí se druhý server / další kolo)
-            if (list.all { it == null }) null else list
+    private fun fetchTable(label: String, url: String, n: Int): List<Double?>? {
+        val t0 = SystemClock.elapsedRealtime()
+        fun took() = SystemClock.elapsedRealtime() - t0
+        return try {
+            val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
+            fastClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "$label HTTP ${resp.code} za ${took()} ms")
+                    return null
+                }
+                val body = resp.body?.string()
+                val row = body?.let { JSONObject(it).optJSONArray("distances")?.optJSONArray(0) }
+                if (row == null || row.length() < n) {
+                    Log.w(TAG, "$label odpověď bez vzdáleností za ${took()} ms: ${body?.take(120)}")
+                    return null
+                }
+                val list = List(n) { i -> if (row.isNull(i)) null else row.getDouble(i) }
+                // odpověď, kde není žádná platná vzdálenost, ber jako neúspěch (zkusí se druhý server)
+                if (list.all { it == null }) {
+                    Log.w(TAG, "$label samé null za ${took()} ms")
+                    null
+                } else {
+                    Log.d(TAG, "$label OK za ${took()} ms")
+                    list
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "$label selhal za ${took()} ms: ${describe(e)}")
+            logNetworkState(label)
+            null
         }
-    } catch (e: Exception) {
-        null
+    }
+
+
+    /** Stav sítě zařízení (transporty, VPN, Private DNS, validace); po selhání spojení, nejvýš jednou za 5 s. */
+    private fun logNetworkState(reason: String) {
+        val ctx = context ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastNetLogMs < 5_000L) return
+        lastNetLogMs = now
+        runCatching {
+            val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val net = cm.activeNetwork
+            val caps = net?.let { cm.getNetworkCapabilities(it) }
+            val lp = net?.let { cm.getLinkProperties(it) }
+            Log.w(
+                TAG,
+                "síť ($reason): aktivní=${net != null} " +
+                        "wifi=${caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)} " +
+                        "cell=${caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)} " +
+                        "vpn=${caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)} " +
+                        "internet=${caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)} " +
+                        "validated=${caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)} " +
+                        "privateDns=${lp?.isPrivateDnsActive}(${lp?.privateDnsServerName}) dns=${lp?.dnsServers}"
+            )
+        }
     }
 
     fun clearCache(): Int {
@@ -213,6 +291,7 @@ class OsrmClient(private val cacheDir: File) {
 
     /** Pěší trasa z bodu `from` do bodu `to`. null při chybě. Blokující, volat mimo main vlákno. */
     fun walkRoute(from: Pair<Double, Double>, to: Pair<Double, Double>): WalkRoute? {
+        val t0 = SystemClock.elapsedRealtime()
         return try {
             val coords = String.format(
                 Locale.US, "%.6f,%.6f;%.6f,%.6f",
@@ -222,7 +301,10 @@ class OsrmClient(private val cacheDir: File) {
                     "?overview=full&geometries=geojson"
             val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
             client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "walk HTTP ${resp.code} za ${SystemClock.elapsedRealtime() - t0} ms")
+                    return null
+                }
                 val body = resp.body?.string() ?: return null
                 val routes = JSONObject(body).optJSONArray("routes") ?: return null
                 if (routes.length() == 0) return null
@@ -239,14 +321,68 @@ class OsrmClient(private val cacheDir: File) {
                 WalkRoute(pts, dist, min)
             }
         } catch (e: Exception) {
+            Log.w(TAG, "walk selhal za ${SystemClock.elapsedRealtime() - t0} ms: ${describe(e)}")
+            logNetworkState("walk")
             null
         }
     }
 }
 
-private const val ROAD_ATTEMPTS = 3
+private const val TAG = "Osrm"
+private const val ROAD_ATTEMPTS = 2
 private const val FOOT_GRACE_MS = 600L
-private const val RACE_MAX_MS = 6_000L
+private const val RACE_MAX_MS = 4_500L
+private const val RETRY_ONLY_IF_FASTER_MS = 1_500L
+
+/**
+ * DNS s pamětí: dřív přeložená adresa se vrací hned (i prošlá) a obnovuje se na pozadí, takže pomalé DNS
+ * (soukromé DNS s blokováním reklam, studená mobilní síť) nezdržuje každý dotaz. Úplně první překlad je systémový.
+ */
+private object StaleDns : Dns {
+    private class Entry(val addrs: List<InetAddress>, val atMs: Long)
+    private val cache = ConcurrentHashMap<String, Entry>()
+    private val refreshing = ConcurrentHashMap.newKeySet<String>()
+    private const val TTL_MS = 5 * 60_000L
+
+    override fun lookup(hostname: String): List<InetAddress> {
+        val e = cache[hostname]
+        if (e != null) {
+            if (System.currentTimeMillis() - e.atMs >= TTL_MS && refreshing.add(hostname)) {
+                Thread({
+                    try { resolve(hostname) } catch (_: Exception) { } finally { refreshing.remove(hostname) }
+                }, "osrm-dns").apply { isDaemon = true }.start()
+            }
+            return e.addrs
+        }
+        return resolve(hostname)
+    }
+
+    private fun resolve(host: String): List<InetAddress> {
+        val t0 = SystemClock.elapsedRealtime()
+        val r = Dns.SYSTEM.lookup(host).sortedBy { if (it is java.net.Inet4Address) 0 else 1 }
+        Log.d(TAG, "DNS $host -> ${r.joinToString { it.hostAddress ?: "?" }} za ${SystemClock.elapsedRealtime() - t0} ms")
+        if (r.isNotEmpty()) cache[host] = Entry(r, System.currentTimeMillis())
+        return r
+    }
+}
+
+
+/**
+ * Výjimka i s celým řetězcem příčin. OkHttp u ConnectException píše jen "Failed to connect to host/ip:443",
+ * skutečný důvod (ECONNREFUSED, ENETUNREACH, EPERM, ETIMEDOUT…) je v `cause`.
+ */
+private fun describe(e: Throwable): String {
+    val sb = StringBuilder()
+    var t: Throwable? = e
+    var depth = 0
+    while (t != null && depth < 5) {
+        if (depth > 0) sb.append(" <- ")
+        sb.append(t.javaClass.simpleName).append(": ").append(t.message)
+        t = t.cause?.takeIf { it !== t }
+        depth++
+    }
+    return sb.toString()
+}
 
 /** Zastávky blíž než tohle k předchozímu waypointu se do OSRM neposílají (stejně jako na webu). */
 private const val MIN_GAP_M = 700.0

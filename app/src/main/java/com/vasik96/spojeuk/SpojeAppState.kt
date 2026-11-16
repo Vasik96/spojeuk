@@ -57,7 +57,7 @@ enum class MapTheme(val label: String) {
 
 enum class MapProvider(val label: String) {
     OPENSTREETMAP("OpenStreetMap"),
-    MAPYCZ("Mapy.cz"),
+    MAPYCZ("Mapy.com"),
     GOOGLE("Google Maps")
 
 }
@@ -136,6 +136,18 @@ class SpojeAppState(
     var tripRoute by mutableStateOf<List<LatLng>>(emptyList())
     var tripRouteSegments by mutableStateOf<List<List<LatLng>>>(emptyList())
     var tripStops by mutableStateOf<List<LatLng>>(emptyList())
+
+    /** Zastávky vyhledaného spojení (bez začátku a konce), null = trasa není ze spojení. */
+    var journeyStops by mutableStateOf<List<LatLng>?>(null)
+
+    /**
+     * Mezilehlé zastávky, které se kreslí jako tečky na jejich přesné poloze (ne na trase). Začátek a konec trasy
+     * tu nejsou, ty mají vlastní zelenou / červenou značku.
+     */
+    fun stopDots(showFullRoute: Boolean): List<LatLng> {
+        if (!(showFullRoute && fullRoute.size >= 2)) journeyStops?.let { return it }
+        return if (tripStops.size > 2) tripStops.subList(1, tripStops.size - 1) else emptyList()
+    }
     var routeLoading by mutableStateOf(false)
 
     /** Spoj, na který má mapa přiblížit (jednorázově). */
@@ -193,6 +205,7 @@ class SpojeAppState(
         tripRouteSegments = emptyList()
         fullRoute = emptyList()
         tripStops = emptyList()
+        journeyStops = null
         focusedTripVehicle = null
         focusedTripRef = null
         highlightedTrip = null
@@ -211,6 +224,7 @@ class SpojeAppState(
         tripRouteSegments = emptyList()
         fullRoute = emptyList()
         tripStops = emptyList()
+        journeyStops = null
         journeyWalks = emptyList()
         routeLoading = true
         vehiclesLoaded = vehicles.isNotEmpty()
@@ -224,11 +238,13 @@ class SpojeAppState(
                 val points = api.journeyGeometry(journey)
                 val full = api.firstLegFullRoute(journey)
                 val stops = api.firstLegStopLocations(journey)
+                val jStops = api.journeyStopLocations(journey)
                 val walks = api.journeyWalks(journey)
                 val segLatLng = segments.map { seg -> seg.map { LatLng(it.first, it.second) } }
                 val ptsLatLng = points.map { LatLng(it.first, it.second) }
                 val fullLatLng = full.map { LatLng(it.first, it.second) }
                 val stopsLatLng = stops.map { LatLng(it.first, it.second) }
+                val jStopsLatLng = jStops.map { LatLng(it.first, it.second) }
                 if (!isActive) return@launch
                 withContext(Dispatchers.Main) {
                     if (!isActive) return@withContext
@@ -236,6 +252,7 @@ class SpojeAppState(
                     tripRoute = ptsLatLng
                     fullRoute = fullLatLng
                     tripStops = stopsLatLng
+                    journeyStops = jStopsLatLng
                     journeyWalks = walks
                 }
             } catch (e: CancellationException) {
@@ -264,6 +281,7 @@ class SpojeAppState(
                     tripRouteSegments = emptyList()
                     tripRoute = points.map { LatLng(it.first, it.second) }
                     tripStops = stops.map { LatLng(it.first, it.second) }
+                    journeyStops = null
                     onDismiss()
                 } else {
                     android.widget.Toast.makeText(ctx, "Trasu se nepodařilo určit", android.widget.Toast.LENGTH_SHORT).show()

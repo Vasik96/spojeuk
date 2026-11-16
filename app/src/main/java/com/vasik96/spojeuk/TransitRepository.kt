@@ -25,7 +25,7 @@ class TransitRepository(context: Context? = null) {
 
     private val http = OkHttpClient()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val osrm = OsrmClient(context?.cacheDir ?: File("/tmp"))
+    private val osrm = OsrmClient(context?.cacheDir ?: File("/tmp"), context)
 
     private val store = TimetableStore(context, http) { onTimetableLoaded(it) }
     private val shapes by lazy { ShapeStore(store.dbFile.parentFile ?: File("/tmp"), context) }
@@ -390,6 +390,26 @@ class TransitRepository(context: Context? = null) {
         val leg = j.rawLegs.firstOrNull { it.kind == "ride" } ?: return@withContext emptyList()
         val stopIds = tt.tripStops(leg.tid)
         stopIds.asIterable().mapNotNull { id -> tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng } }
+    }
+
+    /**
+     * Přesné polohy zastávek, kterými spojení projíždí (všechny jízdy, od nástupu po výstup), bez úplně první
+     * a úplně poslední zastávky spojení; ty mají na mapě vlastní značky. Přestupní zastávky tu jsou.
+     */
+    suspend fun journeyStopLocations(j: Journey): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
+        val tt = store.ensure().timetable
+        val ids = ArrayList<Int>()
+        for (leg in j.rawLegs) {
+            if (leg.kind != "ride") continue
+            for (t in leg.stops) {
+                if (ids.lastOrNull() == t.first) continue // přestup na stejné zastávce se nezdvojuje
+                ids.add(t.first)
+            }
+        }
+        if (ids.size <= 2) return@withContext emptyList()
+        ids.subList(1, ids.size - 1).mapNotNull { id ->
+            tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng }
+        }
     }
 
     fun boardingPoint(j: Journey): Pair<Double, Double>? {

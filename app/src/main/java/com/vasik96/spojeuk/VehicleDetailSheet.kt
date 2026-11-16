@@ -182,6 +182,7 @@ internal fun VehicleDetailBottomSheet(
                                 appState.tripRouteSegments = emptyList()
                                 appState.tripRoute = points.map { LatLng(it.first, it.second) }
                                 appState.tripStops = stops.map { LatLng(it.first, it.second) }
+                                appState.journeyStops = null
                                 onDismiss()
                             } else {
                                 android.widget.Toast.makeText(ctx, "Trasu se nepodařilo určit", android.widget.Toast.LENGTH_SHORT).show()

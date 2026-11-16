@@ -106,3 +106,20 @@ fun intArrayToBytes(arr: IntArray): ByteArray {
     for (v in arr) bb.putInt(v)
     return bb.array()
 }
+
+
+// ───────────────────────── hlavní vlákno ─────────────────────────
+
+/**
+ * Pozastaví korutinu, dokud hlavní vlákno nemá co dělat (fronta zpráv je prázdná). Volat z hlavního vlákna.
+ * Na rozdíl od pevného `delay` se nečeká na čas, ale na to, že práce navíc už nikoho nebrzdí.
+ */
+suspend fun awaitMainThreadIdle() = kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
+    val queue = android.os.Looper.myQueue()
+    val handler = android.os.MessageQueue.IdleHandler {
+        if (cont.isActive) cont.resumeWith(Result.success(Unit))
+        false // jednorázový
+    }
+    queue.addIdleHandler(handler)
+    cont.invokeOnCancellation { queue.removeIdleHandler(handler) }
+}

@@ -86,6 +86,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import kotlin.math.cos
+import kotlin.math.pow
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -102,7 +104,6 @@ import androidx.core.graphics.createBitmap
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.CameraPosition
@@ -113,6 +114,7 @@ import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.RoundCap
 import com.google.maps.android.compose.ComposeMapColorScheme
 import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.MapEffect
 import com.google.maps.android.compose.MapProperties
 import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
@@ -172,37 +174,19 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val scope = rememberCoroutineScope()
     var showFullRoute by remember { mutableStateOf(false) }
     var isMapReady by remember { mutableStateOf(false) }
+    // Google: všechny dlaždice načtené (onMapLoaded). Zatím nic nezdržuje, jen se podle toho zapíná modrá tečka polohy.
+    var googleTilesLoaded by remember { mutableStateOf(false) }
+    val googleMarkers = remember { GoogleVehicleMarkers() }
+    val mapDensity = LocalDensity.current.density
 
-    var mapInitialized by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        delay(140.milliseconds)
-        mapInitialized = true
-    }
-
-    if (!mapInitialized) {
-        Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Wavy(size = 48.dp, color = MaterialTheme.colorScheme.primary)
-                    Text(
-                        text = "Načítání mapy…",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-        return
-    }
+    // Mapa se zobrazí hned (dřív tu byla 140ms pauza s "Načítání mapy…"). Vytváří se předem na pozadí (viz SpojeApp, mapVisited),
+    // takže po přepnutí na záložku už jen odkryje hotovou mapu.
 
     LaunchedEffect(appState.mapProvider) {
         isMapReady = false
+        googleTilesLoaded = false
+        googleMarkers.detach()
     }
-
-    val lifecycleOwner = LocalLifecycleOwner.current
 
     // polling poloh
     LaunchedEffect(active) {
@@ -219,26 +203,22 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         } else {
             appState.vehiclesLoaded = false
         }
-        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while (true) {
-                runCatching { api.vehiclePositions(maxAgeMs = 4_000) }
-                    .onSuccess {
-                        appState.updateVehicles(it)
-                        appState.heldCount = api.heldCount()
-                        appState.vehicleSource = api.sourceLabel()
-                        appState.mapError =
-                            if (api.vehicleFetchFailing()) "Polohy vozidel se nepodařilo načíst" else null
-                    }
-                    .onFailure {
-                        if (it is CancellationException) throw it
-                        appState.mapError = "Polohy vozidel se nepodařilo načíst"
-                    }
-                appState.vehiclesLoaded = true
-                // při výpadku zkoušet častěji, ať se polohy vrátí hned, jak server / síť zase jede
-                delay((if (api.vehicleFetchFailing()) 2_500 else 6_000).milliseconds)
-            }
+        while (true) {
+            runCatching { api.vehiclePositions(maxAgeMs = 4_000) }
+                .onSuccess {
+                    appState.updateVehicles(it)
+                    appState.heldCount = api.heldCount()
+                    appState.vehicleSource = api.sourceLabel()
+                    appState.mapError = if (api.vehicleFetchFailing()) "Polohy vozidel se nepodařilo načíst" else null
+                }
+                .onFailure {
+                    if (it is CancellationException) throw it
+                    appState.mapError = "Polohy vozidel se nepodařilo načíst"
+                }
+            appState.vehiclesLoaded = true
+            // při výpadku zkoušet častěji, ať se polohy vrátí hned, jak server / síť zase jede
+            delay((if (api.vehicleFetchFailing()) 2_500 else 6_000).milliseconds)
         }
-
     }
 
     // Aktualizace poloh ihned, jakmile dorazí nové z hubu (na pozadí z launch prewarmu nebo refreshu)
@@ -439,7 +419,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     ).expanded(0.3)
                 } ?: view
             }
-            hub.applyToMarkerStates(view)
+            val cam = cameraPositionState.position
+            val metersPerPx = 156_543.03392 * cos(Math.toRadians(cam.target.latitude)) / 2.0.pow(cam.zoom.toDouble()) / mapDensity
+            googleMarkers.applyPositions(hub, view, metersPerPx)
         }
     }
 
@@ -516,14 +498,16 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 modifier = Modifier.fillMaxSize(),
                 cameraPositionState = cameraPositionState,
                 mapColorScheme = scheme,
-                onMapLoaded = { isMapReady = true },
-                properties = MapProperties(isMyLocationEnabled = isMapReady && hasLocationPermission),
+                onMapLoaded = { googleTilesLoaded = true },
+                properties = MapProperties(isMyLocationEnabled = googleTilesLoaded && hasLocationPermission),
                 uiSettings = MapUiSettings(
                     zoomControlsEnabled = false,
                     myLocationButtonEnabled = false,
                     mapToolbarEnabled = false
                 )
             ) {
+                // mapa už existuje, překryvná "Načítání mapy" může pryč; nečeká se na stažení všech dlaždic (onMapLoaded)
+                MapEffect(Unit) { isMapReady = true }
                 if (!isMapReady) return@GoogleMap
 
                 val primaryColor = MaterialTheme.colorScheme.primary
@@ -633,25 +617,26 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         zIndex = 0.5f,
                         onClick = { true }
                     )
+
+                    // Mezilehlé zastávky: tečky na jejich přesné poloze (ne na trase), pod začátkem / koncem
+                    val stopIcon = remember(context) { routeStopDescriptor(context) }
+                    for (p in appState.stopDots(showFullRoute)) {
+                        key(p) {
+                            Marker(
+                                state = rememberUpdatedMarkerState(position = p),
+                                icon = stopIcon,
+                                anchor = Offset(0.5f, 0.5f),
+                                zIndex = 0.4f,
+                                onClick = { true }
+                            )
+                        }
+                    }
                 }
 
-                for ((vkey, v) in activeVehicles) {
-                    key(vkey) {
-                        val iconPhase = if (targetUid != null && v.uid == targetUid) phase else 0
-                        val isStale = v.ageSec() >= 60
-                        val alpha = if (isStale) 0.65f else 1.0f
-                        val icon = remember(v.line, v.train, v.delay > 3, iconPhase) {
-                            markerDescriptor(context, v.line, v.train, v.delay, iconPhase)
-                        }
-                        Marker(
-                            state = hub.markerState(vkey, v),
-                            icon = icon,
-                            alpha = alpha,
-                            anchor = Offset(0.5f, 0.5f),
-                            zIndex = if (iconPhase != 0) 3f else 2f,
-                            onClick = { appState.selectVehicleLate(v); true }
-                        )
-                    }
+                // vozidla jako nativní markery mimo Compose (viz GoogleVehicleMarkers); tady se jen sladí seznam
+                MapEffect(activeVehicles, targetUid, phase, hub) { gmap ->
+                    googleMarkers.attach(gmap)
+                    googleMarkers.sync(context, hub, activeVehicles, targetUid, phase)
                 }
             }
         } else {
@@ -808,6 +793,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     appState.tripRouteSegments = emptyList()
                     appState.fullRoute = emptyList()
                     appState.tripStops = emptyList()
+                    appState.journeyStops = null
                     appState.focusedTripVehicle = null
                     appState.focusedTripRef = null
                     appState.highlightedTrip = null
@@ -1198,10 +1184,11 @@ private fun MapLibreScreenContent(
     val tripRoute = appState.tripRoute
     val tripRouteSegments = appState.tripRouteSegments
     val fullRoute = appState.fullRoute
+    val stopDots = appState.stopDots(showFullRoute)
 
     // ── TRASY (nezávisí na zoomu, šipky a tečky kreslí MapLibre nativně) ──
     LaunchedEffect(
-        map, tripRoute, tripRouteSegments, fullRoute, walkList, showFullRoute,
+        map, tripRoute, tripRouteSegments, fullRoute, walkList, showFullRoute, stopDots,
         primaryColorArgb, tertiaryArgb, arrowArgb, styleVersion
     ) {
         val m = map ?: return@LaunchedEffect
@@ -1305,6 +1292,25 @@ private fun MapLibreScreenContent(
                     )
                 )
             )
+
+            // mezilehlé zastávky: tečky na přesné poloze zastávky (pod začátkem / koncem)
+            if (stopDots.isNotEmpty()) {
+                style.addImage("route-stop", routeStopBitmap(context))
+                val stopFeatures = withContext(Dispatchers.Default) {
+                    FeatureCollection.fromFeatures(
+                        stopDots.map { Feature.fromGeometry(Point.fromLngLat(it.longitude, it.latitude)) }
+                    )
+                }
+                style.addSource(GeoJsonSource("stops-src", stopFeatures))
+                addBelowMarkers(
+                    style,
+                    SymbolLayer("route-stops", "stops-src").withProperties(
+                        PropertyFactory.iconImage("route-stop"),
+                        PropertyFactory.iconAllowOverlap(true),
+                        PropertyFactory.iconIgnorePlacement(true)
+                    )
+                )
+            }
 
             // začátek a konec (pod autobusy)
             val routeLine = if (showFullRoute && fullRoute.size >= 2) fullRoute else tripRoute
@@ -1479,9 +1485,9 @@ private fun routeArrowBitmap(color: Int): Bitmap {
 }
 
 private fun removeRouteLayers(style: Style) {
-    listOf("route-ends", "route-arrows", "walk-dots", "route-line").forEach { style.removeLayer(it) }
-    listOf("ends-src", "arrows-src", "walk-src", "route-src").forEach { style.removeSource(it) }
-    listOf("route-arrow", "route-start", "route-end").forEach { style.removeImage(it) }
+    listOf("route-ends", "route-stops", "route-arrows", "walk-dots", "route-line").forEach { style.removeLayer(it) }
+    listOf("ends-src", "stops-src", "arrows-src", "walk-src", "route-src").forEach { style.removeSource(it) }
+    listOf("route-arrow", "route-start", "route-end", "route-stop").forEach { style.removeImage(it) }
 }
 
 private fun List<LatLng>.toLineString() =

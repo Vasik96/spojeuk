@@ -4,12 +4,18 @@ import android.app.Application
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import com.google.android.gms.maps.MapsInitializer
 import org.maplibre.android.MapLibre
 
 class SpojeApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         MapLibre.getInstance(this)
+        // Google Maps: načtení modulu a rendereru z Play Services trvá stovky ms; uděláme to na pozadí hned při startu,
+        // ať první GoogleMap v UI nic takového nepočítá (MapLibre se předehřívá řádkem výše)
+        Thread {
+            runCatching { MapsInitializer.initialize(applicationContext, MapsInitializer.Renderer.LATEST) { } }
+        }.apply { name = "gmaps-init"; isDaemon = true; start() }
         val repo = TransitRepository.get(this)
         // Okamžitě při startu aplikace inicializovat repozitář a začít stahovat polohy vozidel
         repo.prewarmVehiclesAsync()
