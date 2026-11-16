@@ -49,8 +49,8 @@ object TripEnricher {
             ?: if (v.source == SourceIds.DPMUL || SourceIds.DPMUL in v.sources) dpmulMatcher.match(v, tt) else null
     }
 
-    /** Linku ze spoje přebírají vozy z DÚK a vlaky; DPMÚL má vlastní (správné) označení linky. */
-    private fun adoptsTimetableLine(v: Vehicle) = v.source == SourceIds.DUK || v.source == SourceIds.TRAIN
+    /** Linku ze spoje přebírají vozy z DÚK, PID a vlaky; DPMÚL má vlastní (správné) označení linky. */
+    private fun adoptsTimetableLine(v: Vehicle) = v.source == SourceIds.DUK || v.source == SourceIds.TRAIN || v.source == SourceIds.PID
 
     fun enrich(v: Vehicle, tt: Timetable): Vehicle {
         val m = match(v, tt) ?: return v

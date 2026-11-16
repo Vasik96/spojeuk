@@ -11,7 +11,7 @@ import java.io.InputStream
 import java.util.zip.ZipFile
 
 // Import statických jízdních řádů: stažený tar → gtfs.zip → SQLite (static.sqlite).
-// Konstanty (BBOX_LAT, ...) jsou v Config.kt, pomocné funkce (intArrayToBytes, nowPrague) v Util.kt.
+// Pomocné funkce (intArrayToBytes, nowPrague) jsou v Util.kt.
 // parseTsec už se nepoužívá, časy se parsují přímo z bajtů (parseTimeSec níže).
 // Párování vlakových stanic s autobusovými zastávkami je v StationPairing.kt.
 
@@ -269,7 +269,6 @@ private fun parseIntBytes(b: ByteArray, s: Int, e: Int): Int {
 /** Growable primitive buffery pro jeden trip (žádný boxing, žádný objekt na řádek). */
 private class TripBuffer {
     var n = 0
-    var hasRegion = false
     var code = IntArray(64)
     var seq = IntArray(64)
     var arr = IntArray(64)
@@ -284,7 +283,7 @@ private class TripBuffer {
         n++
     }
 
-    fun clear() { n = 0; hasRegion = false }
+    fun clear() { n = 0 }
 }
 
 /** Mapuje stop_id → malé int "code" (pro rychlé porovnávání) a code → ID v DB. */
@@ -409,8 +408,6 @@ class GtfsImporter(private val dbFile: File) {
 
                 for ((fi, feed) in feeds.withIndex()) {
                     val rail = feed.rail
-                    val latR = if (rail) RAIL_BBOX_LAT else BBOX_LAT
-                    val lonR = if (rail) RAIL_BBOX_LON else BBOX_LON
                     // postup jednoho feedu (0..1) → celkový
                     fun prog(p: Float) = progress(((fi + p) / feeds.size) * 0.95f)
 
@@ -442,13 +439,9 @@ class GtfsImporter(private val dbFile: File) {
                         }
                     }
 
-                    // zastávky tohoto feedu v oblasti (musí být naplněno dřív, než se čtou stop_times)
-                    for (g in posts.keys) {
-                        if (g in region) continue
-                        val (la, lo) = coords(g)
-                        if (la != null && lo != null && la in latR && lo in lonR) region.add(g)
-                    }
-                    log("Zastávek v oblasti: ${region.size}")
+                    // zastávky tohoto feedu
+                    region.addAll(posts.keys)
+                    log("Zastávek: ${region.size}")
                     prog(0.2f)
 
                     val agencies = HashMap<String, String>()
@@ -490,10 +483,10 @@ class GtfsImporter(private val dbFile: File) {
                     log("Zpracovávám jízdní řády…")
                     prog(0.4f)
 
-                    /** Uloží trip, pokud projíždí regionem. Vrací true při uložení. */
+                    /** Uloží trip. Vrací true při uložení. */
                     fun processTrip(tripId: String, meta: TripMeta, tb: TripBuffer): Boolean {
                         val n = tb.n
-                        if (!tb.hasRegion || n < 2) return false
+                        if (n < 2) return false
 
                         // většinou už je seřazeno podle stop_sequence → řazení jen když je potřeba
                         var sorted = true
@@ -618,7 +611,6 @@ class GtfsImporter(private val dbFile: File) {
                                 if (curMeta == null) continue
 
                                 val code = stops.code(String(b, ss, sl, Charsets.UTF_8))
-                                if (stops.isRegion[code]) tb.hasRegion = true
                                 tb.add(
                                     code,
                                     parseIntBytes(b, sc.fs[2], sc.fe[2]),

@@ -285,6 +285,7 @@ class VehicleHub(
             SourceIds.DUK to "DÚK",
             SourceIds.DPMD to "DPMD",
             SourceIds.TRAIN to "Správa Železnic",
+            SourceIds.PID to "PID",
         )
 
         val SOURCE_SEGMENTS = mapOf(
@@ -292,6 +293,7 @@ class VehicleHub(
             SourceIds.DUK to setOf(Segment.CITY, Segment.REGIONAL),
             SourceIds.DPMD to setOf(Segment.CITY),
             SourceIds.TRAIN to setOf(Segment.REGIONAL),
+            SourceIds.PID to setOf(Segment.CITY, Segment.REGIONAL),
         )
     }
 }

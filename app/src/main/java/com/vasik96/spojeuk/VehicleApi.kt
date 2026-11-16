@@ -28,6 +28,7 @@ object SourceIds {
     const val DUK = "duk"
     const val DPMD = "dpmd"
     const val TRAIN = "train" // Správa železnic
+    const val PID = "pid" // Pražská integrovaná doprava
 }
 
 /** Jeden zdroj ve stavu, jak ho hlásí server v `/api/vehicles` → `sources`. */
