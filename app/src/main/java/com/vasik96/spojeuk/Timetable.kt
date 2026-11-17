@@ -227,14 +227,20 @@ class Timetable(val dbFile: File) {
 
     /** Spoje linky [line] (volitelně jen dopravce, jehož název obsahuje některé z [agencyKeywords]). */
     fun tripsOfLine(line: String, agencyKeywords: List<String>): List<Int> =
-        lineIndexes.getOrPut(agencyKeywords) { buildLineIndex(agencyKeywords) }[normLine(line)].orEmpty()
+        // computeIfAbsent: index se postaví jen jednou. Kotlinské getOrPut na ConcurrentHashMap není atomické
+        // a při desítkách souběžných dotazů (každé vozidlo zvlášť) stavělo desítky indexů najednou -> OutOfMemoryError.
+        lineIndexes.computeIfAbsent(agencyKeywords) { buildLineIndex(it) }[normLine(line)].orEmpty()
 
     private fun buildLineIndex(keywords: List<String>): Map<String, List<Int>> {
-        val ofAgency = if (keywords.isEmpty()) trips.values.toList()
-        else trips.values.filter { t -> foldText(t.agency).let { a -> keywords.any { it in a } } }
+        val all = trips.values
+        val matching: Collection<DbTrip> = if (keywords.isEmpty()) all
+        else all.filter { t -> foldText(t.agency).let { a -> keywords.any { it in a } } }
         // když jízdní řád dopravce vůbec neobsahuje, raději hledat mezi všemi než nic
-        val pool = ofAgency.ifEmpty { trips.values.toList() }
-        return pool.groupBy({ normLine(it.line) }, { it.id })
+        val pool = matching.ifEmpty { all }
+        val normCache = HashMap<String, String>()   // stejných linek je pár set, spojů statisíce
+        val out = HashMap<String, MutableList<Int>>()
+        for (t in pool) out.getOrPut(normCache.getOrPut(t.line) { normLine(t.line) }) { ArrayList() }.add(t.id)
+        return out
     }
 
     companion object {

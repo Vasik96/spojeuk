@@ -331,6 +331,7 @@ class TransitRepository(context: Context? = null) {
         val tt = store.ensure().timetable
         val tid = v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
+            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
             ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
             ?: return@withContext emptyList()
         geometry.forTrip(tt, tid)
@@ -341,6 +342,7 @@ class TransitRepository(context: Context? = null) {
         val tt = store.ensure().timetable
         val tid = v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
+            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
             ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
             ?: return@withContext "spoj z jízdního řádu nenalezen"
         "spoj $tid, ${geometry.describe(tt, tid)}\ngid: ${tt.trips[tid]?.gid}"
@@ -350,6 +352,7 @@ class TransitRepository(context: Context? = null) {
         val tt = store.ensure().timetable
         val tid = v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
+            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
             ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
             ?: return@withContext emptyList()
         val stopIds = tt.tripStops(tid)
@@ -360,6 +363,7 @@ class TransitRepository(context: Context? = null) {
         val tt = store.ensure().timetable
         v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
+            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
             ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
     }
 
@@ -421,7 +425,9 @@ class TransitRepository(context: Context? = null) {
     suspend fun vehicleTripInfo(v: Vehicle): VehicleTripInfo = withContext(Dispatchers.IO) {
         val none = VehicleTripInfo(null, null)
         val tt = store.ensure().timetable
-        val tid = v.tid.takeIf { it != 0 } ?: tt.findTripId(v.cis, v.trip) ?: return@withContext none
+        val tid = v.tid.takeIf { it != 0 } ?: tt.findTripId(v.cis, v.trip)
+            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
+            ?: return@withContext none
         val trip = tt.trips[tid] ?: return@withContext none
         val times = tt.tripTimes(tid) ?: return@withContext none
         if (times.stops.isEmpty()) return@withContext none
