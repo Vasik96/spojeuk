@@ -422,7 +422,33 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     Box(modifier = modifier.fillMaxSize()) {
         if (appState.mapProvider == MapProvider.GOOGLE) {
             GoogleMap(
-                modifier = Modifier.fillMaxSize(),
+                // Okamžitý výběr vozidla při zvednutí prstu. Nativní OnMarkerClickListener čeká ~300 ms, jestli nejde
+                // o dvojklik (zoom), proto se bottom sheet otevíral se zpožděním. Událost se jen sleduje (Initial pass,
+                // nic se nespotřebuje), takže mapa dostane všechna gesta beze změny.
+                modifier = Modifier.fillMaxSize().pointerInput(googleLayer) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        val start = down.position
+                        val downAt = down.uptimeMillis
+                        val slop = viewConfiguration.touchSlop
+                        var upAt = -1L
+                        var upPos = start
+                        while (true) {
+                            val ev = awaitPointerEvent(PointerEventPass.Initial)
+                            if (ev.changes.count { it.pressed } > 1) return@awaitEachGesture   // pinch
+                            val ch = ev.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+                            if ((ch.position - start).getDistance() > slop) return@awaitEachGesture   // tažení
+                            if (ch.changedToUp()) { upAt = ch.uptimeMillis; upPos = ch.position; break }
+                        }
+                        if (upAt - downAt > 500) return@awaitEachGesture   // dlouhý stisk
+                        val proj = cameraPositionState.projection ?: return@awaitEachGesture
+                        val ll = runCatching {
+                            proj.fromScreenLocation(android.graphics.Point(upPos.x.toInt(), upPos.y.toInt()))
+                        }.getOrNull() ?: return@awaitEachGesture
+                        val degPerDp = 360.0 / (256.0 * Math.pow(2.0, cameraPositionState.position.zoom.toDouble()))
+                        googleLayer.hitTest(ll.latitude, ll.longitude, degPerDp)?.let { appState.selectVehicle(it) }
+                    }
+                },
                 cameraPositionState = cameraPositionState,
                 mapColorScheme = scheme,
                 onMapLoaded = { googleTilesLoaded = true },
@@ -437,8 +463,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 // mapa už existuje, překryvná "Načítání mapy" může pryč; nečeká se na stažení všech dlaždic (onMapLoaded)
                 MapEffect(Unit) { gMap ->
                     isMapReady = true
+                    // pozdní nativní klik: když už vozidlo vybralo okamžité ťuknutí, ignoruje se
                     googleLayer.attach(gMap) { vehicle ->
-                        appState.selectVehicle(vehicle)
+                        appState.selectVehicleLate(vehicle)
                     }
                 }
                 DisposableEffect(googleLayer) {
@@ -764,7 +791,6 @@ private fun GoogleVehicleOverlay(
         if (!active) return@LaunchedEffect
         var lastCam: CameraPosition? = null
         var view: ViewBox? = null
-        var keepView: ViewBox? = null
         var lastVehicles: List<Pair<String, Vehicle>>? = null
         var lastTarget: String? = null
         var lastPhase = -1
@@ -773,10 +799,10 @@ private fun GoogleVehicleOverlay(
         while (true) {
             val moving = cameraPositionState.isMoving
             val dot = layer.isDotMode
-            delay(
+            // zbývá práce => hned další snímek (rozpočet na snímek hlídá vrstva), jinak běžný interval
+            if (pending) withFrameNanos { }
+            else delay(
                 when {
-                    pending && moving -> 50L
-                    pending -> 16L
                     moving -> GOOGLE_MOVING_INTERVAL_MS
                     !dot -> GOOGLE_VEHICLE_INTERVAL_MS
                     else -> GOOGLE_DOT_INTERVAL_MS
@@ -793,8 +819,7 @@ private fun GoogleVehicleOverlay(
                 val b = runCatching { cameraPositionState.projection?.visibleRegion?.latLngBounds }.getOrNull()
                 if (b != null) {
                     val base = ViewBox(b.southwest.latitude, b.southwest.longitude, b.northeast.latitude, b.northeast.longitude)
-                    view = base.expanded(0.25)
-                    keepView = base.expanded(0.6)
+                    view = base.expanded(0.15)
                 }
             }
 
@@ -815,7 +840,7 @@ private fun GoogleVehicleOverlay(
             // štítky se chystají už kousek před přepnutím z teček, ať se při přepnutí jen vymění ikony
             val prewarm = layer.isDotMode && cam.zoom >= DOT_ZOOM_GOOGLE - LABEL_PREWARM_ZOOM
             pending = layer.updateVehicles(
-                vehicles, hub, layer.isDotMode, tgt, ph, view, keepView, movePositions, prewarm
+                vehicles, hub, layer.isDotMode, tgt, ph, view, movePositions, prewarm
             )
             val missing = layer.takeMissingLabels()
             if (missing.isNotEmpty()) {
