@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Route
@@ -899,11 +900,12 @@ private fun DataUpdatesScreen(
         }
 
         appState.updateSuccess?.let { successMsg ->
+            val (successContainer, onSuccessContainer) = successColors()
             StatusCard(
                 message = successMsg,
                 icon = Icons.Default.CheckCircle,
-                container = MaterialTheme.colorScheme.tertiaryContainer,
-                content = MaterialTheme.colorScheme.onTertiaryContainer
+                container = successContainer,
+                content = onSuccessContainer
             )
         }
 
@@ -1079,6 +1081,17 @@ private fun StatusCard(
             )
         }
     }
+}
+
+/**
+ * Vlastní barevná role "úspěch" (Material 3 žádnou zelenou nemá; doporučuje doplnit roli z tonální palety):
+ * kontejner zelená tón 90 / 30 (světlý / tmavý motiv), obsah tón 10 / 90, stejný kontrast jako ostatní *Container role.
+ */
+@Composable
+private fun successColors(): Pair<androidx.compose.ui.graphics.Color, androidx.compose.ui.graphics.Color> {
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    return if (dark) androidx.compose.ui.graphics.Color(0xFF1E5130) to androidx.compose.ui.graphics.Color(0xFFB6F2C4)
+    else androidx.compose.ui.graphics.Color(0xFFC6F0D0) to androidx.compose.ui.graphics.Color(0xFF00210E)
 }
 
 @Composable

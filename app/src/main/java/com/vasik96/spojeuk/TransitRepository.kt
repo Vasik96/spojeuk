@@ -144,8 +144,9 @@ class TransitRepository(context: Context? = null) {
     suspend fun loadStops(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): List<Stop> =
         withContext(Dispatchers.IO) {
             store.current?.let { return@withContext it.timetable.stops.values.distinctBy { s -> s.name } }
-            // rychlá cesta: jen tabulka zastávek, spoje se dočtou na pozadí
-            if (!store.hasPending()) {
+            // rychlá cesta: jen tabulka zastávek, spoje se dočtou na pozadí. Při prvním spuštění ne: data se teprve
+            // stahují a obrazovka stahování potřebuje hlášky a postup (rychlá cesta by stahovala bez nich)
+            if (!store.hasPending() && !store.isFirstRun()) {
                 val quick = runCatching { lookupStops() }.getOrNull()
                 if (quick != null && store.current == null) return@withContext quick.distinctBy { it.name }
             }

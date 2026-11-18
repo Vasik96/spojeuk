@@ -260,16 +260,15 @@ internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> 
                 textAlign = TextAlign.Center
             )
 
+            Spacer(Modifier.height(20.dp))
+            // Vlnkovitý lineární indikátor: s postupem plynule animovaný, dokud postup není známý, neurčitý
             if (progress > 0f) {
-                Spacer(Modifier.height(20.dp))
-                // Vlnkovitý lineární progress indicator s plynulým animovaným postupem
                 LinearWavyProgressIndicator(
                     progress = { animatedProgress },
-                    modifier = Modifier
-                        .fillMaxWidth(0.8f)
-                        .height(8.dp)
-                        .clip(RoundedCornerShape(4.dp))
+                    modifier = Modifier.fillMaxWidth(0.8f)
                 )
+            } else {
+                LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth(0.8f))
             }
 
             Spacer(Modifier.height(24.dp))
