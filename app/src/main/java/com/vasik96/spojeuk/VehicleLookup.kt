@@ -38,6 +38,9 @@ internal fun distanceMeters(a: LatLng, b: LatLng): Float {
     return result[0]
 }
 
+/** Metro (PID) žádné živé polohy nemá, na mapě se tedy nikdy neukáže. */
+internal fun isMetroLine(line: String): Boolean = line.trim().uppercase() in setOf("A", "B", "C")
+
 /** Najde na mapě vůz, který jede spoj [ref]. */
 internal fun findVehicle(list: List<Vehicle>, ref: TripRef, route: List<LatLng>): VehicleMatch? {
     val live = list.filter { it.state != 255 }

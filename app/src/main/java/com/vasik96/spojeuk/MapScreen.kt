@@ -66,6 +66,7 @@ import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -78,6 +79,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -139,6 +141,7 @@ import org.maplibre.android.maps.MapView as MapLibreMapView
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.expressions.Expression
 import org.maplibre.android.style.layers.BackgroundLayer
+import org.maplibre.android.style.layers.CircleLayer
 import org.maplibre.android.style.layers.FillLayer
 import org.maplibre.android.style.layers.Layer
 import org.maplibre.android.style.layers.LineLayer
@@ -163,6 +166,14 @@ private fun Vehicle.inUsteckyKraj() = lat in USTECKY_LAT && lng in USTECKY_LNG
 // Google: pozice markerů se přepisují v každém snímku (vsync), animace A -> B je počítaná z času.
 // Viditelná oblast (pro vynechání markerů mimo obrazovku) se přepočítává jen občas.
 private const val GOOGLE_VIEW_REFRESH_MS = 250L
+private const val GOOGLE_LABEL_INTERVAL_MS = 600L   // přiblíženo: markery vozidel se obnovují po 0,6 s
+private const val GOOGLE_IDLE_BEFORE_RENDER_MS = 150L  // kamera musí chvíli stát, než se vozidla přerenderují
+
+// Při oddálení (pod touto úrovní, v měřítku Google Maps) se místo štítků s číslem linky kreslí malé tečky.
+// Je to hlavní úspora u PID: tisíce štítků = tisíce bitmap, ikon a GeoJSON prvků při každém snímku.
+private const val DOT_ZOOM_GOOGLE = 12f
+private const val DOT_HYSTERESIS = 0.15f              // jen Google: proti blikání na hranici
+private const val DOT_ZOOM_ML = DOT_ZOOM_GOOGLE - 1f  // MapLibre má zoom o 1 menší
 
 /** Jak dlouho po kliku na vozidlo se pozastaví pohyb markerů (otevírání bottom sheetu). */
 private const val SHEET_OPEN_GRACE_MS = 900L
@@ -176,7 +187,10 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     var isMapReady by remember { mutableStateOf(false) }
     // Google: všechny dlaždice načtené (onMapLoaded). Zatím nic nezdržuje, jen se podle toho zapíná modrá tečka polohy.
     var googleTilesLoaded by remember { mutableStateOf(false) }
-    val googleMarkers = remember { GoogleVehicleMarkers() }
+    // Google: true = oddáleno, vozidla jsou jen tečky
+    val googleSize = remember { IntArray(2) }   // rozměr mapy v px (pro výpočet viditelné oblasti bez dotazu na mapu)
+    val googleLayer = remember { GoogleVehicleLayer() }
+    DisposableEffect(googleLayer) { onDispose { googleLayer.detach() } }
     val mapDensity = LocalDensity.current.density
 
     // Mapa se zobrazí hned (dřív tu byla 140ms pauza s "Načítání mapy…"). Vytváří se předem na pozadí (viz SpojeApp, mapVisited),
@@ -185,7 +199,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     LaunchedEffect(appState.mapProvider) {
         isMapReady = false
         googleTilesLoaded = false
-        googleMarkers.detach()
+        googleLayer.detach()
     }
 
     // polling poloh
@@ -333,10 +347,13 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             appState.focusedTripRef = null
             appState.highlightedTrip = null
             appState.pulsePhase = 0
-            val msg = if (appState.mapError != null)
-                "Polohy vozidel se nepodařilo načíst"
-            else
-                "Autobus tohoto spoje teď není na mapě, možná ještě nevyjel"
+            val notYetDeparted = ref.departureTimeMillis?.let { it > System.currentTimeMillis() } == true
+            val msg = when {
+                appState.mapError != null -> "Polohy vozidel se nepodařilo načíst"
+                isMetroLine(ref.line) -> "Metro nemá živou polohu, zobrazuji jen trasu"
+                notYetDeparted -> "Spoj ještě nevyjel, zobrazuji trasu"
+                else -> "Vozidlo tohoto spoje se na mapě nepodařilo najít, zobrazuji trasu"
+            }
             android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
             if (route.isNotEmpty()) {
                 val lats = route.map { it.latitude }
@@ -398,30 +415,42 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val predict = appState.predictVehiclePositions
     LaunchedEffect(activeVehicles, predict) { hub.update(activeVehicles, predict) }
 
-    // Google: jedna smyčka synchronizovaná s vykreslováním (každý snímek), žádný delay, žádné čekání na kameru.
-    // Pohyb vozidel se tak nezastaví ani při posunu / zoomu mapy.
-    LaunchedEffect(hub, active, appState.mapProvider) {
-        if (!active || appState.mapProvider != MapProvider.GOOGLE) return@LaunchedEffect
-        var view: ViewBox? = null
-        var viewAt = 0L
+    // Google: vozidla jsou nativní markery z recyklovaného poolu (GoogleVehicleLayer), omezený počet přes řídkou mřížku.
+    // Smyčka je aktualizuje jen když kamera stojí (při tažení / zoomu se nedělá nic navíc), zvýrazněné vozidlo je zvlášť.
+    val curVehicles by rememberUpdatedState(activeVehicles)
+    val curTarget by rememberUpdatedState(targetUid)
+    val curPhase by rememberUpdatedState(phase)
+    LaunchedEffect(hub, active, appState.mapProvider, isMapReady) {
+        if (!active || appState.mapProvider != MapProvider.GOOGLE || !isMapReady) return@LaunchedEffect
+        var lastMoveAt = 0L
+        var lastRender = 0L
+        var lastCam: com.google.android.gms.maps.model.CameraPosition? = null
+        var lastVehicles: Any? = null
+        var dot = false
+        var lastDot = true
+        var pendingWork = false
         while (true) {
-            withFrameNanos { }
+            delay(40)
             val now = SystemClock.elapsedRealtime()
-            // po kliku na vozidlo chvíli nic nepočítat / nepřesouvat markery, ať má hlavní vlákno volno na otevření sheetu
+            googleLayer.updateHighlight(context, hub, now, curVehicles, curTarget, curPhase)
+            // po kliku na vozidlo chvíli nic nepočítat, ať má hlavní vlákno volno na otevření sheetu
             if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
-            hub.tick(now)
-            if (now - viewAt >= GOOGLE_VIEW_REFRESH_MS || view == null) {
-                viewAt = now
-                view = cameraPositionState.projection?.visibleRegion?.latLngBounds?.let {
-                    ViewBox(
-                        it.southwest.latitude, it.southwest.longitude,
-                        it.northeast.latitude, it.northeast.longitude
-                    ).expanded(0.3)
-                } ?: view
-            }
+            if (cameraPositionState.isMoving) { lastMoveAt = now; continue }
+            if (now - lastMoveAt < GOOGLE_IDLE_BEFORE_RENDER_MS) continue
+
             val cam = cameraPositionState.position
-            val metersPerPx = 156_543.03392 * cos(Math.toRadians(cam.target.latitude)) / 2.0.pow(cam.zoom.toDouble()) / mapDensity
-            googleMarkers.applyPositions(hub, view, metersPerPx)
+            dot = if (dot) cam.zoom < DOT_ZOOM_GOOGLE + DOT_HYSTERESIS else cam.zoom < DOT_ZOOM_GOOGLE
+            val interval = if (dot) 1200L else GOOGLE_LABEL_INTERVAL_MS
+            val vehicles = curVehicles
+            val due = pendingWork || cam != lastCam || vehicles !== lastVehicles || dot != lastDot || now - lastRender >= interval
+            if (!due) continue
+
+            val view = googleViewBox(cam, googleSize[0], googleSize[1], mapDensity)?.expanded(0.3)
+            if (!dot) hub.ensureRoutes(view, enabled = true)
+            hub.tick(now, view)
+            pendingWork = !googleLayer.render(context, hub, cam, googleSize[0], googleSize[1], mapDensity, dot, vehicles, curTarget)
+            lastCam = cam; lastVehicles = vehicles; lastDot = dot
+            lastRender = SystemClock.elapsedRealtime()
         }
     }
 
@@ -492,7 +521,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         }
     }
 
-    Box(modifier = modifier.fillMaxSize().then(googleTapModifier)) {
+    Box(modifier = modifier.fillMaxSize().then(googleTapModifier).onSizeChanged { googleSize[0] = it.width; googleSize[1] = it.height }) {
         if (appState.mapProvider == MapProvider.GOOGLE) {
             GoogleMap(
                 modifier = Modifier.fillMaxSize(),
@@ -503,12 +532,14 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 uiSettings = MapUiSettings(
                     zoomControlsEnabled = false,
                     myLocationButtonEnabled = false,
-                    mapToolbarEnabled = false
+                    mapToolbarEnabled = false,
+                    tiltGesturesEnabled = false   // výběr vozidel do mřížky se počítá pro pohled shora
                 )
             ) {
                 // mapa už existuje, překryvná "Načítání mapy" může pryč; nečeká se na stažení všech dlaždic (onMapLoaded)
                 MapEffect(Unit) { isMapReady = true }
                 if (!isMapReady) return@GoogleMap
+                MapEffect(Unit) { gmap -> googleLayer.attach(gmap) }
 
                 val primaryColor = MaterialTheme.colorScheme.primary
                 val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
@@ -631,12 +662,6 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                             )
                         }
                     }
-                }
-
-                // vozidla jako nativní markery mimo Compose (viz GoogleVehicleMarkers); tady se jen sladí seznam
-                MapEffect(activeVehicles, targetUid, phase, hub) { gmap ->
-                    googleMarkers.attach(gmap)
-                    googleMarkers.sync(context, hub, activeVehicles, targetUid, phase)
                 }
             }
         } else {
@@ -892,24 +917,76 @@ private val USE_TEXTURE_MODE = android.os.Build.MANUFACTURER.lowercase() in setO
 
 // max. frekvence předávání pozic vozidel do MapLibre (~30 Hz), animace A -> B je počítaná z času
 private const val VEHICLE_UPDATE_INTERVAL_MS = 33L
+// oddáleno (tečky): pohyb o pixel trvá dlouho, stačí řídké aktualizace
+private const val DOT_UPDATE_INTERVAL_MS = 250L
+private const val DOT_UPDATE_INTERVAL_FAR_MS = 500L
+private const val MAX_NEW_IMAGES_PER_PUSH = 10
 
 // popis vozidla pro vykreslení: ikona + řazení, přepočítá se jen při změně vozidel / zvýraznění
-private class VehicleDraw(val key: String, val imgId: String, val sort: Int)
+private class VehicleDraw(val key: String, val v: Vehicle, val iconPhase: Int) {
+    val imgId = "veh|${v.line}|${v.train}|${v.delay > 3}|$iconPhase"
+    val sort = if (iconPhase != 0) 2 else 1
+    val colorKey = if (v.train) "b" else if (v.delay > 3) "r" else "g"
+}
 
+private const val VEH_DOT_LAYER = "vehicles-dots"
+private const val VEH_HL_LAYER = "vehicles-hl"
+
+private fun vehicleSymbolProps() = arrayOf(
+    PropertyFactory.iconImage(Expression.get("img")),
+    PropertyFactory.iconAllowOverlap(true),
+    PropertyFactory.iconIgnorePlacement(true),
+    PropertyFactory.iconOpacity(Expression.coalesce(Expression.get("opacity"), Expression.literal(1.0f))),
+    // vyšší hodnota = kreslí se výš (zvýrazněné vozidlo nahoře)
+    PropertyFactory.symbolSortKey(Expression.get("sort"))
+)
+
+/**
+ * Tři vrstvy nad jedním zdrojem; přepínání mezi tečkami a štítky řeší GPU podle zoomu (minzoom / maxzoom),
+ * žádný kód v Kotlinu to nesleduje:
+ *  - [VEH_LAYER]: štítky s číslem linky od [DOT_ZOOM_ML] výš,
+ *  - [VEH_DOT_LAYER]: malé tečky pod [DOT_ZOOM_ML],
+ *  - [VEH_HL_LAYER]: zvýrazněné vozidlo je vždy štítek (a nahoře).
+ */
 private fun ensureVehicleLayer(style: Style) {
     if (style.getSource(VEH_SRC) == null) {
         style.addSource(GeoJsonSource(VEH_SRC, FeatureCollection.fromFeatures(emptyList<Feature>())))
     }
+    val notHl = Expression.neq(Expression.get("hl"), Expression.literal(1))
     if (style.getLayer(VEH_LAYER) == null) {
         style.addLayer(
-            SymbolLayer(VEH_LAYER, VEH_SRC).withProperties(
-                PropertyFactory.iconImage(Expression.get("img")),
-                PropertyFactory.iconAllowOverlap(true),
-                PropertyFactory.iconIgnorePlacement(true),
-                PropertyFactory.iconOpacity(Expression.coalesce(Expression.get("opacity"), Expression.literal(1.0f))),
-                // vyšší hodnota = kreslí se výš (zvýrazněné vozidlo nahoře)
-                PropertyFactory.symbolSortKey(Expression.get("sort"))
-            )
+            SymbolLayer(VEH_LAYER, VEH_SRC).withProperties(*vehicleSymbolProps()).withFilter(notHl)
+                .also { it.setMinZoom(DOT_ZOOM_ML) }
+        )
+    }
+    if (style.getLayer(VEH_DOT_LAYER) == null) {
+        style.addLayer(
+            CircleLayer(VEH_DOT_LAYER, VEH_SRC).withProperties(
+                PropertyFactory.circleRadius(
+                    Expression.interpolate(
+                        Expression.linear(), Expression.zoom(),
+                        Expression.stop(6, 2.0f),
+                        Expression.stop(DOT_ZOOM_ML.toInt(), 3.4f)
+                    )
+                ),
+                PropertyFactory.circleColor(
+                    Expression.match(
+                        Expression.get("k"), Expression.color(vehicleColor(false, 0)),
+                        Expression.stop("r", Expression.color(vehicleColor(false, 4))),
+                        Expression.stop("b", Expression.color(vehicleColor(true, 0)))
+                    )
+                ),
+                PropertyFactory.circleOpacity(Expression.coalesce(Expression.get("opacity"), Expression.literal(1.0f))),
+                PropertyFactory.circleStrokeColor("#FFFFFF"),
+                PropertyFactory.circleStrokeWidth(1f),
+                PropertyFactory.circleStrokeOpacity(0.8f)
+            ).withFilter(notHl).also { it.setMaxZoom(DOT_ZOOM_ML) }
+        )
+    }
+    if (style.getLayer(VEH_HL_LAYER) == null) {
+        style.addLayer(
+            SymbolLayer(VEH_HL_LAYER, VEH_SRC).withProperties(*vehicleSymbolProps())
+                .withFilter(Expression.eq(Expression.get("hl"), Expression.literal(1)))
         )
     }
 }
@@ -1345,17 +1422,62 @@ private fun MapLibreScreenContent(
 
         var draws: List<VehicleDraw> = emptyList()
         var lastPush = 0L
+        var view: ViewBox? = null
+        var viewAt = 0L
+        var dotMode = false          // oddáleno: kreslí se jen tečky (vrstva přepíná GPU, tady jen šetříme práci)
+        var needImages = true        // štítky se budou kreslit (nebo jsou těsně před tím)
+        var interval = VEHICLE_UPDATE_INTERVAL_MS
+        var pending = false          // některému vozidlu ještě chybí obrázek štítku
+
+        fun currentView(): ViewBox? = runCatching {
+            val w = mapView.width.toFloat()
+            val h = mapView.height.toFloat()
+            if (w <= 0f || h <= 0f) null
+            else {
+                val proj = m.projection
+                val corners = listOf(
+                    proj.fromScreenLocation(android.graphics.PointF(0f, 0f)),
+                    proj.fromScreenLocation(android.graphics.PointF(w, 0f)),
+                    proj.fromScreenLocation(android.graphics.PointF(0f, h)),
+                    proj.fromScreenLocation(android.graphics.PointF(w, h))
+                )
+                ViewBox(
+                    corners.minOf { it.latitude }, corners.minOf { it.longitude },
+                    corners.maxOf { it.latitude }, corners.maxOf { it.longitude }
+                ).expanded(0.4)
+            }
+        }.getOrNull()
 
         while (true) {
             withFrameNanos { }
             val now = SystemClock.elapsedRealtime()
             if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
-            if (now - lastPush < VEHICLE_UPDATE_INTERVAL_MS) continue
+            if (now - lastPush < interval) continue
 
-            val moved = hub.tick(now)
-            val metaChanged = dirty.getAndSet(false)
             val camChanged = cameraDirty.getAndSet(false)
-            if (!moved && !metaChanged && !camChanged) continue
+            var modeFlipped = false
+            // viditelná oblast a zoom (JNI volání) jen při pohybu kamery, jinak max. 1x za vteřinu
+            if (camChanged || view == null || now - viewAt >= 1000L) {
+                view = currentView()
+                viewAt = now
+                runCatching { m.cameraPosition.zoom }.getOrNull()?.let { z ->
+                    val nowDot = z < DOT_ZOOM_ML
+                    val nowImages = z >= DOT_ZOOM_ML - 0.5     // obrázky se chystají o půl úrovně dřív, ať nic neprobliká
+                    if (nowImages && !needImages) modeFlipped = true
+                    dotMode = nowDot
+                    needImages = nowImages
+                    interval = when {
+                        !nowDot -> VEHICLE_UPDATE_INTERVAL_MS
+                        z >= 10.0 -> DOT_UPDATE_INTERVAL_MS
+                        else -> DOT_UPDATE_INTERVAL_FAR_MS
+                    }
+                }
+            }
+
+            hub.ensureRoutes(view, enabled = !dotMode)
+            val moved = hub.tick(now, view)
+            val metaChanged = dirty.getAndSet(false) || modeFlipped
+            if (!moved && !metaChanged && !camChanged && !pending) continue
 
             val style = m.style
             if (style == null || !style.isFullyLoaded) {
@@ -1364,68 +1486,58 @@ private fun MapLibreScreenContent(
             ensureVehicleLayer(style)
 
             if (metaChanged || draws.isEmpty()) {
-                val vehicles = latestVehicles
                 val tgt = latestTarget
                 val ph = latestPhase
-
-                val list = ArrayList<VehicleDraw>(vehicles.size)
-                val missing = LinkedHashMap<String, Vehicle>()
-                for ((k, v) in vehicles) {
-                    val iconPhase = if (tgt != null && v.uid == tgt) ph else 0
-                    val imgId = "veh|${v.line}|${v.train}|${v.delay > 3}|$iconPhase"
-                    list += VehicleDraw(k, imgId, if (iconPhase != 0) 2 else 1)
-                    if (!addedImages.contains(imgId) && imgId !in missing) missing[imgId] = v
+                val list = ArrayList<VehicleDraw>(latestVehicles.size)
+                for ((k, v) in latestVehicles) {
+                    list += VehicleDraw(k, v, if (tgt != null && v.uid == tgt) ph else 0)
                 }
+                list.sortBy { it.key }     // pevné pořadí = stabilní Z order, nic se nepřeskupuje při aktualizaci
                 draws = list
-
-                if (missing.isNotEmpty()) {
-                    val newBitmaps = withContext(Dispatchers.Default) {
-                        missing.map { (imgId, v) ->
-                            val iconPhase = if (tgt != null && v.uid == tgt) ph else 0
-                            val bmp = markerBitmap(context, v.line, v.train, v.delay, iconPhase)
-                                .copy(Bitmap.Config.ARGB_8888, false).apply {
-                                    setDensity(context.resources.displayMetrics.densityDpi)
-                                }
-                            imgId to bmp
-                        }
-                    }
-                    for ((imgId, bmp) in newBitmaps) {
-                        if (addedImages.add(imgId)) style.addImage(imgId, bmp)
-                    }
-                }
             }
 
-            // do zdroje jen vozidla v (rozšířené) viditelné oblasti
-            val view = runCatching {
-                val w = mapView.width.toFloat()
-                val h = mapView.height.toFloat()
-                if (w <= 0f || h <= 0f) null
-                else {
-                    val proj = m.projection
-                    val corners = listOf(
-                        proj.fromScreenLocation(android.graphics.PointF(0f, 0f)),
-                        proj.fromScreenLocation(android.graphics.PointF(w, 0f)),
-                        proj.fromScreenLocation(android.graphics.PointF(0f, h)),
-                        proj.fromScreenLocation(android.graphics.PointF(w, h))
-                    )
-                    ViewBox(
-                        corners.minOf { it.latitude }, corners.minOf { it.longitude },
-                        corners.maxOf { it.latitude }, corners.maxOf { it.longitude }
-                    ).expanded(0.4)
+            // obrázky štítků jen pro vozidla ve viditelné oblasti a jen když se štítky kreslí
+            // (zvýrazněné vozidlo je štítek vždy). Za jeden průchod nejvýš pár kusů, ať se hlavní vlákno nezasekne.
+            val missing = LinkedHashMap<String, VehicleDraw>()
+            for (d in draws) {
+                if (!needImages && d.iconPhase == 0) continue
+                if (d.imgId in addedImages || d.imgId in missing) continue
+                val p = hub.positionOf(d.key) ?: continue
+                if (view != null && !view.contains(p.latitude, p.longitude)) continue
+                missing[d.imgId] = d
+                if (missing.size >= MAX_NEW_IMAGES_PER_PUSH) break
+            }
+            if (missing.isNotEmpty()) {
+                val newBitmaps = withContext(Dispatchers.Default) {
+                    missing.map { (imgId, d) ->
+                        val bmp = markerBitmap(context, d.v.line, d.v.train, d.v.delay, d.iconPhase)
+                            .copy(Bitmap.Config.ARGB_8888, false).apply {
+                                setDensity(context.resources.displayMetrics.densityDpi)
+                            }
+                        imgId to bmp
+                    }
                 }
-            }.getOrNull()
+                for ((imgId, bmp) in newBitmaps) {
+                    if (addedImages.add(imgId)) style.addImage(imgId, bmp)
+                }
+            }
+            pending = false
 
-            val features = ArrayList<Feature>(draws.size)
+            val features = ArrayList<Feature>(minOf(draws.size, 600))
             for (d in draws) {
                 val p = hub.positionOf(d.key) ?: continue
                 if (view != null && !view.contains(p.latitude, p.longitude)) continue
-                val v = latestVehicles.firstOrNull { it.first == d.key }?.second
-                val isStale = v != null && v.ageSec() >= 60
+                val hl = d.iconPhase != 0
+                val wantsImage = hl || needImages
+                if (wantsImage && d.imgId !in addedImages) { pending = true; continue }
                 features += Feature.fromGeometry(Point.fromLngLat(p.longitude, p.latitude)).also {
-                    it.addStringProperty("img", d.imgId)
-                    it.addStringProperty("key", d.key)
-                    it.addNumberProperty("sort", d.sort)
-                    it.addNumberProperty("opacity", if (isStale) 0.65f else 1.0f)
+                    if (d.v.ageSec() >= 60) it.addNumberProperty("opacity", 0.65f)
+                    if (wantsImage) {
+                        it.addStringProperty("img", d.imgId)
+                        it.addNumberProperty("sort", d.sort)
+                    }
+                    if (hl) it.addNumberProperty("hl", 1)
+                    else if (dotMode) it.addStringProperty("k", d.colorKey)
                 }
             }
 

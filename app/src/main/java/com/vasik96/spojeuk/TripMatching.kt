@@ -46,7 +46,28 @@ object TripEnricher {
     private fun match(v: Vehicle, tt: Timetable): TripMatchResult? = when {
         v.train -> TripMatchers.byTrainNumber.match(v, tt)
         else -> TripMatchers.byCisNumber.match(v, tt)
-            ?: if (v.source == SourceIds.DPMUL || SourceIds.DPMUL in v.sources) dpmulMatcher.match(v, tt) else null
+            ?: if (v.source == SourceIds.DPMUL || SourceIds.DPMUL in v.sources) dpmulMatcher.match(v, tt)
+            else if (v.source == SourceIds.PID || SourceIds.PID in v.sources) matchCached(v, tt, pidMatcher)
+            else null
+    }
+
+    // PID: vozy často nemají číslo spoje, které by sedělo na jízdní řád (jiné ČIS / číslování), takže se podle
+    // polohy a času hledá spoj stejné linky, jinak by u pražských vozidel nešel najít vůz ke spoji ani trasa.
+    // Hledání je drahé a PID jsou tisíce vozů, proto se výsledek na chvíli pamatuje.
+    private val pidMatcher = TripMatchers.byPosition()
+    private class CachedMatch(val line: String, val result: TripMatchResult?, val atMs: Long)
+    private val pidCache = java.util.concurrent.ConcurrentHashMap<String, CachedMatch>()
+    private const val PID_CACHE_MS = 90_000L
+    private const val PID_CACHE_MAX = 6_000
+
+    private fun matchCached(v: Vehicle, tt: Timetable, m: TripMatcher): TripMatchResult? {
+        val now = System.currentTimeMillis()
+        val c = pidCache[v.uid]
+        if (c != null && c.line == v.line && now - c.atMs < PID_CACHE_MS) return c.result
+        val r = m.match(v, tt)
+        if (pidCache.size > PID_CACHE_MAX) pidCache.clear()
+        pidCache[v.uid] = CachedMatch(v.line, r, now)
+        return r
     }
 
     /** Linku ze spoje přebírají vozy z DÚK, PID a vlaky; DPMÚL má vlastní (správné) označení linky. */

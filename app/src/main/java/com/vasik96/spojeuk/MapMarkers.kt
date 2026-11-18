@@ -31,6 +31,35 @@ internal fun markerDescriptor(ctx: Context, line: String, train: Boolean, delay:
 internal fun markerBitmap(ctx: Context, line: String, train: Boolean, delay: Int, phase: Int): Bitmap =
     createLineMarkerDrawable(ctx, line, train, delay, phase).bitmap
 
+/** Barva markeru vozidla (stejná pro štítek i pro tečku při oddálení). */
+internal fun vehicleColor(train: Boolean, delay: Int, phase: Int = 0): Int = when {
+    phase == 1 -> 0xFFFFD54F.toInt()
+    phase == 2 -> 0xFFFF6D00.toInt()
+    train -> 0xFF0277BD.toInt()
+    delay > 3 -> 0xFFC62828.toInt()
+    else -> 0xFF2E7D32.toInt()
+}
+
+// ───────────── malé tečky pro oddálenou mapu (bez čísla linky) ─────────────
+
+private val dotBitmapCache = ConcurrentHashMap<Int, Bitmap>()
+private val dotDescCache = ConcurrentHashMap<Int, BitmapDescriptor>()
+
+/** Malá tečka (cca 9 dp) v barvě vozidla s jemným světlým okrajem, aby šla vidět na tmavé i světlé mapě. */
+internal fun dotBitmap(ctx: Context, color: Int): Bitmap = dotBitmapCache.getOrPut(color) {
+    val density = ctx.resources.displayMetrics.density
+    val size = (9 * density).toInt().coerceAtLeast(9)
+    val bmp = createBitmap(size, size)
+    val c = Canvas(bmp)
+    val r = size / 2f
+    c.drawCircle(r, r, r, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = 0xCCFFFFFF.toInt() })
+    c.drawCircle(r, r, r - 1.2f * density, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color })
+    bmp
+}
+
+internal fun dotDescriptor(ctx: Context, color: Int): BitmapDescriptor =
+    dotDescCache.getOrPut(color) { BitmapDescriptorFactory.fromBitmap(dotBitmap(ctx, color)) }
+
 /** phase: 0 = normální, 1 = zvýraznění A (žlutá, velká), 2 = zvýraznění B (oranžová, menší). */
 private fun createLineMarkerDrawable(
     context: Context, line: String, isTrain: Boolean, delay: Int, phase: Int
@@ -76,13 +105,7 @@ private fun createLineMarkerDrawable(
     val bitmap = createBitmap(widthPx, heightPx)
     val canvas = Canvas(bitmap)
 
-    val bgColor = when {
-        phase == 1 -> 0xFFFFD54F.toInt()
-        phase == 2 -> 0xFFFF6D00.toInt()
-        isTrain -> 0xFF0277BD.toInt()
-        delay > 3 -> 0xFFC62828.toInt()
-        else -> 0xFF2E7D32.toInt()
-    }
+    val bgColor = vehicleColor(isTrain, delay, phase)
 
     val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = bgColor

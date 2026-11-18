@@ -1,7 +1,6 @@
 package com.vasik96.spojeuk
 
 import com.google.android.gms.maps.model.LatLng
-import com.google.maps.android.compose.MarkerState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -28,17 +27,16 @@ internal class MotionHub(
 ) {
     class Entry(var vehicle: Vehicle) {
         val motion = VehicleMotion(vehicle.lat, vehicle.lng, vehicle.observedAtMs, isTrain = vehicle.train)
-        val state = MarkerState(LatLng(vehicle.lat, vehicle.lng)) // jen pro Google
         var pos = LatLng(vehicle.lat, vehicle.lng)
-        var routeKey: String? = null
+        var wantKey: String? = null      // jakou trasu vůz chce (null = pohyb po přímce)
+        var routeKey: String? = null     // pro jakou trasu už běží / doběhlo načítání
+        var lastTick = 0L
         var routeJob: Job? = null
     }
 
     private val entries = HashMap<String, Entry>()
 
     private fun obtain(k: String, v: Vehicle) = entries.getOrPut(k) { Entry(v) }
-
-    fun markerState(k: String, v: Vehicle): MarkerState = obtain(k, v).state
 
     fun positionOf(k: String): LatLng? = entries[k]?.pos
 
@@ -54,24 +52,11 @@ internal class MotionHub(
             e.vehicle = v
             e.motion.onFix(v.lat, v.lng, v.observedAtMs, heading = v.heading, predict = followRoads)
 
-            val want = if (followRoads) "${v.tid}|${v.cis}|${v.trip}" else null
-            if (e.routeKey != want) {
-                e.routeKey = want
+            e.wantKey = if (followRoads) "${v.tid}|${v.cis}|${v.trip}" else null
+            if (e.wantKey == null && e.routeKey != null) {
+                e.routeKey = null
                 e.routeJob?.cancel()
-                if (want != null) {
-                    e.routeJob = scope.launch {
-                        repeat(4) {
-                            val r = routes.get(e.vehicle)
-                            if (r != null) {
-                                e.motion.setRoute(r)
-                                return@launch
-                            }
-                            delay(20_000)
-                        }
-                    }
-                } else {
-                    e.motion.setRoute(null)
-                }
+                e.motion.setRoute(null)
             }
         }
         val iter = entries.iterator()
@@ -84,10 +69,45 @@ internal class MotionHub(
         }
     }
 
-    /** Přepočítá pozice (levné). Vrací true, když se aspoň jedna změnila. */
-    fun tick(now: Long): Boolean {
+    /**
+     * Načte trasy (OSRM / tvary) jen vozidlům ve viditelné oblasti a nejvýš [MAX_LAUNCH] za volání.
+     * Dřív se trasa hledala pro všechna vozidla najednou (u PID tisíce), což zatěžovalo CPU i síť.
+     * Při oddálení ([enabled] = false) se nic nespouští, vozidla se pohybují po přímce.
+     */
+    fun ensureRoutes(view: ViewBox?, enabled: Boolean) {
+        if (!enabled) return
+        var launched = 0
+        for (e in entries.values) {
+            val want = e.wantKey ?: continue
+            if (e.routeKey == want) continue
+            if (view != null && !view.contains(e.pos.latitude, e.pos.longitude)) continue
+            e.routeKey = want
+            e.routeJob?.cancel()
+            e.routeJob = scope.launch {
+                repeat(4) {
+                    val r = routes.get(e.vehicle)
+                    if (r != null) {
+                        e.motion.setRoute(r)
+                        return@launch
+                    }
+                    delay(20_000)
+                }
+            }
+            if (++launched >= MAX_LAUNCH) break
+        }
+    }
+
+    /**
+     * Přepočítá pozice (levné). Vozidla mimo [view] se posouvají jen zhruba jednou za vteřinu,
+     * aby po najetí do pohledu nebyla daleko od skutečné polohy. Vrací true, když se aspoň jedna změnila.
+     */
+    fun tick(now: Long, view: ViewBox? = null): Boolean {
         var changed = false
         for (e in entries.values) {
+            if (view != null && !view.contains(e.pos.latitude, e.pos.longitude)) {
+                if (now - e.lastTick < OFFSCREEN_TICK_MS) continue
+            }
+            e.lastTick = now
             val p = e.motion.positionAt(now)
             if (p != e.pos) {
                 e.pos = p
@@ -97,17 +117,20 @@ internal class MotionHub(
         return changed
     }
 
-    /** Google: zapíše do MarkerState jen vozidla ve viditelné oblasti. */
-    fun applyToMarkerStates(view: ViewBox?) {
-        for (e in entries.values) {
-            val p = e.pos
-            if (view != null && !view.contains(p.latitude, p.longitude)) continue
-            if (e.state.position != p) e.state.position = p
-        }
+    /** Posune jediné vozidlo (zvýrazněné, které se kreslí zvlášť a hýbe se plynule). */
+    fun tickKey(k: String, now: Long) {
+        val e = entries[k] ?: return
+        e.lastTick = now
+        e.pos = e.motion.positionAt(now)
     }
 
     fun clear() {
         entries.values.forEach { it.routeJob?.cancel() }
         entries.clear()
+    }
+
+    private companion object {
+        const val MAX_LAUNCH = 12
+        const val OFFSCREEN_TICK_MS = 1000L
     }
 }
