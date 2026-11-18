@@ -5,7 +5,6 @@ import android.database.sqlite.SQLiteStatement
 import java.io.BufferedInputStream
 import java.io.Closeable
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.zip.ZipFile
@@ -77,15 +76,8 @@ private const val QUOTE: Byte = 34
 
 private val WS = Regex("\\s+")
 
-/** Soubory z GTFS, které opravdu potřebujeme (shapes.txt apod. se vůbec nerozbalují). */
-private val NEEDED_FILES = setOf(
-    "stops.txt", "agency.txt", "routes.txt", "trips.txt",
-    "stop_times.txt", "calendar.txt", "calendar_dates.txt"
-)
-
 /** Čte soubor po řádcích přímo z bajtů; žádný String na řádek. */
-private class ByteLineReader(file: File, bufSize: Int = 1 shl 18) : Closeable {
-    private val input = FileInputStream(file)
+private class ByteLineReader(private val input: InputStream, bufSize: Int = 1 shl 18) : Closeable {
     var buf = ByteArray(bufSize)
         private set
     private var pos = 0
@@ -136,8 +128,8 @@ private class ByteLineReader(file: File, bufSize: Int = 1 shl 18) : Closeable {
  * Najde požadované sloupce podle hlavičky a pro každý řádek jen vyplní offsety (fs/fe) do bufferu.
  * Řetězce se vytvářejí jen na požádání přes [str].
  */
-private class CsvScanner(file: File, private val wanted: Array<String>) : Closeable {
-    private val rd = ByteLineReader(file)
+private class CsvScanner(input: InputStream, private val wanted: Array<String>) : Closeable {
+    private val rd = ByteLineReader(input)
     private val idx = IntArray(wanted.size) { -1 }
     private var maxCol = -1
     private var cs = IntArray(0)
@@ -219,9 +211,10 @@ private class CsvScanner(file: File, private val wanted: Array<String>) : Closea
     override fun close() = rd.close()
 }
 
-private inline fun readCsv(file: File, wanted: Array<String>, block: (CsvScanner) -> Unit) {
-    if (!file.exists()) return
-    CsvScanner(file, wanted).use { sc ->
+/** Čte CSV přímo ze zipu (bez rozbalení na disk). Chybějící soubor se přeskočí. */
+private inline fun readCsv(zf: ZipFile, name: String, wanted: Array<String>, block: (CsvScanner) -> Unit) {
+    val entry = zf.getEntry(name) ?: return
+    CsvScanner(BufferedInputStream(zf.getInputStream(entry), 1 shl 16), wanted).use { sc ->
         while (sc.nextRow()) block(sc)
     }
 }
@@ -327,24 +320,6 @@ class GtfsFeed(val zip: File, val rail: Boolean = false)
 
 class GtfsImporter(private val dbFile: File) {
 
-    /** Rozbalí jen potřebné soubory (ZipFile = náhodný přístup, shapes.txt se vůbec nečte). */
-    private fun unzipToDirectory(zipFile: File, destDir: File) {
-        destDir.deleteRecursively()
-        destDir.mkdirs()
-        ZipFile(zipFile).use { zf ->
-            val entries = zf.entries()
-            while (entries.hasMoreElements()) {
-                val entry = entries.nextElement()
-                if (entry.isDirectory) continue
-                val name = entry.name.substringAfterLast('/')
-                if (name !in NEEDED_FILES) continue
-                zf.getInputStream(entry).use { ins ->
-                    FileOutputStream(File(destDir, name)).use { out -> ins.copyTo(out, 65536) }
-                }
-            }
-        }
-    }
-
     fun importGtfs(
         gtfsZipFile: File,
         tag: String,
@@ -363,6 +338,7 @@ class GtfsImporter(private val dbFile: File) {
         val tempDir = File(dbFile.parentFile, "gtfs_temp")
         tempDir.deleteRecursively()
         tempDir.mkdirs()
+        val openZips = ArrayList<ZipFile>()
 
         try {
             data class StationData(val name: String, val lat: Double?, val lon: Double?)
@@ -411,17 +387,15 @@ class GtfsImporter(private val dbFile: File) {
                     // postup jednoho feedu (0..1) → celkový
                     fun prog(p: Float) = progress(((fi + p) / feeds.size) * 0.95f)
 
-                    log(if (rail) "Rozbaluji GTFS vlaků…" else "Rozbaluji GTFS…")
+                    // soubory se čtou rovnou ze zipu (stop_times.txt má stovky MB, rozbalení na disk a znovu čtení se šetří)
                     prog(0.05f)
-                    unzipToDirectory(feed.zip, tempDir)
-                    feed.zip.delete()   // zip už nepotřebujeme, šetří místo
+                    val zf = ZipFile(feed.zip)
+                    openZips.add(zf)
 
                     log(if (rail) "Čtu zastávky (vlaky)…" else "Čtu zastávky…")
                     prog(0.1f)
 
-                    readCsv(
-                        File(tempDir, "stops.txt"),
-                        arrayOf("stop_id", "stop_name", "stop_lat", "stop_lon", "location_type", "parent_station")
+                    readCsv(zf, "stops.txt", arrayOf("stop_id", "stop_name", "stop_lat", "stop_lon", "location_type", "parent_station")
                     ) { sc ->
                         val stopId = sc.str(0)
                         if (stopId.isEmpty()) return@readCsv
@@ -445,13 +419,13 @@ class GtfsImporter(private val dbFile: File) {
                     prog(0.2f)
 
                     val agencies = HashMap<String, String>()
-                    readCsv(File(tempDir, "agency.txt"), arrayOf("agency_id", "agency_name")) { sc ->
+                    readCsv(zf, "agency.txt", arrayOf("agency_id", "agency_name")) { sc ->
                         agencies[sc.str(0)] = sc.str(1)
                     }
 
                     data class RouteData(val shortName: String, val agency: String)
                     val routes = HashMap<String, RouteData>()
-                    readCsv(File(tempDir, "routes.txt"), arrayOf("route_id", "route_short_name", "agency_id")) { sc ->
+                    readCsv(zf, "routes.txt", arrayOf("route_id", "route_short_name", "agency_id")) { sc ->
                         val id = sc.str(0)
                         if (id.isEmpty()) return@readCsv
                         routes[id] = RouteData(sc.strOr(1, "?"), agencies[sc.str(2)] ?: "")
@@ -464,17 +438,18 @@ class GtfsImporter(private val dbFile: File) {
                         val shortName: String,
                         val wheel: Int
                     )
-                    val tripsMeta = HashMap<String, TripMeta>()
-                    readCsv(
-                        File(tempDir, "trips.txt"),
-                        arrayOf("trip_id", "route_id", "service_id", "trip_headsign", "trip_short_name", "wheelchair_accessible")
+                    val tripsMeta = HashMap<String, TripMeta>(1 shl 18)
+                    // route_id, service_id a cíle se opakují u statisíců spojů; sdílená instance šetří paměť a GC
+                    val pool = HashMap<String, String>(4096)
+                    fun shared(x: String): String = pool.getOrPut(x) { x }
+                    readCsv(zf, "trips.txt", arrayOf("trip_id", "route_id", "service_id", "trip_headsign", "trip_short_name", "wheelchair_accessible")
                     ) { sc ->
                         val tripId = sc.str(0)
                         if (tripId.isEmpty()) return@readCsv
                         tripsMeta[tripId] = TripMeta(
-                            routeId = sc.str(1),
-                            serviceId = sc.str(2),
-                            headsign = sc.str(3),
+                            routeId = shared(sc.str(1)),
+                            serviceId = shared(sc.str(2)),
+                            headsign = shared(sc.str(3)),
                             shortName = sc.str(4),
                             wheel = sc.str(5).toIntOrNull() ?: 0
                         )
@@ -564,11 +539,11 @@ class GtfsImporter(private val dbFile: File) {
                     }
 
                     // ───── stop_times.txt: hlavní úzké hrdlo, jeden průchod nad bajty ─────
-                    val stopTimesFile = File(tempDir, "stop_times.txt")
-                    if (stopTimesFile.exists()) {
-                        val total = stopTimesFile.length().coerceAtLeast(1L).toFloat()
+                    val stopTimesEntry = zf.getEntry("stop_times.txt")
+                    if (stopTimesEntry != null) {
+                        val total = stopTimesEntry.size.coerceAtLeast(1L).toFloat()
                         val sc = CsvScanner(
-                            stopTimesFile,
+                            zf.getInputStream(stopTimesEntry),
                             arrayOf("trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time")
                         )
                         sc.use {
@@ -634,9 +609,7 @@ class GtfsImporter(private val dbFile: File) {
                     prog(0.9f)
 
                     // ───── kalendář tohoto feedu (svcIndexMap už obsahuje jen služby uložených spojů) ─────
-                    readCsv(
-                        File(tempDir, "calendar.txt"),
-                        arrayOf(
+                    readCsv(zf, "calendar.txt", arrayOf(
                             "service_id", "monday", "tuesday", "wednesday", "thursday",
                             "friday", "saturday", "sunday", "start_date", "end_date"
                         )
@@ -652,9 +625,7 @@ class GtfsImporter(private val dbFile: File) {
                         stmtSvc.executeInsert()
                     }
 
-                    readCsv(
-                        File(tempDir, "calendar_dates.txt"),
-                        arrayOf("service_id", "date", "exception_type")
+                    readCsv(zf, "calendar_dates.txt", arrayOf("service_id", "date", "exception_type")
                     ) { sc ->
                         val sid = svcIndexMap[sc.str(0)] ?: return@readCsv
                         stmtSvcDate.bindLong(1, sid.toLong())
@@ -663,8 +634,8 @@ class GtfsImporter(private val dbFile: File) {
                         stmtSvcDate.executeInsert()
                     }
 
-                    tempDir.deleteRecursively()
-                    tempDir.mkdirs()
+                    zf.close()
+                    feed.zip.delete()   // zip už nepotřebujeme, šetří místo
                     log("Feed ${fi + 1}/${feeds.size} hotový, spojů celkem: $countTrips")
                 }
 
@@ -729,6 +700,7 @@ class GtfsImporter(private val dbFile: File) {
             progress(1.0f)
             log("Hotovo! Importováno $countTrips spojů.")
         } finally {
+            for (z in openZips) runCatching { z.close() }
             tempDir.deleteRecursively()
         }
     }

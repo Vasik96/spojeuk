@@ -9,18 +9,22 @@ import java.util.concurrent.ConcurrentHashMap
 
 /** Pěší přesuny mezi blízkými zastávkami (stopId → [(stopId, sekundy)]). */
 object FootGraph {
+    private fun cellKey(y: Int, x: Int): Long = (y.toLong() shl 32) or (x.toLong() and 0xFFFFFFFFL)
+
     fun build(stops: Map<Int, Stop>): Map<Int, List<Pair<Int, Int>>> {
-        val cells = HashMap<Pair<Int, Int>, MutableList<Int>>()
+        val cells = HashMap<Long, MutableList<Int>>()
         for ((sid, stop) in stops) {
             if (!stop.hasCoords) continue
-            cells.getOrPut((stop.lat / 0.003).toInt() to (stop.lng / 0.0045).toInt()) { mutableListOf() }.add(sid)
+            cells.getOrPut(cellKey((stop.lat / 0.003).toInt(), (stop.lng / 0.0045).toInt())) { ArrayList(4) }.add(sid)
         }
         val foot = HashMap<Int, MutableList<Pair<Int, Int>>>()
         for ((cell, ids) in cells) {
+            val cy = (cell shr 32).toInt()
+            val cx = cell.toInt()
             for (a in ids) {
                 val sa = stops[a] ?: continue
                 for (dy in -1..1) for (dx in -1..1) {
-                    val neighbours = cells[(cell.first + dy) to (cell.second + dx)] ?: continue
+                    val neighbours = cells[cellKey(cy + dy, cx + dx)] ?: continue
                     for (b in neighbours) {
                         if (b == a) continue
                         val sb = stops[b] ?: continue
@@ -44,7 +48,7 @@ class Timetable(val dbFile: File) {
 
     val stops = HashMap<Int, Stop>()
     val places = HashMap<String, MutableList<Int>>()
-    val trips = HashMap<Int, DbTrip>()
+    val trips = HashMap<Int, DbTrip>(1 shl 19)
     val svcs = HashMap<Int, SvcInfo>()
     val svcDates = HashMap<String, MutableList<SvcDateInfo>>()
     val meta = HashMap<String, String>()
@@ -58,6 +62,21 @@ class Timetable(val dbFile: File) {
     private val activeCache = ConcurrentHashMap<LocalDate, Set<Int>>()
     private val timesCache = ConcurrentHashMap<Int, TripTimes>()
     private val lineIndexes = ConcurrentHashMap<List<String>, Map<String, List<Int>>>()
+
+    // Jedno sdílené spojení pro čtení časů spojů. Dřív se DB otevírala a zavírala při každém dotazu (a ty se dělají
+    // pro stovky spojů najednou při párování vozidel), což bylo hlavně v debug buildu extrémně pomalé.
+    private val dbLock = Any()
+    private var sharedDb: SQLiteDatabase? = null
+
+    private fun readDb(): SQLiteDatabase = synchronized(dbLock) {
+        sharedDb?.takeIf { it.isOpen } ?: SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY).also { sharedDb = it }
+    }
+
+    /** Zavře sdílené spojení (volat při zahazování tohoto jízdního řádu). */
+    fun close() = synchronized(dbLock) {
+        runCatching { sharedDb?.close() }
+        sharedDb = null
+    }
 
     val foot: Map<Int, List<Pair<Int, Int>>> by lazy { FootGraph.build(stops) }
     val locator: TripLocator by lazy { TripLocator(this) }
@@ -95,15 +114,18 @@ class Timetable(val dbFile: File) {
             db.forEachRow("PRAGMA table_info(trip)") { if (it.getString(1) == "gid") hasGid = true }
 
             val gidCol = if (hasGid) ", gid" else ""
+            // linky, dopravci, cíle a čísla ČIS se opakují u statisíců spojů; sdílená instance šetří paměť i GC
+            val pool = HashMap<String, String>(8192)
+            fun intern(x: String?): String? = if (x == null) null else pool.getOrPut(x) { x }
             db.forEachRow("SELECT id, line, agency, cis, num, head, svc, wheel, t0, t1$gidCol FROM trip") { c ->
                 val id = c.getInt(0)
                 val trip = DbTrip(
                     id = id,
-                    line = c.getString(1) ?: "?",
-                    agency = c.getString(2) ?: "",
-                    cis = c.getString(3) ?: "",
-                    num = c.getString(4) ?: "",
-                    head = c.getString(5) ?: "",
+                    line = intern(c.getString(1)) ?: "?",
+                    agency = intern(c.getString(2)) ?: "",
+                    cis = intern(c.getString(3)) ?: "",
+                    num = intern(c.getString(4)) ?: "",
+                    head = intern(c.getString(5)) ?: "",
                     svc = c.getInt(6),
                     wheel = c.getInt(7),
                     t0 = c.getInt(8),
@@ -137,21 +159,58 @@ class Timetable(val dbFile: File) {
      * Drahé (čte všechny spoje), proto volat jen mimo hlavní vlákno, jednou.
      */
     fun computeStopModes(): StopModes {
+        val cache = File(dbFile.parentFile, "stopmodes.cache")
+        val stamp = "${dbFile.length()}:${dbFile.lastModified()}:${meta["tag"]}:${meta["trips"]}"
+        readStopModesCache(cache, stamp)?.let { return it }
+
         val rail = HashSet<Int>()
         val bus = HashSet<Int>()
-        val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
-        try {
-            db.forEachRow("SELECT trip, stops FROM trip_times") { c ->
+        val db = readDb()
+        // jen sloupec stops (arr/dep se nečtou), druh spoje se zjišťuje z paměti
+        db.rawQuery("SELECT trip, stops FROM trip_times", null).use { c ->
+            while (c.moveToNext()) {
                 val target = if (trips[c.getInt(0)]?.isTrain == true) rail else bus
                 for (sid in bytesToIntArray(c.getBlob(1))) target.add(sid)
             }
-        } finally {
-            db.close()
         }
         fun names(ids: Set<Int>): Set<String> =
             ids.mapNotNullTo(HashSet()) { stops[it]?.name }
-        return StopModes(railNames = names(rail), busNames = names(bus))
+        val modes = StopModes(railNames = names(rail), busNames = names(bus))
+        runCatching { writeStopModesCache(cache, stamp, modes) }
+        return modes
     }
+
+    // výsledek se uloží vedle DB; po dalším startu se jen načte (stovky MB trip_times se znovu neprocházejí)
+    private fun writeStopModesCache(f: File, stamp: String, m: StopModes) {
+        val tmp = File(f.path + ".tmp")
+        tmp.bufferedWriter(Charsets.UTF_8).use { w ->
+            w.write(stamp); w.newLine()
+            w.write("\u0001R"); w.newLine()
+            for (n in m.railNames) { w.write(n.replace('\n', ' ')); w.newLine() }
+            w.write("\u0001B"); w.newLine()
+            for (n in m.busNames) { w.write(n.replace('\n', ' ')); w.newLine() }
+        }
+        if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+    }
+
+    private fun readStopModesCache(f: File, stamp: String): StopModes? = runCatching {
+        if (!f.exists()) return null
+        val rail = HashSet<String>()
+        val bus = HashSet<String>()
+        f.bufferedReader(Charsets.UTF_8).use { r ->
+            if (r.readLine() != stamp) return null
+            var target: HashSet<String>? = null
+            while (true) {
+                val line = r.readLine() ?: break
+                when (line) {
+                    "\u0001R" -> target = rail
+                    "\u0001B" -> target = bus
+                    else -> target?.add(line)
+                }
+            }
+        }
+        if (rail.isEmpty() && bus.isEmpty()) null else StopModes(rail, bus)
+    }.getOrNull()
 
     // ───────── kalendář ─────────
 
@@ -172,16 +231,13 @@ class Timetable(val dbFile: File) {
 
     fun tripTimes(tid: Int): TripTimes? {
         timesCache[tid]?.let { return it }
-        val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
-        try {
-            db.rawQuery("SELECT stops, arr, dep FROM trip_times WHERE trip=?", arrayOf(tid.toString())).use { c ->
-                if (!c.moveToFirst()) return null
-                val t = TripTimes(bytesToIntArray(c.getBlob(0)), bytesToIntArray(c.getBlob(1)), bytesToIntArray(c.getBlob(2)))
-                timesCache[tid] = t
-                return t
-            }
-        } finally {
-            db.close()
+        val db = readDb()
+        db.rawQuery("SELECT stops, arr, dep FROM trip_times WHERE trip=?", arrayOf(tid.toString())).use { c ->
+            if (!c.moveToFirst()) return null
+            val t = TripTimes(bytesToIntArray(c.getBlob(0)), bytesToIntArray(c.getBlob(1)), bytesToIntArray(c.getBlob(2)))
+            if (timesCache.size > MAX_TIMES_CACHE) timesCache.clear()   // pojistka proti nekonečnému růstu
+            timesCache[tid] = t
+            return t
         }
     }
 
@@ -244,6 +300,8 @@ class Timetable(val dbFile: File) {
     }
 
     companion object {
+        private const val MAX_TIMES_CACHE = 20_000
+
         /** Jen metadata (verze, datum sestavení), bez načítání celé databáze. */
         fun readMeta(dbFile: File): Map<String, String> {
             val out = HashMap<String, String>()

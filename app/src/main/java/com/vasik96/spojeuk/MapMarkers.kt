@@ -154,10 +154,19 @@ private fun bearingBetween(start: LatLng, end: LatLng): Float {
 }
 
 private val arrowDescCache = ConcurrentHashMap<String, BitmapDescriptor>()
+private val arrowBitmapCache = ConcurrentHashMap<String, Bitmap>()
 
 internal fun routeArrowDescriptor(primaryColor: Int, scale: Float): BitmapDescriptor {
     val size = (96 * scale).toInt().coerceAtLeast(18)
     return arrowDescCache.getOrPut("$primaryColor:$size") {
+        BitmapDescriptorFactory.fromBitmap(routeArrowBitmap(primaryColor, scale))
+    }
+}
+
+/** Šipka na trase jako holá bitmapa (míří nahoru), pro kreslení do Canvasu nad Google mapou. */
+internal fun routeArrowBitmap(primaryColor: Int, scale: Float): Bitmap {
+    val size = (96 * scale).toInt().coerceAtLeast(18)
+    return arrowBitmapCache.getOrPut("$primaryColor:$size") {
         val bitmap = createBitmap(size, size)
         val canvas = Canvas(bitmap)
 
@@ -189,7 +198,7 @@ internal fun routeArrowDescriptor(primaryColor: Int, scale: Float): BitmapDescri
 
         }
 
-        BitmapDescriptorFactory.fromBitmap(bitmap)
+        bitmap
     }
 }
 

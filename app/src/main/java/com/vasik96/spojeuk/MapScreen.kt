@@ -73,6 +73,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -83,8 +84,9 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -119,10 +121,9 @@ import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapEffect
 import com.google.maps.android.compose.MapProperties
 import com.google.maps.android.compose.MapUiSettings
-import com.google.maps.android.compose.Marker
+import com.google.maps.android.compose.CameraPositionState
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
-import com.google.maps.android.compose.rememberUpdatedMarkerState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -163,16 +164,10 @@ private val USTECKY_LNG = 12.80..14.80
 
 private fun Vehicle.inUsteckyKraj() = lat in USTECKY_LAT && lng in USTECKY_LNG
 
-// Google: pozice markerů se přepisují v každém snímku (vsync), animace A -> B je počítaná z času.
-// Viditelná oblast (pro vynechání markerů mimo obrazovku) se přepočítává jen občas.
-private const val GOOGLE_VIEW_REFRESH_MS = 250L
-private const val GOOGLE_LABEL_INTERVAL_MS = 600L   // přiblíženo: markery vozidel se obnovují po 0,6 s
-private const val GOOGLE_IDLE_BEFORE_RENDER_MS = 150L  // kamera musí chvíli stát, než se vozidla přerenderují
-
 // Při oddálení (pod touto úrovní, v měřítku Google Maps) se místo štítků s číslem linky kreslí malé tečky.
 // Je to hlavní úspora u PID: tisíce štítků = tisíce bitmap, ikon a GeoJSON prvků při každém snímku.
-private const val DOT_ZOOM_GOOGLE = 12f
-private const val DOT_HYSTERESIS = 0.15f              // jen Google: proti blikání na hranici
+internal const val DOT_ZOOM_GOOGLE = 12f
+internal const val DOT_HYSTERESIS = 0.15f             // jen Google: proti blikání na hranici
 private const val DOT_ZOOM_ML = DOT_ZOOM_GOOGLE - 1f  // MapLibre má zoom o 1 menší
 
 /** Jak dlouho po kliku na vozidlo se pozastaví pohyb markerů (otevírání bottom sheetu). */
@@ -189,9 +184,8 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     var googleTilesLoaded by remember { mutableStateOf(false) }
     // Google: true = oddáleno, vozidla jsou jen tečky
     val googleSize = remember { IntArray(2) }   // rozměr mapy v px (pro výpočet viditelné oblasti bez dotazu na mapu)
-    val googleLayer = remember { GoogleVehicleLayer() }
-    DisposableEffect(googleLayer) { onDispose { googleLayer.detach() } }
-    val mapDensity = LocalDensity.current.density
+    val googleLayer = remember(context) { GoogleVehicleLayer(context) }
+    val overlayTick = remember { mutableLongStateOf(0L) }   // změna = překreslit Canvas s vozidly
 
     // Mapa se zobrazí hned (dřív tu byla 140ms pauza s "Načítání mapy…"). Vytváří se předem na pozadí (viz SpojeApp, mapVisited),
     // takže po přepnutí na záložku už jen odkryje hotovou mapu.
@@ -199,7 +193,6 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     LaunchedEffect(appState.mapProvider) {
         isMapReady = false
         googleTilesLoaded = false
-        googleLayer.detach()
     }
 
     // polling poloh
@@ -415,55 +408,11 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val predict = appState.predictVehiclePositions
     LaunchedEffect(activeVehicles, predict) { hub.update(activeVehicles, predict) }
 
-    // Google: vozidla jsou nativní markery z recyklovaného poolu (GoogleVehicleLayer), omezený počet přes řídkou mřížku.
-    // Smyčka je aktualizuje jen když kamera stojí (při tažení / zoomu se nedělá nic navíc), zvýrazněné vozidlo je zvlášť.
-    val curVehicles by rememberUpdatedState(activeVehicles)
-    val curTarget by rememberUpdatedState(targetUid)
-    val curPhase by rememberUpdatedState(phase)
     LaunchedEffect(hub, active, appState.mapProvider, isMapReady) {
         if (!active || appState.mapProvider != MapProvider.GOOGLE || !isMapReady) return@LaunchedEffect
-        var lastMoveAt = 0L
-        var lastRender = 0L
-        var lastCam: com.google.android.gms.maps.model.CameraPosition? = null
-        var lastVehicles: Any? = null
-        var dot = false
-        var lastDot = true
-        var pendingWork = false
         while (true) {
-            delay(40)
-            val now = SystemClock.elapsedRealtime()
-            googleLayer.updateHighlight(context, hub, now, curVehicles, curTarget, curPhase)
-            // po kliku na vozidlo chvíli nic nepočítat, ať má hlavní vlákno volno na otevření sheetu
-            if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
-            if (cameraPositionState.isMoving) { lastMoveAt = now; continue }
-            if (now - lastMoveAt < GOOGLE_IDLE_BEFORE_RENDER_MS) continue
-
-            val cam = cameraPositionState.position
-            dot = if (dot) cam.zoom < DOT_ZOOM_GOOGLE + DOT_HYSTERESIS else cam.zoom < DOT_ZOOM_GOOGLE
-            val interval = if (dot) 1200L else GOOGLE_LABEL_INTERVAL_MS
-            val vehicles = curVehicles
-            val due = pendingWork || cam != lastCam || vehicles !== lastVehicles || dot != lastDot || now - lastRender >= interval
-            if (!due) continue
-
-            val view = googleViewBox(cam, googleSize[0], googleSize[1], mapDensity)?.expanded(0.3)
-            if (!dot) hub.ensureRoutes(view, enabled = true)
-            hub.tick(now, view)
-            pendingWork = !googleLayer.render(context, hub, cam, googleSize[0], googleSize[1], mapDensity, dot, vehicles, curTarget)
-            lastCam = cam; lastVehicles = vehicles; lastDot = dot
-            lastRender = SystemClock.elapsedRealtime()
-        }
-    }
-
-    // Google: viditelná oblast pro šipky (aktualizuje se, až když se kamera zastaví)
-    var arrowView by remember { mutableStateOf<ViewBox?>(null) }
-    LaunchedEffect(cameraPositionState.isMoving, appState.tripRoute) {
-        if (!cameraPositionState.isMoving) {
-            arrowView = cameraPositionState.projection?.visibleRegion?.latLngBounds?.let {
-                ViewBox(
-                    it.southwest.latitude, it.southwest.longitude,
-                    it.northeast.latitude, it.northeast.longitude
-                ).expanded(0.5)
-            }
+            delay(100.milliseconds)
+            overlayTick.longValue = SystemClock.elapsedRealtime()
         }
     }
 
@@ -481,47 +430,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
     val scheme = if (useDarkMap) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT
 
-    // Google: onClick markeru chodí až po vypršení double-tap timeoutu (~250-300 ms). Tap proto vyhodnocujeme sami
-    // při zvednutí prstu (jen pozorujeme události, nic nespotřebováváme => mapa funguje normálně).
-    val googleDensity = LocalDensity.current.density
-    val latestActive by rememberUpdatedState(activeVehicles)
-    val tapSlopPx = LocalViewConfiguration.current.touchSlop
-    val googleTapModifier = Modifier.pointerInput(appState.mapProvider) {
-        if (appState.mapProvider != MapProvider.GOOGLE) return@pointerInput
-        awaitEachGesture {
-            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-            var valid = true
-            while (true) {
-                val ev = awaitPointerEvent(PointerEventPass.Initial)
-                if (ev.changes.size > 1) valid = false
-                val c = ev.changes.firstOrNull { it.id == down.id } ?: break
-                if ((c.position - down.position).getDistance() > tapSlopPx) valid = false
-                if (c.changedToUp()) {
-                    if (valid && c.uptimeMillis - down.uptimeMillis <= 400) {
-                        val proj = cameraPositionState.projection
-                        if (proj != null) {
-                            val radius = 28f * googleDensity
-                            var best: Vehicle? = null
-                            var bestSq = radius * radius
-                            for ((k, v) in latestActive) {
-                                val pos = hub.positionOf(k) ?: LatLng(v.lat, v.lng)
-                                val sp = proj.toScreenLocation(pos)
-                                val dx = sp.x - down.position.x
-                                val dy = sp.y - down.position.y
-                                val d = dx * dx + dy * dy
-                                if (d <= bestSq) { bestSq = d; best = v }
-                            }
-                            best?.let { appState.selectVehicle(it) }
-                        }
-                    }
-                    break
-                }
-                if (!c.pressed) break
-            }
-        }
-    }
-
-    Box(modifier = modifier.fillMaxSize().then(googleTapModifier).onSizeChanged { googleSize[0] = it.width; googleSize[1] = it.height }) {
+    Box(modifier = modifier.fillMaxSize().onSizeChanged { googleSize[0] = it.width; googleSize[1] = it.height }) {
         if (appState.mapProvider == MapProvider.GOOGLE) {
             GoogleMap(
                 modifier = Modifier.fillMaxSize(),
@@ -537,26 +446,23 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 )
             ) {
                 // mapa už existuje, překryvná "Načítání mapy" může pryč; nečeká se na stažení všech dlaždic (onMapLoaded)
-                MapEffect(Unit) { isMapReady = true }
-                if (!isMapReady) return@GoogleMap
-                MapEffect(Unit) { gmap -> googleLayer.attach(gmap) }
-
-                val primaryColor = MaterialTheme.colorScheme.primary
-                val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
-
-                // zoom po půlkách: velikost / rozestup šipek se nepřepočítává při každé setině zoomu
-                val zoomBucket by remember { derivedStateOf { (cameraPositionState.position.zoom * 2).toInt() } }
-                val arrowScale = remember(zoomBucket) { arrowSizeForZoom(zoomBucket / 2f) }
-                val arrowSpacing = remember(zoomBucket) { arrowSpacingForZoom(zoomBucket / 2f) }
-
-                val arrowIcon = remember(arrowArgb, arrowScale) {
-                    routeArrowDescriptor(primaryColor = arrowArgb, scale = arrowScale)
+                MapEffect(Unit) { gMap ->
+                    isMapReady = true
+                    googleLayer.attach(gMap) { vehicle ->
+                        appState.selectVehicle(vehicle)
+                    }
                 }
+                DisposableEffect(googleLayer) {
+                    onDispose { googleLayer.detach() }
+                }
+                if (!isMapReady) return@GoogleMap
+                val primaryColor = MaterialTheme.colorScheme.primary
 
                 val walkList = remember(appState.journeyWalks, appState.walkRoute) {
                     if (appState.journeyWalks.isNotEmpty()) appState.journeyWalks
                     else listOfNotNull(appState.journeyWalk ?: appState.walkRoute)
                 }
+                val walkPattern = remember { listOf(Dot(), Gap(14f)) }
                 for (walk in walkList) {
                     if (walk.points.size >= 2 && appState.tripRoute.isNotEmpty()) {
                         val walkPoints = remember(walk) { walk.points.map { LatLng(it.first, it.second) } }
@@ -565,7 +471,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                             color = MaterialTheme.colorScheme.tertiary,
                             width = 14f,
                             zIndex = 0.2f,
-                            pattern = listOf(Dot(), Gap(14f)),
+                            pattern = walkPattern,
                             startCap = RoundCap(),
                             endCap = RoundCap(),
                             jointType = JointType.ROUND
@@ -593,76 +499,19 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         }
                     }
                 }
-
-                if (appState.tripRoute.size >= 2) {
-                    val route = appState.tripRoute
-
-                    // výpočet šipek mimo main vlákno, kreslí se jen ty ve viditelné oblasti
-                    val arrows by produceState(emptyList<RouteArrow>(), route, arrowSpacing) {
-                        value = withContext(Dispatchers.Default) {
-                            createRouteArrows(route = route, spacingMeters = arrowSpacing)
-                        }
-                    }
-                    val visibleArrows = remember(arrows, arrowView) {
-                        val v = arrowView
-                        if (v == null) arrows
-                        else arrows.filter { v.contains(it.position.latitude, it.position.longitude) }
-                    }
-
-                    visibleArrows.forEach { arrow ->
-                        key(arrow) {
-                            Marker(
-                                state = rememberUpdatedMarkerState(position = arrow.position),
-                                icon = arrowIcon,
-                                anchor = Offset(0.5f, 0.5f),
-                                flat = true,
-                                rotation = arrow.bearing,
-                                zIndex = 1f,
-                                onClick = { true }
-                            )
-                        }
-                    }
-
-                    val full = appState.fullRoute
-                    val useFull = showFullRoute && full.size >= 2
-                    val startPos = if (useFull) full.first() else route.first()
-                    val endPos = if (useFull) full.last() else route.last()
-
-                    val startIcon = remember(context) { routeStartDescriptor(context) }
-                    val endIcon = remember(context) { routeEndDescriptor(context) }
-
-                    // Začátek trasy (zelený kruh)
-                    Marker(
-                        state = rememberUpdatedMarkerState(position = startPos),
-                        icon = startIcon,
-                        anchor = Offset(0.5f, 0.5f),
-                        zIndex = 0.5f,
-                        onClick = { true }
-                    )
-
-                    // Konec trasy (červený kruh)
-                    Marker(
-                        state = rememberUpdatedMarkerState(position = endPos),
-                        icon = endIcon,
-                        anchor = Offset(0.5f, 0.5f),
-                        zIndex = 0.5f,
-                        onClick = { true }
-                    )
-
-                    // Mezilehlé zastávky: tečky na jejich přesné poloze (ne na trase), pod začátkem / koncem
-                    val stopIcon = remember(context) { routeStopDescriptor(context) }
-                    for (p in appState.stopDots(showFullRoute)) {
-                        key(p) {
-                            Marker(
-                                state = rememberUpdatedMarkerState(position = p),
-                                icon = stopIcon,
-                                anchor = Offset(0.5f, 0.5f),
-                                zIndex = 0.4f,
-                                onClick = { true }
-                            )
-                        }
-                    }
-                }
+            }
+            if (isMapReady) {
+                GoogleVehicleOverlay(
+                    layer = googleLayer,
+                    hub = hub,
+                    cameraPositionState = cameraPositionState,
+                    activeVehicles = activeVehicles,
+                    targetUid = targetUid,
+                    phase = phase,
+                    appState = appState,
+                    showFullRoute = showFullRoute,
+                    tick = overlayTick,
+                )
             }
         } else {
             MapLibreScreenContent(
@@ -874,6 +723,53 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 }
             }
         }
+    }
+}
+
+
+/**
+ * Vozidla, šipky na trase, začátek / konec a zastávky nad Google mapou, kreslené jedním Canvasem (viz
+ * [GoogleVehicleLayer]). Canvas nemá žádný pointerInput, takže všechna gesta propouští mapě pod sebou.
+ * Čte pozici kamery přímo ve fázi kreslení => při tažení / zoomu se překreslí sám bez rekomponování.
+ * Rekomponuje se jen při změně trasy, vozidel nebo půlstupně zoomu (velikost / rozestup šipek).
+ */
+@Composable
+private fun GoogleVehicleOverlay(
+    layer: GoogleVehicleLayer,
+    hub: MotionHub,
+    cameraPositionState: CameraPositionState,
+    activeVehicles: List<Pair<String, Vehicle>>,
+    targetUid: String?,
+    phase: Int,
+    appState: SpojeAppState,
+    showFullRoute: Boolean,
+    tick: androidx.compose.runtime.LongState,
+) {
+    val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
+
+    val currentCam = cameraPositionState.position
+    val zoomBucket by remember { derivedStateOf { (currentCam.zoom * 2).toInt() } }
+    val arrowSpacing = remember(zoomBucket) { arrowSpacingForZoom(zoomBucket / 2f) }
+
+    val route = appState.tripRoute
+    val full = appState.fullRoute
+    val useFull = showFullRoute && full.size >= 2
+    val stopDots = appState.stopDots(showFullRoute)
+
+    val arrows by produceState(emptyList<RouteArrow>(), route, arrowSpacing) {
+        value = if (route.size < 2) emptyList()
+        else withContext(Dispatchers.Default) { createRouteArrows(route = route, spacingMeters = arrowSpacing) }
+    }
+
+    val tickVal = tick.longValue
+    val zoom = currentCam.zoom
+
+    LaunchedEffect(activeVehicles, zoom, targetUid, phase, tickVal) {
+        layer.updateVehicles(activeVehicles, hub, zoom, targetUid, phase)
+    }
+
+    LaunchedEffect(route, full, useFull, stopDots, arrows, arrowArgb) {
+        layer.updateRoute(route, full, useFull, stopDots, arrows, arrowArgb)
     }
 }
 
