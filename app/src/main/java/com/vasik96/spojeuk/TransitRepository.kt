@@ -36,6 +36,34 @@ class TransitRepository(context: Context? = null) {
 
     @Volatile private var shapeUpgradeTried = false
 
+    // číslo vlaku → linka z posledního jízdního řádu (pár set kB); načte se hned, celý JŘ trvá sekundy
+    private val trainLinesFile = context?.let { File(it.filesDir, "train_lines_quick.tsv") }
+
+    init {
+        scope.launch {
+            val f = trainLinesFile ?: return@launch
+            val table = runCatching {
+                if (!f.exists()) return@runCatching emptyMap<String, String>()
+                val m = HashMap<String, String>(16_384)
+                f.forEachLine { l ->
+                    val tab = l.indexOf('\t')
+                    if (tab > 0) m[l.substring(0, tab)] = l.substring(tab + 1)
+                }
+                m
+            }.getOrDefault(emptyMap())
+            Log.i(TAG, "rychlá tabulka linek vlaků: ${table.size}")
+            if (table.isNotEmpty()) hub.setQuickTrainLines(table)
+        }
+    }
+
+    private fun saveTrainLines(table: Map<String, String>) {
+        val f = trainLinesFile ?: return
+        if (table.isEmpty()) return
+        val tmp = File(f.parentFile, f.name + ".tmp")
+        tmp.bufferedWriter().use { w -> for ((k, v) in table) { w.write(k); w.write('\t'.code); w.write(v); w.write('\n'.code) } }
+        if (!tmp.renameTo(f)) tmp.delete()
+    }
+
     private val autoPolicy = context?.let { AutoUpdatePolicy(it) }
 
     fun vehicleSourceOptions(): List<VehicleSourceOption> =
@@ -46,6 +74,8 @@ class TransitRepository(context: Context? = null) {
     }
     private fun onTimetableLoaded(tt: Timetable) {
         Log.i(TAG, "DB: hasGid=${tt.hasGid} trips=${tt.meta["trips"]} tag=${tt.meta["tag"]}")
+        hub.onTimetableLoaded()
+        scope.launch { runCatching { saveTrainLines(tt.trainLineTable()) }.onFailure { Log.w(TAG, "uložení linek vlaků selhalo: ${it.message}") } }
         if (!tt.hasGid) scheduleShapeUpgrade()
         scope.launch {
             runCatching { shapes.sync(http) }.onFailure { Log.w(TAG, "sync tras selhal: ${it.message}") }

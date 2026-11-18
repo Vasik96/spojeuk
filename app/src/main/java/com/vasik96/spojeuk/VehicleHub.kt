@@ -71,7 +71,7 @@ class HeadingTracker(private val minMoveM: Double = 15.0) {
  */
 class VehicleHub(
     private val api: VehicleApi,
-    @Suppress("unused") private val scope: CoroutineScope,
+    private val scope: CoroutineScope,
     /** Dřívější cache poloh na disku; už se neukládá, soubor se jen smaže. */
     private val cacheFile: File? = null,
     private val timetable: () -> Timetable?,
@@ -98,6 +98,15 @@ class VehicleHub(
     @Volatile private var enriched: List<Vehicle> = emptyList()
     @Volatile private var enrichedStamp = -1L
     @Volatile private var enrichedFor: Timetable? = null
+
+    /**
+     * Číslo vlaku → linka z minulého běhu (malý soubor, načte se hned při startu). Než se dočte celý jízdní řád
+     * (sekundy), mají tak vlaky ze SŽ linku (U32, Ex6) místo "Os 9780" ze serveru.
+     */
+    @Volatile private var quickTrainLines: Map<String, String> = emptyMap()
+    @Volatile private var quickEnriched: List<Vehicle> = emptyList()
+    @Volatile private var quickStamp = -1L
+    @Volatile private var quickFor: Map<String, String>? = null
 
     @Volatile
     private var initialFetchDone = false
@@ -126,6 +135,21 @@ class VehicleHub(
         // výběr se projeví hned z poslední odpovědi, bez čekání na síť
         val snap = snapshot
         fleet = if (snap == null) Fleet.EMPTY else runCatching { build(snap, System.currentTimeMillis()) }.getOrDefault(Fleet.EMPTY)
+    }
+
+    /** Tabulka linek vlaků z minulého běhu (viz [quickTrainLines]); vozy se hned přepočítají z poslední odpovědi. */
+    fun setQuickTrainLines(table: Map<String, String>) {
+        quickTrainLines = table
+        if (timetable() == null) rebuildFromSnapshot()
+    }
+
+    /** Jízdní řád se právě načetl: vozy se hned obohatí (linky vlaků, spoje) z poslední odpovědi, bez čekání na další dotaz. */
+    fun onTimetableLoaded() = rebuildFromSnapshot()
+
+    private fun rebuildFromSnapshot() {
+        if (snapshot == null) return
+        // snapshot až uvnitř: mezitím mohla doběhnout novější odpověď
+        scope.launch(Dispatchers.Default) { snapshot?.let { runCatching { rebuild(it, System.currentTimeMillis()) } } }
     }
 
     fun sourceOptions(): List<VehicleSourceOption> =
@@ -229,13 +253,28 @@ class VehicleHub(
     }
 
     private fun enrichedVehicles(snap: ApiSnapshot, tt: Timetable?): List<Vehicle> {
-        if (tt == null) return snap.vehicles
+        if (tt == null) return withQuickTrainLines(snap)
         if (enrichedStamp != snap.receivedMs || enrichedFor !== tt) {
             enriched = snap.vehicles.map { TripEnricher.enrich(it, tt) }
             enrichedStamp = snap.receivedMs
             enrichedFor = tt
         }
         return enriched
+    }
+
+    private fun withQuickTrainLines(snap: ApiSnapshot): List<Vehicle> {
+        val table = quickTrainLines
+        if (table.isEmpty()) return snap.vehicles
+        if (quickStamp != snap.receivedMs || quickFor !== table) {
+            quickEnriched = snap.vehicles.map { v ->
+                // SŽ dává v cis číslo vlaku; PID vlaky už linku mají
+                if (!v.train || v.source != SourceIds.TRAIN) v
+                else table[v.cis.trim().trimStart('0')]?.let { v.copy(line = it) } ?: v
+            }
+            quickStamp = snap.receivedMs
+            quickFor = table
+        }
+        return quickEnriched
     }
 
     /** Držené polohy se nehlásí, když jejich zastaralé segmenty čerstvě pokrývá jiný zdroj. */

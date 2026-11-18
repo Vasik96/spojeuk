@@ -259,6 +259,21 @@ class Timetable(val dbFile: File) {
         return nearestInTime(tripsByTrain[n] ?: return null)
     }
 
+    /**
+     * Číslo vlaku → linka (U32, Ex6, …), pro malou tabulku na disku, díky které mají vlaky linku hned po startu,
+     * ještě než se dočte celý jízdní řád. Linka se u čísla vlaku prakticky nemění; bere se první platná.
+     */
+    fun trainLineTable(): Map<String, String> {
+        val out = HashMap<String, String>(tripsByTrain.size * 2)
+        for ((num, tids) in tripsByTrain) {
+            for (tid in tids) {
+                val line = trips[tid]?.line ?: continue
+                if (line.isNotBlank() && line != "?") { out[num.trimStart('0')] = line; break }
+            }
+        }
+        return out
+    }
+
     private fun nearestInTime(candidates: List<Int>): Int? {
         val now = nowPrague()
         var best: Int? = null
