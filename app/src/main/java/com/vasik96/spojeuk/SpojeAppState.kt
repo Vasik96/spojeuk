@@ -569,9 +569,10 @@ class SpojeAppState(
 
     suspend fun updateIndexedStops(newStops: List<Stop>) {
         val idx = withContext(Dispatchers.Default) {
+            val ws = Regex("\\s+")   // jednou, ne pro každou zastávku
             newStops.distinctBy { it.name }.map { s ->
                 val norm = normalize(s.name)
-                val words = norm.split(Regex("\\s+")).filter { it.isNotBlank() }
+                val words = norm.split(ws).filter { it.isNotBlank() }
                 IndexedStop(s, norm, words, effectiveUsage(s.name))
             }
         }

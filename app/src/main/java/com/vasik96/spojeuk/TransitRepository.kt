@@ -84,8 +84,37 @@ class TransitRepository(context: Context? = null) {
 
     fun isFirstRun(): Boolean = store.isFirstRun()
 
+    private val stopsLock = Mutex()
+    @Volatile private var quickStops: List<Stop>? = null
+
+    /** Zastávky z jízdního řádu, a dokud se ten načítá, zastávky přečtené rovnou z DB. */
+    private suspend fun lookupStops(): Collection<Stop> {
+        store.current?.let { return it.timetable.stops.values }
+        quickStops?.let { return it }
+        return stopsLock.withLock {
+            store.current?.timetable?.stops?.values
+                ?: quickStops
+                ?: store.quickStops()?.also { quickStops = it; preloadTimetable() }
+                ?: store.ensure().timetable.stops.values
+        }
+    }
+
+    /** Celý jízdní řád (statisíce spojů) se dočte na pozadí; zastávky už mezitím fungují. */
+    private fun preloadTimetable() {
+        scope.launch {
+            runCatching { store.ensure() }.onFailure { Log.w(TAG, "načtení jízdního řádu selhalo: ${it.message}") }
+            quickStops = null
+        }
+    }
+
     suspend fun loadStops(log: (String) -> Unit = {}, progress: (Float) -> Unit = {}): List<Stop> =
         withContext(Dispatchers.IO) {
+            store.current?.let { return@withContext it.timetable.stops.values.distinctBy { s -> s.name } }
+            // rychlá cesta: jen tabulka zastávek, spoje se dočtou na pozadí
+            if (!store.hasPending()) {
+                val quick = runCatching { lookupStops() }.getOrNull()
+                if (quick != null && store.current == null) return@withContext quick.distinctBy { it.name }
+            }
             store.ensure(log, progress).timetable.stops.values.distinctBy { it.name }
         }
 
@@ -456,7 +485,7 @@ class TransitRepository(context: Context? = null) {
     suspend fun warmUpRouting() = withContext(Dispatchers.IO) { osrm.warmUp() }
 
     suspend fun nearestCandidates(lat: Double, lng: Double, limit: Int = 8): List<Pair<Stop, Double>> =
-        withContext(Dispatchers.IO) { stopLocator.nearest(store.ensure().timetable, lat, lng, limit) }
+        withContext(Dispatchers.IO) { stopLocator.nearest(lookupStops(), lat, lng, limit) }
 
     suspend fun refineByRoad(lat: Double, lng: Double, cands: List<Pair<Stop, Double>>): Pair<Stop, Double>? =
         withContext(Dispatchers.IO) { stopLocator.refineByRoad(lat, lng, cands) }

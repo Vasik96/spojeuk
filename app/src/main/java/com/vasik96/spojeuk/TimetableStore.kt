@@ -46,6 +46,17 @@ class TimetableStore(
 
     fun isFirstRun(): Boolean = !dbFile.exists() || dbFile.length() < MIN_DB_BYTES
 
+    /**
+     * Zastávky přímo z DB bez načtení celého jízdního řádu, nebo null, když to nejde
+     * (první spuštění, čeká nová DB na výměnu – ta se vymění až v [ensure]).
+     */
+    fun quickStops(): List<Stop>? {
+        if (isFirstRun() || hasPending()) return null
+        return runCatching { Timetable.readStops(dbFile) }
+            .onFailure { Log.w(TAG, "rychlé načtení zastávek selhalo: ${it.message}") }
+            .getOrNull()?.takeIf { it.isNotEmpty() }
+    }
+
     /** Metadata (verze, datum) bez načítání celé databáze. */
     fun meta(): Map<String, String> =
         current?.timetable?.meta

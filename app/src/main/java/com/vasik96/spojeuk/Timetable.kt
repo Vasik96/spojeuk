@@ -302,6 +302,33 @@ class Timetable(val dbFile: File) {
     companion object {
         private const val MAX_TIMES_CACHE = 20_000
 
+        /**
+         * Jen zastávky (desítky ms), bez načítání statisíců spojů. Pro rychlý start: vyhledávání zastávek
+         * a nejbližší zastávka podle polohy nemusí čekat, než se načte celý jízdní řád.
+         */
+        fun readStops(dbFile: File): List<Stop> {
+            val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
+            try {
+                db.rawQuery("SELECT id, name, place, lat, lon, inreg FROM stop", null).use { c ->
+                    val out = ArrayList<Stop>(c.count)
+                    while (c.moveToNext()) {
+                        val name = c.getString(1) ?: ""
+                        out += Stop(
+                            id = c.getInt(0).toString(),
+                            name = name,
+                            lat = if (c.isNull(3)) 0.0 else c.getDouble(3),
+                            lng = if (c.isNull(4)) 0.0 else c.getDouble(4),
+                            place = c.getString(2) ?: name,
+                            inreg = c.getInt(5) == 1,
+                        )
+                    }
+                    return out
+                }
+            } finally {
+                db.close()
+            }
+        }
+
         /** Jen metadata (verze, datum sestavení), bez načítání celé databáze. */
         fun readMeta(dbFile: File): Map<String, String> {
             val out = HashMap<String, String>()

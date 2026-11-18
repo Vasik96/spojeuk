@@ -96,14 +96,78 @@ class RouteGeometry(
 /** Nejbližší zastávky k poloze uživatele (vzdušnou čarou a pak upřesnění po silnici). */
 class StopLocator(private val osrm: OsrmClient) {
 
+    /**
+     * Mřížka zastávek (buňka cca 1 km). Dřív se při každém dotazu procházely všechny zastávky
+     * (s Prahou desítky tisíc), teď jen pár buněk kolem polohy.
+     */
+    private class Grid(stops: Collection<Stop>) {
+        val cells = HashMap<Long, ArrayList<Stop>>()
+        init {
+            for (s in stops) {
+                if (!s.hasCoords) continue
+                cells.getOrPut(key(cy(s.lat), cx(s.lng))) { ArrayList(8) }.add(s)
+            }
+        }
+        companion object {
+            const val DLAT = 0.01
+            const val DLNG = 0.015
+            fun cy(lat: Double) = kotlin.math.floor(lat / DLAT).toInt()
+            fun cx(lng: Double) = kotlin.math.floor(lng / DLNG).toInt()
+            fun key(y: Int, x: Int): Long = (y.toLong() shl 32) or (x.toLong() and 0xFFFFFFFFL)
+        }
+    }
+
+    @Volatile private var grid: Pair<Collection<Stop>, Grid>? = null
+
+    private fun gridFor(stops: Collection<Stop>): Grid {
+        grid?.let { (src, g) -> if (src === stops) return g }
+        return synchronized(this) {
+            grid?.takeIf { it.first === stops }?.second ?: Grid(stops).also { grid = stops to it }
+        }
+    }
+
     /** Jedna zastávka na název, seřazené podle vzdálenosti. */
-    fun nearest(tt: Timetable, lat: Double, lng: Double, limit: Int = 8): List<Pair<Stop, Double>> {
+    fun nearest(tt: Timetable, lat: Double, lng: Double, limit: Int = 8): List<Pair<Stop, Double>> =
+        nearest(tt.stops.values, lat, lng, limit)
+
+    fun nearest(stops: Collection<Stop>, lat: Double, lng: Double, limit: Int = 8): List<Pair<Stop, Double>> {
+        val g = gridFor(stops)
+        val y0 = Grid.cy(lat)
+        val x0 = Grid.cx(lng)
+        // nejmenší vzdálenost, kterou prstenec buněk o poloměru r zaručeně pokrývá
+        val cellM = minOf(Grid.DLAT * 111_320.0, Grid.DLNG * 111_320.0 * kotlin.math.cos(Math.toRadians(lat)))
         val bestByName = HashMap<String, Pair<Stop, Double>>()
-        for (s in tt.stops.values) {
-            if (!s.hasCoords) continue
-            val d = Geo.distanceM(lat, lng, s.lat, s.lng)
-            val cur = bestByName[s.name]
-            if (cur == null || d < cur.second) bestByName[s.name] = s to d
+
+        fun scan(y: Int, x: Int) {
+            for (s in g.cells[Grid.key(y, x)] ?: return) {
+                val d = Geo.distanceM(lat, lng, s.lat, s.lng)
+                val cur = bestByName[s.name]
+                if (cur == null || d < cur.second) bestByName[s.name] = s to d
+            }
+        }
+
+        scan(y0, x0)
+        var r = 0
+        while (r < MAX_RING) {
+            r++
+            // přidat jen okraj prstence r
+            for (x in x0 - r..x0 + r) { scan(y0 - r, x); scan(y0 + r, x) }
+            for (y in y0 - r + 1..y0 + r - 1) { scan(y, x0 - r); scan(y, x0 + r) }
+            if (bestByName.size >= limit) {
+                val sorted = bestByName.values.sortedBy { it.second }
+                // výsledek je jistý, když i limit-tá zastávka leží uvnitř zaručeně prohledané oblasti
+                if (sorted[limit - 1].second <= r * cellM) return sorted.take(limit)
+            }
+        }
+        if (bestByName.size < limit) {
+            // řídce pokryté okolí (mimo region): záloha přes všechny zastávky
+            bestByName.clear()
+            for (s in stops) {
+                if (!s.hasCoords) continue
+                val d = Geo.distanceM(lat, lng, s.lat, s.lng)
+                val cur = bestByName[s.name]
+                if (cur == null || d < cur.second) bestByName[s.name] = s to d
+            }
         }
         return bestByName.values.sortedBy { it.second }.take(limit)
     }
@@ -113,5 +177,9 @@ class StopLocator(private val osrm: OsrmClient) {
         val road = osrm.roadDistances(lat to lng, candidates.map { it.first.lat to it.first.lng }) ?: return null
         val best = candidates.indices.filter { road[it] != null }.minByOrNull { road[it]!! } ?: return null
         return candidates[best].first to road[best]!!
+    }
+
+    private companion object {
+        const val MAX_RING = 40   // ~40 km
     }
 }
