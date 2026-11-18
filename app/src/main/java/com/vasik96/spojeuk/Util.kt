@@ -80,7 +80,7 @@ fun normalize(text: String): String = foldText(text)
 fun prettyName(name: String): String = name.replace(Regex(",(?=\\S)"), ", ").replace("null", "").trim()
 
 fun pluralTransfers(n: Int): String =
-    if (n == 0) "přímo" else "$n " + if (n == 1) "přestup" else if (n in 2..4) "přestupy" else "přestupů"
+    if (n == 0) tr(R.string.transfers_none) else trPlural(R.plurals.transfers, n, n)
 
 /** Linka pro porovnávání: "070" == "70", bez diakritiky a velkých písmen. */
 fun normLine(s: String): String {

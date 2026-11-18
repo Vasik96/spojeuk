@@ -43,16 +43,20 @@ class TripRef(
     val tid: Int = 0            // spoj z JŘ (první jízda spojení); 0 = neznámý
 )
 
-enum class AppTheme(val label: String) {
-    SYSTEM("Podle systému"),
-    LIGHT("Světlý"),
-    DARK("Tmavý")
+enum class AppTheme(@androidx.annotation.StringRes private val labelRes: Int) {
+    SYSTEM(R.string.theme_system),
+    LIGHT(R.string.theme_light),
+    DARK(R.string.theme_dark);
+
+    val label: String get() = tr(labelRes)
 }
 
-enum class MapTheme(val label: String) {
-    APP("Podle motivu aplikace"),
-    LIGHT("Světlá"),
-    DARK("Tmavá")
+enum class MapTheme(@androidx.annotation.StringRes private val labelRes: Int) {
+    APP(R.string.map_theme_app),
+    LIGHT(R.string.map_theme_light),
+    DARK(R.string.map_theme_dark);
+
+    val label: String get() = tr(labelRes)
 }
 
 enum class MapProvider(val label: String) {
@@ -96,7 +100,6 @@ class SpojeAppState(
     var journeys by mutableStateOf<List<Journey>>(emptyList())
     var modeFilter by mutableStateOf(ModeFilter.ALL)
     var departAt by mutableStateOf<java.time.LocalDateTime?>(null)   // zvolený čas odjezdu; null = teď
-    var mapModeFilter by mutableStateOf(ModeFilter.ALL)   // filtr vozidel na mapě (Vše / Autobusy / Vlaky)
     var searchLoading by mutableStateOf(false)
     var loadingMore by mutableStateOf(false)
     var refreshing by mutableStateOf(false)
@@ -116,6 +119,9 @@ class SpojeAppState(
     var vehiclesLoaded by mutableStateOf(false)
     var mapError by mutableStateOf<String?>(null)
     var selectedVehicle by mutableStateOf<Vehicle?>(null)
+
+    /** Víc vozů pod jedním ťuknutím (štítky přes sebe, např. dva vlaky v jedné stanici): mapa nabídne výběr. */
+    var vehicleChoices by mutableStateOf<List<Vehicle>>(emptyList())
 
     /** Čas (elapsedRealtime) posledního kliknutí na vozidlo; smyčky markerů po tu dobu nic nepočítají, ať sheet naběhne hned. */
     @Volatile var vehicleSelectedAtMs: Long = 0L
@@ -278,7 +284,7 @@ class SpojeAppState(
                     journeyStops = null
                     onDismiss()
                 } else {
-                    android.widget.Toast.makeText(ctx, "Trasu se nepodařilo určit", android.widget.Toast.LENGTH_SHORT).show()
+                    android.widget.Toast.makeText(ctx, tr(R.string.route_not_found), android.widget.Toast.LENGTH_SHORT).show()
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -303,6 +309,19 @@ class SpojeAppState(
     var predictVehiclePositions by mutableStateOf(
         settingsPrefs.getBoolean("predict_vehicle_positions", false)
     )
+
+    /** Druhy dopravy zobrazené na mapě (filtr v banneru mapy); pamatuje se. */
+    internal var mapCategories by mutableStateOf(
+        settingsPrefs.getStringSet("map_categories", null)
+            ?.mapNotNull { n -> MapCategory.entries.firstOrNull { it.name == n } }?.toSet()
+            ?: MapCategory.entries.toSet()
+    )
+        private set
+
+    internal fun updateMapCategories(set: Set<MapCategory>) {
+        mapCategories = set
+        settingsPrefs.edit { putStringSet("map_categories", set.map { it.name }.toSet()) }
+    }
 
     var showOnlyMapFilters by mutableStateOf(
         settingsPrefs.getBoolean("show_only_map_filters", false)
@@ -433,7 +452,7 @@ class SpojeAppState(
         scope: CoroutineScope,
         onSuccess: () -> Unit = {},
     ) {
-        if (!beginUpdate("Zahajuji aktualizaci…")) return
+        if (!beginUpdate(tr(R.string.upd_starting))) return
 
         scope.launch {
             runCatching {
@@ -450,13 +469,13 @@ class SpojeAppState(
                 updateIndexedStops(loaded)
                 stopsLoading = false
             }.onSuccess {
-                updateSuccess = "Všechna data byla úspěšně stažena a aktualizována! Změny se projeví po restartu."
+                updateSuccess = tr(R.string.upd_all_ok)
                 updateStatusMessage = null
                 onSuccess()
             }.onFailure {
                 stopsLoading = false
                 if (it is CancellationException) throw it
-                updateError = "Aktualizace selhala: ${it.message}"
+                updateError = tr(R.string.upd_failed, it.message.orEmpty())
                 updateStatusMessage = null
             }
             isUpdatingData = false
@@ -465,7 +484,7 @@ class SpojeAppState(
 
 
     fun performUpdateTimetable(api: TransitRepository, scope: CoroutineScope) {
-        if (!beginUpdate("Aktualizuji jízdní řády…")) return
+        if (!beginUpdate(tr(R.string.upd_tt_running))) return
 
         scope.launch {
             runCatching {
@@ -481,11 +500,11 @@ class SpojeAppState(
                 updateIndexedStops(loaded)
                 stopsLoading = false
             }.onSuccess {
-                updateSuccess = "Jízdní řády byly úspěšně aktualizovány! Změny se projeví po restartu."
+                updateSuccess = tr(R.string.upd_tt_ok)
                 updateStatusMessage = null
             }.onFailure {
                 if (it is CancellationException) throw it
-                updateError = "Aktualizace JŘ selhala: ${it.message}"
+                updateError = tr(R.string.upd_tt_failed, it.message.orEmpty())
                 updateStatusMessage = null
             }
             isUpdatingData = false
@@ -493,7 +512,7 @@ class SpojeAppState(
     }
 
     fun performUpdateShapes(api: TransitRepository, scope: CoroutineScope) {
-        if (!beginUpdate("Aktualizuji trasy spojů (Shapes)…")) return
+        if (!beginUpdate(tr(R.string.upd_shapes_running))) return
 
         scope.launch {
             runCatching {
@@ -502,11 +521,11 @@ class SpojeAppState(
                     forceDownload = true
                 )
             }.onSuccess {
-                updateSuccess = "Trasy spojů (Shapes) byly úspěšně aktualizovány! Změny se projeví po restartu."
+                updateSuccess = tr(R.string.upd_shapes_ok)
                 updateStatusMessage = null
             }.onFailure {
                 if (it is CancellationException) throw it
-                updateError = "Aktualizace tras selhala: ${it.message}"
+                updateError = tr(R.string.upd_shapes_failed, it.message.orEmpty())
                 updateStatusMessage = null
             }
             isUpdatingData = false
@@ -514,18 +533,18 @@ class SpojeAppState(
     }
 
     fun performUpdateRealtime(api: TransitRepository, scope: CoroutineScope) {
-        if (!beginUpdate("Obnovuji živá data vozidel…")) return
+        if (!beginUpdate(tr(R.string.upd_rt_running))) return
 
         scope.launch {
             runCatching {
                 api.updateRealtime(log = { updateStatusMessage = it })
             }.onSuccess { vehiclesList ->
                 updateVehicles(vehiclesList)
-                updateSuccess = "Živá data obnovena (${vehiclesList.size} vozidel)!"
+                updateSuccess = trPlural(R.plurals.upd_rt_ok, vehiclesList.size, vehiclesList.size)
                 updateStatusMessage = null
             }.onFailure {
                 if (it is CancellationException) throw it
-                updateError = "Obnovení živých dat selhalo: ${it.message}"
+                updateError = tr(R.string.upd_rt_failed, it.message.orEmpty())
                 updateStatusMessage = null
             }
             isUpdatingData = false
@@ -533,17 +552,17 @@ class SpojeAppState(
     }
 
     fun performClearOsrmCache(api: TransitRepository, scope: CoroutineScope) {
-        if (!beginUpdate("Čistím cache tras OSRM…")) return
+        if (!beginUpdate(tr(R.string.upd_osrm_running))) return
 
         scope.launch {
             runCatching {
                 api.clearOsrmCache(log = { updateStatusMessage = it })
             }.onSuccess { count ->
-                updateSuccess = "Cache OSRM byla vyčištěna ($count souborů smazáno)."
+                updateSuccess = trPlural(R.plurals.upd_osrm_ok, count, count)
                 updateStatusMessage = null
             }.onFailure {
                 if (it is CancellationException) throw it
-                updateError = "Vyčištění cache selhalo: ${it.message}"
+                updateError = tr(R.string.upd_osrm_failed, it.message.orEmpty())
                 updateStatusMessage = null
             }
             isUpdatingData = false

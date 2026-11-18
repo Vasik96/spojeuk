@@ -58,11 +58,12 @@ private class DotPainter(private val context: Context) {
     private val hlPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG)   // bez barvy (alfa paintu by se propsala do bitmapy)
     private var lastColor = 0
+    private var lastLate = false
     private var lastBmp: Bitmap? = null
 
-    private fun dotFor(color: Int): Bitmap {
-        if (color == lastColor) lastBmp?.let { return it }
-        return dotBitmap(context, color).also { lastColor = color; lastBmp = it }
+    private fun dotFor(color: Int, late: Boolean): Bitmap {
+        if (color == lastColor && late == lastLate) lastBmp?.let { return it }
+        return dotBitmap(context, color, late).also { lastColor = color; lastLate = late; lastBmp = it }
     }
 
     private fun batch(page: Int): Batch {
@@ -80,6 +81,7 @@ private class DotPainter(private val context: Context) {
         val wx = layer.wx
         val wy = layer.wy
         val colors = layer.color
+        val lates = layer.late
         val labels = layer.label
         val hl = layer.hl
 
@@ -106,7 +108,7 @@ private class DotPainter(private val context: Context) {
             val x = (dx * c + dy * s + cx).toFloat()
             val y = (-dx * s + dy * c + cy).toFloat()
             if (x < minX || x > maxX || y < minY || y > maxY) continue
-            val bmp = labels[i] ?: dotFor(colors[i])
+            val bmp = labels[i] ?: dotFor(colors[i], lates[i])
             // celé pixely => bitmapa 1:1, ostrá
             val left = Math.round(x - bmp.width / 2f).toFloat()
             val top = Math.round(y - bmp.height / 2f).toFloat()

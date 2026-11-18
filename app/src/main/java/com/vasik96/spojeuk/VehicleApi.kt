@@ -65,7 +65,7 @@ object FeedDiag {
     }
 
     @Synchronized
-    fun text(): String = if (lines.isEmpty()) "zatím žádný dotaz" else lines.joinToString("\n")
+    fun text(): String = if (lines.isEmpty()) tr(R.string.diag_no_requests) else lines.joinToString("\n")
 }
 
 /** Do logcatu (tag VehicleApi) vypíše, kde se u dotazu ztrácí čas: DNS / TCP / TLS / odpověď serveru / chyba. */
@@ -340,6 +340,7 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
                 sources = sources,
                 ids = ids,
                 serverUid = o.optString("uid"),
+                mode = o.optStringClean("mode"),
             )
         }
     }

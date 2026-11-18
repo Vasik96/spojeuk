@@ -30,7 +30,9 @@ class TransitRepository(context: Context? = null) {
     private val store = TimetableStore(context, http) { onTimetableLoaded(it) }
     private val shapes by lazy { ShapeStore(store.dbFile.parentFile ?: File("/tmp"), context) }
     private val trainShapes by lazy { ShapeStore(store.dbFile.parentFile ?: File("/tmp"), context, "train_shapes") }
-    private val geometry by lazy { RouteGeometry(shapes, trainShapes, osrm) }
+    /** Tvary linek PID, které v CIS nejsou (AE, výlukové X…; spoje "pidgtfs:…"), viz spojeuk-data add_pid_gtfs.py. */
+    private val pidShapes by lazy { ShapeStore(store.dbFile.parentFile ?: File("/tmp"), context, "pid_shapes") }
+    private val geometry by lazy { RouteGeometry(shapes, trainShapes, pidShapes, osrm) }
     private val stopLocator = StopLocator(osrm)
     private val hub = VehicleHub(VehicleApi(), scope, context?.let { File(it.filesDir, "last_vehicles.json") }) { store.current?.timetable }
 
@@ -80,6 +82,7 @@ class TransitRepository(context: Context? = null) {
         scope.launch {
             runCatching { shapes.sync(http) }.onFailure { Log.w(TAG, "sync tras selhal: ${it.message}") }
             runCatching { trainShapes.sync(http) }.onFailure { Log.w(TAG, "sync tras vlaků selhal: ${it.message}") }
+            runCatching { pidShapes.sync(http) }.onFailure { Log.w(TAG, "sync tras PID selhal: ${it.message}") }
         }
     }
 
@@ -101,6 +104,7 @@ class TransitRepository(context: Context? = null) {
             }
             shapes.sync(http, force = true)
             runCatching { trainShapes.sync(http, force = true) }
+            runCatching { pidShapes.sync(http, force = true) }
             true
         } catch (e: CancellationException) {
             throw e
@@ -164,20 +168,22 @@ class TransitRepository(context: Context? = null) {
 
     suspend fun updateShapes(log: (String) -> Unit = {}, forceDownload: Boolean = false): Boolean =
         withContext(Dispatchers.IO) {
-            log("Kontroluji trasy spojů (Shapes)…")
+            log(tr(R.string.dl_checking_shapes))
             val updated = shapes.sync(http, force = true, forceDownload = forceDownload)
             runCatching { trainShapes.sync(http, force = true, forceDownload = forceDownload) }
                 .onFailure { Log.w(TAG, "sync tras vlaků selhal: ${it.message}") }
+            runCatching { pidShapes.sync(http, force = true, forceDownload = forceDownload) }
+                .onFailure { Log.w(TAG, "sync tras PID selhal: ${it.message}") }
             autoPolicy?.lastShapesUpdateMs = System.currentTimeMillis()
-            log(if (updated) "Trasy spojů byly aktualizovány." else "Trasy spojů jsou již aktuální.")
+            log(tr(if (updated) R.string.dl_shapes_updated else R.string.dl_shapes_current))
             updated
         }
 
     fun clearOsrmCache(log: (String) -> Unit = {}): Int {
-        log("Čistím cache OSRM tras…")
+        log(tr(R.string.dl_clearing_osrm))
         val count = osrm.clearCache()
         autoPolicy?.lastOsrmClearMs = System.currentTimeMillis()
-        log("Cache tras vyčištěna ($count souborů smazáno).")
+        log(trPlural(R.plurals.dl_osrm_cleared, count, count))
         return count
     }
 
@@ -186,23 +192,23 @@ class TransitRepository(context: Context? = null) {
         progress: (Float) -> Unit = {},
         forceShapes: Boolean = true,
     ) = withContext(Dispatchers.IO) {
-        log("Zahajuji kompletní aktualizaci všech dat…")
+        log(tr(R.string.dl_full_start))
         progress(0.05f)
 
-        log("1/4: Stahuji nejnovější jízdní řády (GTFS)…")
-        updateTimetable(log = { log("1/4: $it") }, progress = { progress(0.05f + it * 0.5f) })
+        log(tr(R.string.dl_step, 1, tr(R.string.dl_step_tt)))
+        updateTimetable(log = { log(tr(R.string.dl_step, 1, it)) }, progress = { progress(0.05f + it * 0.5f) })
 
-        log("2/4: Stahuji trasy a geometrie (Shapes)…")
+        log(tr(R.string.dl_step, 2, tr(R.string.dl_step_shapes)))
         progress(0.6f)
-        updateShapes(log = { log("2/4: $it") }, forceDownload = forceShapes)
+        updateShapes(log = { log(tr(R.string.dl_step, 2, it)) }, forceDownload = forceShapes)
 
-        log("3/4: Obnovuji živá data vozidel…")
+        log(tr(R.string.dl_step, 3, tr(R.string.dl_step_rt)))
         progress(0.8f)
-        updateRealtime(log = { log("3/4: $it") })
+        updateRealtime(log = { log(tr(R.string.dl_step, 3, it)) })
 
-        log("4/4: Čistím cache tras OSRM…")
+        log(tr(R.string.dl_step, 4, tr(R.string.dl_step_osrm)))
         progress(0.95f)
-        clearOsrmCache(log = { log("4/4: $it") })
+        clearOsrmCache(log = { log(tr(R.string.dl_step, 4, it)) })
 
         val now = System.currentTimeMillis()
         autoPolicy?.let {
@@ -214,7 +220,7 @@ class TransitRepository(context: Context? = null) {
         }
 
         progress(1.0f)
-        log("Kompletní aktualizace dat byla úspěšně dokončena!")
+        log(tr(R.string.dl_full_done))
     }
 
     // ───────────────────────── vyhledávání spojení ─────────────────────────
@@ -369,10 +375,10 @@ class TransitRepository(context: Context? = null) {
     suspend fun vehiclePositions(maxAgeMs: Long = 0): List<Vehicle> = hub.refresh(maxAgeMs).vehicles
 
     suspend fun updateRealtime(log: (String) -> Unit = {}): List<Vehicle> {
-        log("Obnovuji živá data vozidel…")
+        log(tr(R.string.dl_step_rt))
         val vehicles = vehiclePositions()
         autoPolicy?.lastRealtimeUpdateMs = System.currentTimeMillis()
-        log("Živá data obnovena (${vehicles.size} vozidel).")
+        log(trPlural(R.plurals.dl_rt_refreshed, vehicles.size, vehicles.size))
         return vehicles
     }
 
@@ -390,19 +396,27 @@ class TransitRepository(context: Context? = null) {
         val tt = store.ensure().timetable
         val tid = v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
-            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
-            ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
+            ?: tripFallback(tt, v)
             ?: return@withContext emptyList()
         geometry.forTrip(tt, tid)
     }
+
+    /**
+     * Spoj k vozu, když ho nedalo obohacení (VehicleHub): vlak podle čísla (i když teď podle JŘ nejede, např. souprava
+     * stojí po oběhu nebo jde o jiný den: trasa vlaku s tím číslem), ostatní podle polohy a času, nakonec nejbližší
+     * dnešní spoj linky.
+     */
+    private fun tripFallback(tt: Timetable, v: Vehicle): Int? =
+        if (v.train) tt.findTrainTripIdAnyDay(v.cis)
+        else tt.locator.matchByPosition(v, emptyList())
+            ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng, maxStopDistance(v))
 
     /** Pro ladění: z čeho se kreslí trasa tohoto vozidla (viz řádek „Trasa“ v detailu). */
     suspend fun routeSourceInfo(v: Vehicle): String = withContext(Dispatchers.IO) {
         val tt = store.ensure().timetable
         val tid = v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
-            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
-            ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
+            ?: tripFallback(tt, v)
             ?: return@withContext "spoj z jízdního řádu nenalezen"
         "spoj $tid, ${geometry.describe(tt, tid)}\ngid: ${tt.trips[tid]?.gid}"
     }
@@ -411,8 +425,7 @@ class TransitRepository(context: Context? = null) {
         val tt = store.ensure().timetable
         val tid = v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
-            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
-            ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
+            ?: tripFallback(tt, v)
             ?: return@withContext emptyList()
         val stopIds = tt.tripStops(tid)
         stopIds.asIterable().mapNotNull { id -> tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng } }
@@ -422,8 +435,7 @@ class TransitRepository(context: Context? = null) {
         val tt = store.ensure().timetable
         v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
-            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
-            ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng)
+            ?: tripFallback(tt, v)
     }
 
     suspend fun routeForTrip(tid: Int): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
@@ -484,8 +496,9 @@ class TransitRepository(context: Context? = null) {
     suspend fun vehicleTripInfo(v: Vehicle): VehicleTripInfo = withContext(Dispatchers.IO) {
         val none = VehicleTripInfo(null, null)
         val tt = store.ensure().timetable
+        // příští / konečná zastávka jen ze spoje, který opravdu jede (ne ranní oběh stojící soupravy)
         val tid = v.tid.takeIf { it != 0 } ?: tt.findTripId(v.cis, v.trip)
-            ?: (if (v.train) null else tt.locator.matchByPosition(v, emptyList()))
+            ?: (if (v.train) tt.findTrainTripId(v.cis) else tripFallback(tt, v))
             ?: return@withContext none
         val trip = tt.trips[tid] ?: return@withContext none
         val times = tt.tripTimes(tid) ?: return@withContext none

@@ -29,7 +29,11 @@ data class SourceReport(
 
 /** Skládá text "Zdroj: …" ze stavu zdrojů. */
 object SourceLabel {
-    const val NONE = "žádný"
+    /** Texty v jazyce appky; JVM testy (bez Android resources) si je nastaví samy. */
+    internal var noneText: () -> String = { tr(R.string.source_none) }
+    internal var staleSuffixText: () -> String = { tr(R.string.source_stale_suffix) }
+
+    val NONE: String get() = noneText()
 
     fun build(reports: List<SourceReport>): String {
         val ordered = reports.sortedBy { it.priority }
@@ -53,5 +57,5 @@ object SourceLabel {
         }
     }
 
-    private fun staleNote(isStale: Boolean): String = if (isStale) " (zastaralé)" else ""
+    private fun staleNote(isStale: Boolean): String = if (isStale) staleSuffixText() else ""
 }

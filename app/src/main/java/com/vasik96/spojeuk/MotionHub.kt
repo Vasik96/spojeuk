@@ -36,7 +36,20 @@ internal class MotionHub(
 
     private val entries = HashMap<String, Entry>()
 
-    private fun obtain(k: String, v: Vehicle) = entries.getOrPut(k) { Entry(v) }
+    /**
+     * Vozy, které na chvíli vypadly z dat (jedna dvě odpovědi bez nich: stáří polohy, výpadek zdroje). Když se do
+     * [GRACE_MS] vrátí, naváže se na jejich dosavadní pohyb; jinak by se objevily jinde bez animace (skok).
+     */
+    private val gone = HashMap<String, Pair<Entry, Long>>()
+
+    private fun obtain(k: String, v: Vehicle, now: Long): Entry {
+        entries[k]?.let { return it }
+        val revived = gone.remove(k)?.first
+            ?.takeIf { haversineMeters(it.pos, LatLng(v.lat, v.lng)) <= REVIVE_MAX_M }
+        val e = revived ?: Entry(v)
+        entries[k] = e
+        return e
+    }
 
     fun positionOf(k: String): LatLng? = entries[k]?.pos
 
@@ -46,11 +59,14 @@ internal class MotionHub(
      */
     fun update(list: List<Pair<String, Vehicle>>, followRoads: Boolean) {
         val alive = HashSet<String>(list.size * 2)
+        val now = android.os.SystemClock.elapsedRealtime()
         for ((k, v) in list) {
             alive += k
-            val e = obtain(k, v)
+            val e = obtain(k, v, now)
             e.vehicle = v
-            e.motion.onFix(v.lat, v.lng, v.observedAtMs, heading = v.heading, predict = followRoads)
+            // azimut z DPMÚL je směr k nejbližší zastávce vzdušnou čarou, ne směr jízdy: tam směr určí realtime pohyb
+            val heading = if (v.source == SourceIds.DPMUL) null else v.heading
+            e.motion.onFix(v.lat, v.lng, v.observedAtMs, heading = heading, predict = followRoads)
 
             e.wantKey = if (followRoads) "${v.tid}|${v.cis}|${v.trip}" else null
             if (e.wantKey == null && e.routeKey != null) {
@@ -63,9 +79,15 @@ internal class MotionHub(
         while (iter.hasNext()) {
             val (k, e) = iter.next()
             if (k !in alive) {
-                e.routeJob?.cancel()
+                // trasa i pohyb se pamatují (načítání trasy dobíhá), vůz se může za chvíli vrátit
+                gone[k] = e to now
                 iter.remove()
             }
+        }
+        val g = gone.iterator()
+        while (g.hasNext()) {
+            val (_, pair) = g.next()
+            if (now - pair.second > GRACE_MS) { pair.first.routeJob?.cancel(); g.remove() }
         }
     }
 
@@ -127,10 +149,15 @@ internal class MotionHub(
     fun clear() {
         entries.values.forEach { it.routeJob?.cancel() }
         entries.clear()
+        gone.values.forEach { it.first.routeJob?.cancel() }
+        gone.clear()
     }
 
     private companion object {
         const val MAX_LAUNCH = 12
         const val OFFSCREEN_TICK_MS = 1000L
+        const val GRACE_MS = 90_000L
+        /** Dál se vůz za [GRACE_MS] reálně nedostane; větší skok = jiný vůz pod stejným klíčem, nenavazovat. */
+        const val REVIVE_MAX_M = 2_500.0
     }
 }

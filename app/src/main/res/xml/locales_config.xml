@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Jazyky nabízené v systémovém nastavení jazyka aplikace (Android 13+). Výchozí (values/) je čeština. -->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="cs" />
+    <locale android:name="en" />
+</locale-config>

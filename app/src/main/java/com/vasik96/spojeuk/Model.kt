@@ -5,10 +5,12 @@ import java.time.LocalDateTime
 
 // ───────────────────────── jízdní řády ─────────────────────────
 
-enum class ModeFilter(val label: String) {
-    ALL("Vše"),
-    BUS("Autobusy"),
-    TRAIN("Vlaky");
+enum class ModeFilter(@androidx.annotation.StringRes private val labelRes: Int) {
+    ALL(R.string.mode_all),
+    BUS(R.string.mode_bus),
+    TRAIN(R.string.mode_train);
+
+    val label: String get() = tr(labelRes)
 
     fun accepts(isTrain: Boolean): Boolean = when (this) {
         ALL -> true
@@ -159,6 +161,8 @@ data class Vehicle(
     val ids: List<String> = emptyList(),
     /** Stabilní klíč vozu ze serveru: stejný i když se vítězný zdroj změní (DPMÚL 451 ↔ DÚK 300451). */
     val serverUid: String = "",
+    /** Druh dopravy ze serveru: bus | tram | metro | trolleybus | train | ferry | funicular (prázdné = starší server). */
+    val mode: String = "",
 ) {
     init {
         if (id == 200 && (source == "duk" || source == "dpmul")) {

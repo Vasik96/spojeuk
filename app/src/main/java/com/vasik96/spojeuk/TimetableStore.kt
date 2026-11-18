@@ -11,8 +11,12 @@ import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
+import android.database.sqlite.SQLiteDatabase
 import java.io.File
 import java.io.FileOutputStream
+import java.security.DigestInputStream
+import java.security.MessageDigest
+import java.util.zip.GZIPInputStream
 
 /** Jízdní řád a plánovač, které patří k sobě (vyměňují se společně). */
 class TimetableBundle(val timetable: Timetable, val planner: Planner)
@@ -71,7 +75,7 @@ class TimetableStore(
                 applyPendingIfAny()
 
                 if (isFirstRun()) {
-                    log("Nahrávám výchozí jízdní řády…")
+                    log(tr(R.string.dl_default_tt))
                     if (!copyBundledDb()) importLock.withLock { downloadAndImport(dbFile, log, progress) }
                 }
                 val bundle = install(Timetable(dbFile))
@@ -139,11 +143,21 @@ class TimetableStore(
 
     /** Vrací true i když je vše aktuální (nic se nestahuje). */
     private fun downloadRegion(target: File, log: (String) -> Unit, progress: (Float) -> Unit): Boolean {
-        log("Zjišťuji nejnovější data…")
+        log(tr(R.string.dl_checking_latest))
         val remote = JSONObject(open("$REGION_BASE_URL/gtfs.json").use { it.body?.string().orEmpty() })
         val tag = remote.optString("tag").ifBlank { return false }
         val stagedTag = if (pendingFile.exists()) runCatching { Timetable.readMeta(pendingFile)["tag"] }.getOrNull() else null
-        if (target == pendingFile && (meta()["tag"] == tag || stagedTag == tag)) { log("Data jsou aktuální."); return true }
+        if (target == pendingFile && (meta()["tag"] == tag || stagedTag == tag)) { log(tr(R.string.dl_up_to_date)); return true }
+
+        // nejrychlejší: hotová databáze postavená v GitHub Actions (stačí stáhnout a rozbalit, žádný import)
+        val prebuilt = remote.optJSONObject("db")
+        if (prebuilt != null && prebuilt.optInt("schema") == PREBUILT_SCHEMA) {
+            if (runCatching { downloadPrebuilt(prebuilt, tag, target, log, progress) }
+                    .onFailure { Log.w(TAG, "hotová DB selhala, importuji GTFS: ${it.message}") }
+                    .getOrDefault(false)) return true
+            log(tr(R.string.dl_prebuilt_failed))
+            progress(0f)
+        }
 
         val dir = dbFile.parentFile
         val names = listOf("jdf-region.zip" to false, "czptt-region.zip" to true)
@@ -171,7 +185,7 @@ class TimetableStore(
                 open("$REGION_BASE_URL/$name").use { resp ->
                     val body = resp.body ?: error("Prázdná odpověď")
                     total.set(i, body.contentLength().coerceAtLeast(0L))
-                    log("Stahuji $name (${body.contentLength().coerceAtLeast(0L) / 1048576} MB)…")
+                    log(tr(R.string.dl_downloading_file, name, (body.contentLength().coerceAtLeast(0L) / 1048576).toInt()))
                     body.byteStream().use { input ->
                         FileOutputStream(f).use { out ->
                             val buf = ByteArray(1 shl 17)
@@ -203,8 +217,83 @@ class TimetableStore(
         return true
     }
 
+    /**
+     * Stáhne hotovou `static.sqlite` (gzip) z releasu a za letu ji rozbalí do [target]. Kontroluje sha256 staženého
+     * souboru i obsah (tag a počet spojů), jinak vyhodí výjimku a volající použije import ze zipů.
+     */
+    private fun downloadPrebuilt(
+        info: JSONObject,
+        tag: String,
+        target: File,
+        log: (String) -> Unit,
+        progress: (Float) -> Unit,
+    ): Boolean {
+        val name = info.optString("name").ifBlank { return false }
+        val expectedSha = info.optString("sha256")
+        val expectedTrips = info.optInt("trips")
+        val tmp = File(target.parentFile, target.name + ".dl")
+        tmp.delete()
+        try {
+            val md = MessageDigest.getInstance("SHA-256")
+            open("$REGION_BASE_URL/$name").use { resp ->
+                val body = resp.body ?: error("Prázdná odpověď")
+                val total = body.contentLength().takeIf { it > 0 } ?: info.optLong("size", -1L)
+                val totalMb = if (total > 0) "%.1f".format(total / 1048576.0) else "?"
+                var read = 0L
+                var lastMb = -1L
+                // počítadlo bajtů ze sítě (komprimovaných), pro postup a hlášku
+                val counting = object : java.io.FilterInputStream(body.byteStream()) {
+                    override fun read(b: ByteArray, off: Int, len: Int): Int {
+                        val n = super.read(b, off, len)
+                        if (n > 0) {
+                            read += n
+                            val mb = read / (1 shl 20)
+                            if (mb != lastMb) {
+                                lastMb = mb
+                                log(tr(R.string.dl_downloading_tt_progress, mb.toInt(), totalMb))
+                                if (total > 0) progress(0.95f * (read.toFloat() / total).coerceAtMost(1f))
+                            }
+                        }
+                        return n
+                    }
+                }
+                GZIPInputStream(DigestInputStream(counting, md), 1 shl 16).use { input ->
+                    FileOutputStream(tmp).use { out -> input.copyTo(out, 1 shl 17) }
+                }
+            }
+            val sha = md.digest().joinToString("") { "%02x".format(it) }
+            if (expectedSha.isNotEmpty() && sha != expectedSha) error("sha256 nesedí (nahrává se nová verze?)")
+
+            log(tr(R.string.dl_checking_db))
+            progress(0.97f)
+            val trips = SQLiteDatabase.openDatabase(tmp.path, null, SQLiteDatabase.OPEN_READONLY).use { d ->
+                val m = HashMap<String, String>()
+                d.rawQuery("SELECT k, v FROM meta", null).use { c -> while (c.moveToNext()) m[c.getString(0)] = c.getString(1) }
+                val trips = d.rawQuery("SELECT count(*) FROM trip", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+                if (m["tag"] != tag) error("DB má jinou verzi (${m["tag"]} místo $tag)")
+                if (trips <= 0 || (expectedTrips > 0 && trips != expectedTrips) || m["trips"] != trips.toString()) {
+                    error("DB je neúplná ($trips spojů)")
+                }
+                trips
+            }
+            val bytes = tmp.length()
+
+            // rename přepíše soubor atomicky; stará DB, kterou ještě někdo čte, nezmizí uprostřed
+            if (!tmp.renameTo(target)) {
+                target.delete()
+                if (!tmp.renameTo(target)) error("nelze přesunout staženou DB")
+            }
+            progress(1f)
+            log(trPlural(R.plurals.dl_downloaded_trips, trips, trips))
+            Log.i(TAG, "hotová DB $tag stažena ($bytes B, $trips spojů)")
+            return true
+        } finally {
+            tmp.delete()   // po úspěšném přesunu už neexistuje
+        }
+    }
+
     private fun downloadFromObehy(target: File, log: (String) -> Unit, progress: (Float) -> Unit) {
-        log("Zjišťuji nejnovější build z GitHubu…")
+        log(tr(R.string.dl_checking_github))
         val release = JSONObject(open(RELEASES_API).use { it.body?.string().orEmpty() })
         val tag = release.optString("tag_name", "latest")
         val assets = release.optJSONArray("assets") ?: JSONArray()
@@ -216,14 +305,14 @@ class TimetableStore(
         val dir = dbFile.parentFile
 
         val busZip = File(dir, "gtfs.zip")
-        log("Stahuji $ASSET_NAME (${busAsset.optLong("size") / 1048576} MB)…")
+        log(tr(R.string.dl_downloading_file, ASSET_NAME, (busAsset.optLong("size") / 1048576).toInt()))
         fetchGtfsZip(busAsset.getString("browser_download_url"), busZip, log)
 
         // Vlaky jsou doplněk: když se nepovedou, appka zůstane s autobusy a příště to zkusí znovu.
         val railZip = File(dir, "gtfs_rail.zip")
         val railOk = asset(RAIL_ASSET_NAME)?.let { a ->
             runCatching {
-                log("Stahuji vlaky ($RAIL_ASSET_NAME)…")
+                log(tr(R.string.dl_downloading_trains, RAIL_ASSET_NAME))
                 fetchGtfsZip(a.getString("browser_download_url"), railZip, log)
                 railZip.exists()
             }.getOrElse {
@@ -249,7 +338,7 @@ class TimetableStore(
     private fun fetchGtfsZip(url: String, dest: File, log: (String) -> Unit) {
         open(url).use { resp ->
             val body = resp.body ?: error("Prázdná odpověď")
-            log("Rozbaluji GTFS…")
+            log(tr(R.string.dl_unpacking))
             if (!TarUtils.streamGtfsZipToFile(body.byteStream(), dest) || !dest.exists()) {
                 error("V souboru nebylo nalezeno gtfs.zip ($url)")
             }
@@ -270,6 +359,8 @@ class TimetableStore(
 
     private companion object {
         const val MIN_DB_BYTES = 100_000L
+        /** Verze formátu hotové DB z GitHubu (tools/build_timetable_db.py SCHEMA); jiná => import ze zipů. */
+        const val PREBUILT_SCHEMA = 1
         const val TAG = "GtfsImport"
     }
 }

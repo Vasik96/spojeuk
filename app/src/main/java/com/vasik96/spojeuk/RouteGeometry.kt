@@ -2,16 +2,21 @@ package com.vasik96.spojeuk
 
 typealias LatLngList = List<Pair<Double, Double>>
 
+/** Spoje doplněné z PID GTFS (linky, které v CIS nejsou); tvary mají v pid_shapes.sqlite. */
+private const val PID_GTFS_PREFIX = "pidgtfs:"
+
 /** Trasy pro mapu: přesné tvary z GTFS shapes, a když spoj tvar nemá, silnice z OSRM. */
 class RouteGeometry(
     private val shapes: ShapeStore,
     private val trainShapes: ShapeStore,
+    private val pidShapes: ShapeStore,
     private val osrm: OsrmClient,
 ) {
     /** Tvar spoje z odpovídající databáze (vlaky mají vlastní). */
     private fun shapeOf(tt: Timetable, tid: Int): LatLngList? {
         val trip = tt.trips[tid] ?: return null
         if (trip.isTrain) return trainShapes.points(trip.gid)
+        if (trip.gid.startsWith(PID_GTFS_PREFIX)) return pidShapes.points(trip.gid)
         // přesný gid, a když v shapes.sqlite není (zastaralé jdf:trip:…), nejlépe sedící tvar téže linky podle zastávek
         return shapes.pointsFor(trip.gid, stopCoords(tt, tid))
     }
@@ -21,6 +26,7 @@ class RouteGeometry(
         val trip = tt.trips[tid] ?: return "spoj nenalezen"
         if (trip.gid.isBlank()) return "spoj nemá gid (DB hasGid=${tt.hasGid}), použije se OSRM"
         if (trip.isTrain) return trainShapes.explain(trip.gid)
+        if (trip.gid.startsWith(PID_GTFS_PREFIX)) return pidShapes.explain(trip.gid)
         val exact = shapes.explain(trip.gid)
         if (shapes.points(trip.gid) != null) return exact
         val fuzzy = shapes.pointsFor(trip.gid, stopCoords(tt, tid))

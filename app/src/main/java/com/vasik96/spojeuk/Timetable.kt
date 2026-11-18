@@ -260,6 +260,30 @@ class Timetable(val dbFile: File) {
     }
 
     /**
+     * Vlak podle čísla bez ohledu na kalendář: když dnes v okolí ±2 h nejede (souprava stojí po oběhu, číslo z jiného
+     * dne), spoj se stejným číslem, jehož jízda je denní dobou nejblíž teď. Trasa vlaku s jedním číslem bývá stejná.
+     */
+    fun findTrainTripIdAnyDay(trainNumber: String): Int? {
+        findTrainTripId(trainNumber)?.let { return it }
+        val n = trainNumber.trim().trimStart('0')
+        val candidates = tripsByTrain[n] ?: return null
+        val now = nowPrague()
+        val rel = secondsSinceMidnight(now.toLocalDate(), now)
+        return candidates.minByOrNull { tid ->
+            val t = trips[tid] ?: return@minByOrNull Int.MAX_VALUE
+            val gap = when { rel < t.t0 -> t.t0 - rel; rel > t.t1 -> rel - t.t1; else -> 0 }.toInt()
+            minOf(gap, 86_400 - gap)
+        }
+    }
+
+    /** Linka vlaku podle čísla (S88, U5, …), i když spoj teď nejede. */
+    fun trainLine(trainNumber: String): String? {
+        val n = trainNumber.trim().trimStart('0')
+        if (n.isEmpty()) return null
+        return tripsByTrain[n]?.firstNotNullOfOrNull { trips[it]?.line?.takeIf { l -> l.isNotBlank() && l != "?" } }
+    }
+
+    /**
      * Číslo vlaku → linka (U32, Ex6, …), pro malou tabulku na disku, díky které mají vlaky linku hned po startu,
      * ještě než se dočte celý jízdní řád. Linka se u čísla vlaku prakticky nemění; bere se první platná.
      */

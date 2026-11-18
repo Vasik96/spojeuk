@@ -133,29 +133,24 @@ internal fun SourceBadges() {
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .clickable(onClickLabel = "Informace o zdrojích dat") { showInfo = true },
+            .clickable(onClickLabel = stringResource(R.string.logos_info)) { showInfo = true },
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        LogoChip(R.drawable.dpmul, "Dopravní podnik města Ústí nad Labem")
-        LogoChip(R.drawable.duk, "Doprava Ústeckého kraje")
+        LogoChip(R.drawable.dpmul, stringResource(R.string.logo_dpmul))
+        LogoChip(R.drawable.duk, stringResource(R.string.app_tagline))
     }
 
     if (showInfo) {
         AlertDialog(
             onDismissRequest = { showInfo = false },
             icon = { Icon(Icons.Default.Info, null) },
-            title = { Text("Neoficiální aplikace") },
+            title = { Text(stringResource(R.string.unofficial_title)) },
             text = {
-                Text(
-                    "Spoje UK nejsou nijak spojeny, provozovány ani schváleny společnostmi " +
-                            "Doprava Ústeckého kraje (DÚK), Dopravní podnik města Ústí nad Labem (DPMÚL), ani se Správou železnic.\n\n" +
-                            "Loga slouží pouze pro vizuální informaci o tom, jaká data se v aplikaci zobrazují (a ještě to s tím vypadá lépe), " +
-                            "a jsou ochrannými známkami svých vlastníků."
-                )
+                Text(stringResource(R.string.unofficial_text))
             },
             confirmButton = {
-                TextButton(onClick = { showInfo = false }) { Text("Rozumím") }
+                TextButton(onClick = { showInfo = false }) { Text(stringResource(R.string.common_ok_understood)) }
             }
         )
     }
@@ -228,7 +223,7 @@ internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> 
             )
 
             Text(
-                text = "Doprava Ústeckého kraje",
+                text = stringResource(R.string.app_tagline),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -251,7 +246,7 @@ internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> 
             Spacer(Modifier.height(20.dp))
 
             Text(
-                text = "Stahování zastávek",
+                text = stringResource(R.string.setup_title),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
@@ -259,7 +254,7 @@ internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> 
             Spacer(Modifier.height(6.dp))
 
             Text(
-                text = message.ifBlank { "Připravuji jízdní řády…" },
+                text = message.ifBlank { stringResource(R.string.setup_preparing) },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
@@ -280,7 +275,7 @@ internal fun SetupOverlay(message: String, progress: Float, onBackground: () -> 
             Spacer(Modifier.height(24.dp))
 
             Text(
-                text = "Při prvním spuštění se stahují jízdní řády (~20 MB). Toto může trvat 30s.",
+                text = stringResource(R.string.setup_hint),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 textAlign = TextAlign.Center,

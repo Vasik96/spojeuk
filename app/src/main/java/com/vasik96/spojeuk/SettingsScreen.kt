@@ -38,6 +38,9 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Route
@@ -140,7 +143,7 @@ private fun SettingsMain(
         AlertDialog(
             onDismissRequest = { showThemeDialog = false },
             icon = { Icon(Icons.Default.Palette, contentDescription = null) },
-            title = { Text("Výběr motivu aplikace") },
+            title = { Text(stringResource(R.string.settings_app_theme_dialog_title)) },
             text = {
                 Column {
                     AppTheme.entries.forEach { theme ->
@@ -173,7 +176,7 @@ private fun SettingsMain(
             },
             confirmButton = {
                 TextButton(onClick = { showThemeDialog = false }) {
-                    Text("Zavřít")
+                    Text(stringResource(R.string.common_close))
                 }
             }
         )
@@ -186,7 +189,7 @@ private fun SettingsMain(
                 Icon(Icons.Default.Map, contentDescription = null)
             },
             title = {
-                Text("Poskytovatel mapy")
+                Text(stringResource(R.string.settings_map_provider))
             },
             text = {
                 Column {
@@ -201,7 +204,7 @@ private fun SettingsMain(
                                         if (provider == MapProvider.MAPYCZ && BuildConfig.MAPYCZ_API_KEY.isBlank()) {
                                             android.widget.Toast.makeText(
                                                 appState.context,
-                                                "Chybí MAPYCZ_API_KEY v local.properties, zobrazí se OpenStreetMap",
+                                                tr(R.string.settings_mapycz_key_missing),
                                                 android.widget.Toast.LENGTH_LONG
                                             ).show()
                                         }
@@ -231,7 +234,7 @@ private fun SettingsMain(
                 TextButton(
                     onClick = { showMapProviderDialog = false }
                 ) {
-                    Text("Zavřít")
+                    Text(stringResource(R.string.common_close))
                 }
             }
         )
@@ -241,7 +244,7 @@ private fun SettingsMain(
         AlertDialog(
             onDismissRequest = { showMapThemeDialog = false },
             icon = { Icon(Icons.Default.Palette, contentDescription = null) },
-            title = { Text("Motiv mapy") },
+            title = { Text(stringResource(R.string.settings_map_theme)) },
             text = {
                 Column {
                     MapTheme.entries.forEach { theme ->
@@ -267,7 +270,7 @@ private fun SettingsMain(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showMapThemeDialog = false }) { Text("Zavřít") }
+                TextButton(onClick = { showMapThemeDialog = false }) { Text(stringResource(R.string.common_close)) }
             }
         )
     }
@@ -279,7 +282,7 @@ private fun SettingsMain(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        SectionTitle("Zobrazení a mapa")
+        SectionTitle(stringResource(R.string.settings_section_display))
 
         // 1. Motiv aplikace (Dialog)
         OutlinedCard(
@@ -300,7 +303,7 @@ private fun SettingsMain(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Motiv aplikace",
+                        stringResource(R.string.settings_app_theme),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -313,6 +316,9 @@ private fun SettingsMain(
                 }
             }
         }
+
+        // 1b. Jazyk aplikace: systémové nastavení jazyka pro tuto appku (Android 13+), jazyky viz res/xml/locales_config.xml
+        LanguageSettingsCard()
 
         // 2. motiv mapy
         OutlinedCard(
@@ -333,7 +339,7 @@ private fun SettingsMain(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Motiv mapy",
+                        stringResource(R.string.settings_map_theme),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -366,7 +372,7 @@ private fun SettingsMain(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Poskytovatel mapy",
+                        stringResource(R.string.settings_map_provider),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -404,13 +410,13 @@ private fun SettingsMain(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Skrýt ostatní vozidla na mapě",
+                        stringResource(R.string.settings_hide_others),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Při zobrazení konkrétního spoje na mapě skryje ostatní autobusy a vlaky, pokud byl autobus správně nalezen.",
+                        stringResource(R.string.settings_hide_others_desc),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -453,13 +459,13 @@ private fun SettingsMain(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Předpovídat plynulý pohyb autobusu",
+                        stringResource(R.string.settings_predict),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Odhaduje plynulý pohyb vozidla mezi aktualizacemi dat. Pokud vůz 2 a více aktualizací stojí, zůstane stát na místě.",
+                        stringResource(R.string.settings_predict_desc),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -509,13 +515,13 @@ private fun SettingsMain(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Kompaktní banner mapy",
+                        stringResource(R.string.settings_compact_banner),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Zobrazí v horním banneru mapy pouze filtry (Vše, Autobusy, Vlaky) bez informací o zdrojích a počtu vozidel.",
+                        stringResource(R.string.settings_compact_banner_desc),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -538,7 +544,7 @@ private fun SettingsMain(
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-        SectionTitle("Data a aktualizace")
+        SectionTitle(stringResource(R.string.settings_section_data))
 
         OutlinedCard(
             onClick = {
@@ -560,20 +566,20 @@ private fun SettingsMain(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Aktualizace dat",
+                        stringResource(R.string.settings_data_updates),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Stahování jízdních řádů GTFS, tvarů tras (Shapes), živých dat a vyčištění cache tras OSRM.",
+                        stringResource(R.string.settings_data_updates_desc),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                    contentDescription = "Otevřít aktualizace dat",
+                    contentDescription = stringResource(R.string.settings_open_data_updates),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -586,7 +592,7 @@ private fun SettingsMain(
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-        SectionTitle("O aplikaci")
+        SectionTitle(stringResource(R.string.settings_section_about))
 
         OutlinedCard(
             modifier = Modifier.fillMaxWidth()
@@ -601,12 +607,12 @@ private fun SettingsMain(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "Doprava Ústeckého kraje",
+                    stringResource(R.string.app_tagline),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    "Verze $APP_VERSION",
+                    stringResource(R.string.settings_version, APP_VERSION),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -648,12 +654,12 @@ private fun VehicleSourcesSettingsCard(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Zdroje poloh vozidel",
+                        stringResource(R.string.settings_sources_title),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        "Vyberte, ze kterých zdrojů se mají načítat živé polohy autobusů a vlaků.",
+                        stringResource(R.string.settings_sources_desc),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -733,11 +739,69 @@ private fun VehicleSourcesSettingsCard(
                 },
                 modifier = Modifier.align(Alignment.End)
             ) {
-                Text("Obnovit výchozí výběr")
+                Text(stringResource(R.string.settings_sources_reset))
             }
         }
     }
 }
+/** Aktuální jazyk appky + otevření systémového výběru (appka se po změně sama přenačte). */
+@Composable
+private fun LanguageSettingsCard() {
+    val context = LocalContext.current
+    val appLocales = remember { context.getSystemService(android.app.LocaleManager::class.java)?.applicationLocales }
+    val current = if (appLocales == null || appLocales.isEmpty) stringResource(R.string.settings_language_system)
+    else appLocales[0].let { l -> l.getDisplayLanguage(l).replaceFirstChar { it.titlecase(l) } }
+    OutlinedCard(
+        onClick = {
+            val pkg = android.net.Uri.fromParts("package", context.packageName, null)
+            runCatching {
+                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_APP_LOCALE_SETTINGS, pkg))
+            }.onFailure {
+                // výrobce bez obrazovky jazyka aplikace: aspoň detail aplikace
+                runCatching { context.startActivity(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg)) }
+            }
+        },
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Language,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.settings_language),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    current,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    stringResource(R.string.settings_language_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
 @Composable
 private fun SectionTitle(text: String) {
     Text(
@@ -777,14 +841,14 @@ private fun DataUpdatesScreen(
             IconButton(onClick = onBack) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Zpět do nastavení"
+                    contentDescription = stringResource(R.string.settings_back)
                 )
             }
-            SectionTitle("Aktualizace dat")
+            SectionTitle(stringResource(R.string.settings_data_updates))
         }
 
         Text(
-            "Vyberte, zda chcete stáhnout ze zdrojů kompletně všechna data, nebo aktualizovat pouze jednotlivé položky.",
+            stringResource(R.string.updates_intro),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -810,7 +874,7 @@ private fun DataUpdatesScreen(
                             color = MaterialTheme.colorScheme.onPrimary
                         )
                         Text(
-                            "Probíhá aktualizace…",
+                            stringResource(R.string.updates_in_progress),
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -873,20 +937,20 @@ private fun DataUpdatesScreen(
                     )
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            "Stáhnout ze zdrojů úplně všechno",
+                            stringResource(R.string.updates_all_title),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSecondaryContainer
                         )
                         Text(
-                            "Kompletní aktualizace: Jízdní řády GTFS, trasy linek Shapes, živá poloha vozidel a vyčištění cache tras.",
+                            stringResource(R.string.updates_all_desc),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
                         )
                         if (lastCompleteUpdate > 0L) {
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Poslední kompletní update: ${formatLastUpdate(lastCompleteUpdate)}",
+                                stringResource(R.string.updates_last_complete, formatLastUpdate(lastCompleteUpdate)),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.9f)
                             )
@@ -905,7 +969,7 @@ private fun DataUpdatesScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text("Aktualizovat kompletně vše")
+                    Text(stringResource(R.string.updates_all_button))
                 }
             }
         }
@@ -913,7 +977,7 @@ private fun DataUpdatesScreen(
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
         Text(
-            "Jednotlivé položky ke stažení",
+            stringResource(R.string.updates_items_title),
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onBackground
@@ -922,66 +986,66 @@ private fun DataUpdatesScreen(
         val timetableBadge = buildString {
             val tag = timetableMeta["tag"]
             val built = timetableMeta["built"]
-            if (tag != null) append("Verze $tag")
-            else if (built != null) append("Sestaveno $built")
+            if (tag != null) append(tr(R.string.updates_badge_version, tag))
+            else if (built != null) append(tr(R.string.updates_badge_built, built))
             if (lastTimetableUpdate > 0L) {
                 if (isNotEmpty()) append(" • ")
-                append("Staženo: ${formatLastUpdate(lastTimetableUpdate)}")
+                append(tr(R.string.updates_badge_downloaded, formatLastUpdate(lastTimetableUpdate)))
             }
         }.ifBlank {
-            if (lastTimetableUpdate > 0L) "Staženo: ${formatLastUpdate(lastTimetableUpdate)}" else null
+            if (lastTimetableUpdate > 0L) tr(R.string.updates_badge_downloaded, formatLastUpdate(lastTimetableUpdate)) else null
         }
 
         SettingUpdateItemCard(
-            title = "Jízdní řády a spojení (GTFS)",
-            description = "Stáhnout nejnovější databázi spojů, linek a zastávek z GitHubu.",
+            title = stringResource(R.string.updates_tt_title),
+            description = stringResource(R.string.updates_tt_desc),
             infoBadge = timetableBadge,
             icon = Icons.Default.DirectionsBus,
-            buttonText = "Aktualizovat JŘ",
+            buttonText = stringResource(R.string.updates_tt_button),
             enabled = !appState.isUpdatingData,
             onClick = { appState.performUpdateTimetable(api, scope) }
         )
 
         val shapesBadge = buildString {
-            if (shapesMeta != null) append("Sestaveno $shapesMeta")
+            if (shapesMeta != null) append(tr(R.string.updates_badge_built, shapesMeta))
             if (lastShapesUpdate > 0L) {
                 if (isNotEmpty()) append(" • ")
-                append("Staženo: ${formatLastUpdate(lastShapesUpdate)}")
+                append(tr(R.string.updates_badge_downloaded, formatLastUpdate(lastShapesUpdate)))
             }
         }.ifBlank {
-            if (lastShapesUpdate > 0L) "Staženo: ${formatLastUpdate(lastShapesUpdate)}" else null
+            if (lastShapesUpdate > 0L) tr(R.string.updates_badge_downloaded, formatLastUpdate(lastShapesUpdate)) else null
         }
 
         SettingUpdateItemCard(
-            title = "Trasy a geometrie linek (Shapes)",
-            description = "Stáhnout přesné tvary tras pro zobrazení linek na mapě.",
+            title = stringResource(R.string.updates_shapes_title),
+            description = stringResource(R.string.updates_shapes_desc),
             infoBadge = shapesBadge,
             icon = Icons.Default.Route,
-            buttonText = "Aktualizovat trasy",
+            buttonText = stringResource(R.string.updates_shapes_button),
             enabled = !appState.isUpdatingData,
             onClick = { appState.performUpdateShapes(api, scope) }
         )
 
-        val realtimeBadge = if (lastRealtimeUpdate > 0L) "Poslední obnova: ${formatLastUpdate(lastRealtimeUpdate)}" else "Aktuální polohy"
+        val realtimeBadge = if (lastRealtimeUpdate > 0L) stringResource(R.string.updates_rt_last, formatLastUpdate(lastRealtimeUpdate)) else stringResource(R.string.updates_rt_current)
 
         SettingUpdateItemCard(
-            title = "Živá poloha vozidel (Realtime)",
-            description = "Obnovit okamžité polohy autobusů, trolejbusů a vlaků.",
+            title = stringResource(R.string.updates_rt_title),
+            description = stringResource(R.string.updates_rt_desc),
             infoBadge = realtimeBadge,
             icon = Icons.Default.LocationOn,
-            buttonText = "Obnovit polohy",
+            buttonText = stringResource(R.string.updates_rt_button),
             enabled = !appState.isUpdatingData,
             onClick = { appState.performUpdateRealtime(api, scope) }
         )
 
-        val osrmBadge = if (lastOsrmClear > 0L) "Poslední čištění: ${formatLastUpdate(lastOsrmClear)}" else null
+        val osrmBadge = if (lastOsrmClear > 0L) stringResource(R.string.updates_osrm_last, formatLastUpdate(lastOsrmClear)) else null
 
         SettingUpdateItemCard(
-            title = "Cache pěších a silničních tras (OSRM)",
-            description = "Vymazat a obnovit uložené trasy OSRM v zařízení.",
+            title = stringResource(R.string.updates_osrm_title),
+            description = stringResource(R.string.updates_osrm_desc),
             infoBadge = osrmBadge,
             icon = Icons.Default.DeleteSweep,
-            buttonText = "Vyčistit cache",
+            buttonText = stringResource(R.string.updates_osrm_button),
             enabled = !appState.isUpdatingData,
             onClick = { appState.performClearOsrmCache(api, scope) }
         )

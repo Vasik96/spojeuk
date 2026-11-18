@@ -41,6 +41,8 @@ internal class GoogleVehicleLayer(private val context: Context) {
         private set
     var color = IntArray(0)          // barva tečky
         private set
+    var late = BooleanArray(0)       // tramvaj / metro se zpožděním: červený okraj tečky
+        private set
     var label = arrayOfNulls<Bitmap>(0)   // štítek s číslem linky; null = tečka
         private set
     private var lat = DoubleArray(0)
@@ -123,7 +125,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
 
         /** Bitmapa štítku, pokud je hotová; jinak se objedná kreslení na pozadí. */
         fun labelOf(v: Vehicle): Bitmap? {
-            val key = labelKey(v.line, v.train, v.delay, 0)
+            val key = labelKey(v.line, vehicleStyle(v), 0, lateMinutes(v))
             cachedMarkerBitmap(key)?.let { return it }
             if (missingLabels.size < MAX_MISSING) missingLabels[key] = v
             pending = true
@@ -133,7 +135,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
         val cap = activeVehicles.size
         if (wx.size < cap) {
             val sz = cap + cap / 4 + 16
-            wx = DoubleArray(sz); wy = DoubleArray(sz); color = IntArray(sz); label = arrayOfNulls(sz)
+            wx = DoubleArray(sz); wy = DoubleArray(sz); color = IntArray(sz); late = BooleanArray(sz); label = arrayOfNulls(sz)
             lat = DoubleArray(sz); lng = DoubleArray(sz); vehicles = arrayOfNulls(sz)
         }
         var n = 0
@@ -146,14 +148,17 @@ internal class GoogleVehicleLayer(private val context: Context) {
             wx[n] = (lo + 180.0) / 360.0
             val sn = sin(Math.toRadians(la)).coerceIn(-0.9999, 0.9999)
             wy[n] = 0.5 - ln((1 + sn) / (1 - sn)) / (4 * PI)
-            color[n] = vehicleColor(v.train, v.delay, if (isHl) phase else 0)
+            val style = vehicleStyle(v)
+            color[n] = vehicleColor(style, if (isHl) phase else 0)
+            val lateMin = lateMinutes(v)
+            late[n] = lateMin > 0
             lat[n] = la; lng[n] = lo; vehicles[n] = v
             val inView = view == null || view.contains(la, lo)
             label[n] = when {
                 // zvýrazněné: pulzující štítek (jen pár variant, kreslí se hned)
-                isHl && !dot -> markerBitmap(context, v.line, v.train, v.delay, phase)
+                isHl && !dot -> markerBitmap(context, v.line, style, phase, lateMin)
                 isHl -> null
-                !dot -> if (inView) labelOf(v) else cachedMarkerBitmap(labelKey(v.line, v.train, v.delay, 0))
+                !dot -> if (inView) labelOf(v) else cachedMarkerBitmap(labelKey(v.line, style, 0, lateMin))
                 else -> { if (prewarm && inView) labelOf(v); null }
             }
             if (isHl) h = n
@@ -170,23 +175,29 @@ internal class GoogleVehicleLayer(private val context: Context) {
      * Okamžité vyhodnocení ťuknutí. Počítá se jen z pozic v paměti, žádné volání mapy.
      * [lat]/[lng] = místo ťuknutí, [degPerDpLng] = stupně délky na dp.
      */
-    fun hitTest(lat: Double, lng: Double, degPerDpLng: Double): Vehicle? {
+    fun hitTest(lat: Double, lng: Double, degPerDpLng: Double): List<Vehicle> {
         val degPerDpLat = degPerDpLng * kotlin.math.cos(Math.toRadians(lat))
         val density = context.resources.displayMetrics.density
         var best: Vehicle? = null
         var bestD = Double.MAX_VALUE
+        // vozy, jejichž štítek / tečka místo ťuknutí skutečně kryje (bez rezervy na prst), s pořadím podle vzdálenosti
+        val covering = ArrayList<Pair<Double, Vehicle>>()
         for (i in 0 until count) {
             val b = label[i]
-            // dp, se slušnou rezervou na prst
-            val halfW = if (b != null) b.width / density / 2.0 + 4.0 else 12.0
-            val halfH = if (b != null) b.height / density / 2.0 + 3.0 else 12.0
+            val w = if (b != null) b.width / density / 2.0 else 6.0
+            val h = if (b != null) b.height / density / 2.0 else 6.0
             val dx = (this.lng[i] - lng) / degPerDpLng
             val dy = (this.lat[i] - lat) / degPerDpLat
-            if (abs(dx) > halfW || abs(dy) > halfH) continue
+            // dp, se slušnou rezervou na prst
+            if (abs(dx) > w + (if (b != null) 4.0 else 6.0) || abs(dy) > h + (if (b != null) 3.0 else 6.0)) continue
+            val v = vehicles[i] ?: continue
             val d = dx * dx + dy * dy - (if (i == hl) 1e6 else 0.0)   // zvýrazněné má přednost
-            if (d < bestD) { bestD = d; best = vehicles[i] }
+            if (d < bestD) { bestD = d; best = v }
+            if (abs(dx) <= w && abs(dy) <= h) covering += d to v
         }
-        return best
+        // víc vozů přes sebe (např. dva vlaky v jedné stanici): výběr, jinak nejbližší
+        if (covering.size >= 2) return covering.sortedBy { it.first }.map { it.second }.distinctBy { it.uid }
+        return listOfNotNull(best)
     }
 
     fun updateRoute(

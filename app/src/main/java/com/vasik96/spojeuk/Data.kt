@@ -451,7 +451,7 @@ class GtfsImporter(private val dbFile: File) {
                     val zf = ZipFile(feed.zip)
                     openZips.add(zf)
 
-                    log(if (rail) "Čtu zastávky (vlaky)…" else "Čtu zastávky…")
+                    log(tr(if (rail) R.string.imp_reading_stops_rail else R.string.imp_reading_stops))
                     prog(0.1f)
 
                     readCsv(zf, "stops.txt", arrayOf("stop_id", "stop_name", "stop_lat", "stop_lon", "location_type", "parent_station")
@@ -474,7 +474,7 @@ class GtfsImporter(private val dbFile: File) {
 
                     // zastávky tohoto feedu
                     region.addAll(posts.keys)
-                    log("Zastávek: ${region.size}")
+                    log(tr(R.string.imp_stops_count, region.size))
                     prog(0.2f)
 
                     val agencies = HashMap<String, String>()
@@ -514,7 +514,7 @@ class GtfsImporter(private val dbFile: File) {
                         )
                     }
 
-                    log("Zpracovávám jízdní řády…")
+                    log(tr(R.string.imp_processing))
                     prog(0.4f)
 
                     /** Uloží trip. Vrací true při uložení. */
@@ -657,6 +657,8 @@ class GtfsImporter(private val dbFile: File) {
                                     if (p - lastReported >= 0.01f) {
                                         lastReported = p
                                         prog(p)
+                                        // ať je vidět, že se něco děje (tahle fáze trvá nejdéle)
+                                        log(tr(if (rail) R.string.imp_processing_rail else R.string.imp_processing_bus, "%,d".format(countTrips).replace(',', ' ')))
                                     }
                                 }
                             }
@@ -695,7 +697,7 @@ class GtfsImporter(private val dbFile: File) {
 
                     zf.close()
                     feed.zip.delete()   // zip už nepotřebujeme, šetří místo
-                    log("Feed ${fi + 1}/${feeds.size} hotový, spojů celkem: $countTrips")
+                    log(tr(R.string.imp_feed_done, fi + 1, feeds.size, countTrips))
                 }
 
                 // ───── párování vlakových stanic s autobusovými zastávkami (viz StationPairing.kt) ─────
@@ -757,7 +759,7 @@ class GtfsImporter(private val dbFile: File) {
             }
 
             progress(1.0f)
-            log("Hotovo! Importováno $countTrips spojů.")
+            log(trPlural(R.plurals.imp_done, countTrips, countTrips))
         } finally {
             for (z in openZips) runCatching { z.close() }
             tempDir.deleteRecursively()

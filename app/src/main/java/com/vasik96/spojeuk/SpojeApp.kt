@@ -184,7 +184,7 @@ internal fun SpojeApp() {
                 .onSuccess { loaded -> appState.updateIndexedStops(loaded) }
                 .onFailure {
                     if (it is CancellationException) throw it
-                    appState.searchError = "Zastávky se nepodařilo načíst: ${it.message}"
+                    appState.searchError = tr(R.string.stops_load_failed, it.message.orEmpty())
                 }
             guard?.cancel()
             appState.showSetup = false
@@ -266,7 +266,7 @@ internal fun SpojeApp() {
                                     Text(
                                         stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge,
                                         fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                                    Text("Doprava Ústeckého kraje", style = MaterialTheme.typography.labelMedium,
+                                    Text(stringResource(R.string.app_tagline), style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             },
@@ -279,21 +279,21 @@ internal fun SpojeApp() {
                                 selected = appState.selectedTab == 0,
                                 onClick = { appState.selectedTab = 0 },
                                 icon = { Icon(Icons.Default.DirectionsBus, null) },
-                                label = { Text("Spoje") }
+                                label = { Text(stringResource(R.string.nav_trips)) }
                             )
 
                             NavigationBarItem(
                                 selected = appState.selectedTab == 1,
                                 onClick = { appState.selectedTab = 1 },
                                 icon = { Icon(Icons.Default.Map, null) },
-                                label = { Text("Mapa") }
+                                label = { Text(stringResource(R.string.nav_map)) }
                             )
 
                             NavigationBarItem(
                                 selected = appState.selectedTab == 2,
                                 onClick = { appState.selectedTab = 2 },
                                 icon = { Icon(Icons.Default.Settings, null) },
-                                label = { Text("Nastavení") }
+                                label = { Text(stringResource(R.string.nav_settings)) }
                             )
                         }
                     }

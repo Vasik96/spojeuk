@@ -1,10 +1,18 @@
 package com.vasik96.spojeuk
 
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Test
 import java.time.LocalDate
 
 class DukDirectTest {
+
+    /** JVM test nemá Android resources: texty štítku zdrojů česky (jako values/strings.xml). */
+    @Before
+    fun czechTexts() {
+        SourceLabel.noneText = { "žádný" }
+        SourceLabel.staleSuffixText = { " (zastaralé)" }
+    }
 
     @Test
     fun testTextUtilities() {

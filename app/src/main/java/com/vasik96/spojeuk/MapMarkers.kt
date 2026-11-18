@@ -22,49 +22,123 @@ private val markerIconCache = ConcurrentHashMap<String, BitmapDrawable>()
 
 // ── štítky vozidel: bitmapa se kreslí na pozadí (prerenderMarker), overlay na mapě si bere hotové (cachedMarkerBitmap) ──
 
-internal fun labelKey(line: String, train: Boolean, delay: Int, phase: Int): String = "$line:$train:${delay > 3}:$phase"
+internal fun labelKey(line: String, style: VehicleStyle, phase: Int, late: Int = 0): String =
+    if (late > 0) "$line:${style.name}:$phase:late" else "$line:${style.name}:$phase"
+
+/** Tramvaje a metro mají vlastní barvu (zpoždění barvou nejde): zpoždění > 3 min (pro červený rámeček), jinak 0. */
+internal fun lateMinutes(v: Vehicle): Int {
+    val s = vehicleStyle(v)
+    val own = s == VehicleStyle.TRAM || s == VehicleStyle.METRO || s == VehicleStyle.METRO_A ||
+            s == VehicleStyle.METRO_B || s == VehicleStyle.METRO_C
+    return if (own && v.delay > 3) v.delay.coerceAtMost(99) else 0
+}
 
 /** Hotová bitmapa štítku, nebo null (nic nekreslí). */
 internal fun cachedMarkerBitmap(key: String): Bitmap? = markerIconCache[key]?.bitmap
 
 /** Nakreslí bitmapu štítku do cache. Bezpečné volat mimo hlavní vlákno. */
-internal fun prerenderMarker(ctx: Context, line: String, train: Boolean, delay: Int, phase: Int) {
-    createLineMarkerDrawable(ctx, line, train, delay, phase)
+internal fun prerenderMarker(ctx: Context, line: String, style: VehicleStyle, phase: Int, late: Int = 0) {
+    createLineMarkerDrawable(ctx, line, style, phase, late)
 }
 
-internal fun markerBitmap(ctx: Context, line: String, train: Boolean, delay: Int, phase: Int): Bitmap =
-    createLineMarkerDrawable(ctx, line, train, delay, phase).bitmap
+internal fun markerBitmap(ctx: Context, line: String, style: VehicleStyle, phase: Int, late: Int = 0): Bitmap =
+    createLineMarkerDrawable(ctx, line, style, phase, late).bitmap
 
-/** Barva markeru vozidla (stejná pro štítek i pro tečku při oddálení). */
-internal fun vehicleColor(train: Boolean, delay: Int, phase: Int = 0): Int = when {
-    phase == 1 -> 0xFFFFD54F.toInt()
-    phase == 2 -> 0xFFFF6D00.toInt()
-    train -> 0xFF0277BD.toInt()
-    delay > 3 -> 0xFFC62828.toInt()
-    else -> 0xFF2E7D32.toInt()
+/**
+ * Barevná skupina vozu (štítek i tečka). Autobusy podle zpoždění, ostatní druhy dopravy vlastní barvou
+ * (zpoždění vlaku / tramvaje / metra je vidět v detailu), metro v barvách linek A / B / C.
+ */
+internal enum class VehicleStyle(val color: Int, val darkText: Boolean = false) {
+    BUS(0xFF2E7D32.toInt()),
+    BUS_LATE(0xFFC62828.toInt()),
+    TRAIN(0xFF0277BD.toInt()),
+    TRAM(0xFF7B1FA2.toInt()),
+    METRO_A(0xFF00A562.toInt()),
+    METRO_B(0xFFF8B322.toInt(), darkText = true),
+    METRO_C(0xFFD6006F.toInt()),       // malinová: oficiální červená C splývala se zpožděnými autobusy
+    METRO(0xFF37474F.toInt()),
+    FERRY(0xFF1565C0.toInt()),
+    FUNICULAR(0xFF6D4C41.toInt()),
+}
+
+/** Druh dopravy: ze serveru (`mode`), u starších odpovědí odvozený z PID uid ("g0:…" tramvaj) a linek metra. */
+internal fun vehicleStyle(v: Vehicle): VehicleStyle {
+    val mode = v.mode.ifEmpty {
+        val rt = if (v.source == SourceIds.PID && v.serverUid.startsWith("g")) v.serverUid.substring(1).substringBefore(':') else ""
+        when {
+            v.train -> "train"
+            rt == "0" -> "tram"
+            rt == "4" -> "ferry"
+            rt == "7" -> "funicular"
+            v.source == SourceIds.PID && isMetroLine(v.line) -> "metro"
+            else -> "bus"
+        }
+    }
+    return when (mode) {
+        "train" -> VehicleStyle.TRAIN
+        "tram" -> VehicleStyle.TRAM
+        "ferry" -> VehicleStyle.FERRY
+        "funicular" -> VehicleStyle.FUNICULAR
+        "metro" -> when (v.line.trim().uppercase()) {
+            "A" -> VehicleStyle.METRO_A
+            "B" -> VehicleStyle.METRO_B
+            "C" -> VehicleStyle.METRO_C
+            else -> VehicleStyle.METRO
+        }
+        else -> if (v.train) VehicleStyle.TRAIN else if (v.delay > 3) VehicleStyle.BUS_LATE else VehicleStyle.BUS
+    }
+}
+
+/** Druh dopravy pro filtr mapy. Trolejbusy (a přívozy, lanovka) patří k autobusům. */
+internal enum class MapCategory(@androidx.annotation.StringRes val labelRes: Int, val style: VehicleStyle) {
+    BUS(R.string.mode_bus, VehicleStyle.BUS),
+    TRAM(R.string.mode_tram, VehicleStyle.TRAM),
+    METRO(R.string.mode_metro, VehicleStyle.METRO_A),
+    TRAIN(R.string.mode_train, VehicleStyle.TRAIN),
+}
+
+internal fun mapCategory(v: Vehicle): MapCategory = when (vehicleStyle(v)) {
+    VehicleStyle.TRAIN -> MapCategory.TRAIN
+    VehicleStyle.TRAM -> MapCategory.TRAM
+    VehicleStyle.METRO, VehicleStyle.METRO_A, VehicleStyle.METRO_B, VehicleStyle.METRO_C -> MapCategory.METRO
+    else -> MapCategory.BUS
+}
+
+/** Barva markeru vozidla (stejná pro štítek i pro tečku při oddálení); fáze zvýraznění mají vlastní barvy. */
+internal fun vehicleColor(style: VehicleStyle, phase: Int = 0): Int = when (phase) {
+    1 -> 0xFFFFD54F.toInt()
+    2 -> 0xFFFF6D00.toInt()
+    else -> style.color
 }
 
 // ───────────── malé tečky pro oddálenou mapu (bez čísla linky) ─────────────
 
-private val dotBitmapCache = ConcurrentHashMap<Int, Bitmap>()
+private val dotBitmapCache = ConcurrentHashMap<Long, Bitmap>()
 
-/** Malá tečka (cca 9 dp) v barvě vozidla s jemným světlým okrajem, aby šla vidět na tmavé i světlé mapě. */
-internal fun dotBitmap(ctx: Context, color: Int): Bitmap = dotBitmapCache.getOrPut(color) {
-    val density = ctx.resources.displayMetrics.density
-    val size = (9 * density).toInt().coerceAtLeast(9)
-    val bmp = createBitmap(size, size)
-    val c = Canvas(bmp)
-    val r = size / 2f
-    c.drawCircle(r, r, r, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = 0xCCFFFFFF.toInt() })
-    c.drawCircle(r, r, r - 1.2f * density, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color })
-    bmp
-}
+/** Červená zpoždění (stejná jako u zpožděných autobusů), pro okraj tečky a odznak tramvají / metra. */
+internal const val LATE_COLOR = 0xFFD32F2F.toInt()
+
+/**
+ * Malá tečka (cca 9 dp) v barvě vozidla s jemným světlým okrajem, aby šla vidět na tmavé i světlé mapě.
+ * [late] (tramvaj / metro se zpožděním): okraj červený a silnější.
+ */
+internal fun dotBitmap(ctx: Context, color: Int, late: Boolean = false): Bitmap =
+    dotBitmapCache.getOrPut((color.toLong() shl 1) or (if (late) 1L else 0L)) {
+        val density = ctx.resources.displayMetrics.density
+        val size = ((if (late) 11 else 9) * density).toInt().coerceAtLeast(9)
+        val bmp = createBitmap(size, size)
+        val c = Canvas(bmp)
+        val r = size / 2f
+        c.drawCircle(r, r, r, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = if (late) LATE_COLOR else 0xCCFFFFFF.toInt() })
+        c.drawCircle(r, r, r - (if (late) 2.2f else 1.2f) * density, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color })
+        bmp
+    }
 
 /** phase: 0 = normální, 1 = zvýraznění A (žlutá, velká), 2 = zvýraznění B (oranžová, menší). */
 private fun createLineMarkerDrawable(
-    context: Context, line: String, isTrain: Boolean, delay: Int, phase: Int
+    context: Context, line: String, vs: VehicleStyle, phase: Int, late: Int = 0
 ): BitmapDrawable {
-    val key = "$line:$isTrain:${delay > 3}:$phase"
+    val key = labelKey(line, vs, phase, late)
     markerIconCache[key]?.let { return it }
 
     val density = context.resources.displayMetrics.density
@@ -76,7 +150,7 @@ private fun createLineMarkerDrawable(
     val strokePx = if (highlighted) 2.5f * density else 0f
 
     val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = if (phase == 1) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+        color = if (phase == 1 || (phase == 0 && vs.darkText)) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
         textSize = textSizeDp * density
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         textAlign = Paint.Align.CENTER
@@ -99,21 +173,30 @@ private fun createLineMarkerDrawable(
     }
     val textWidthPx = textPaint.measureText(displayLine)
 
-    val widthPx = maxOf((36 * density).toInt(), (textWidthPx + effectivePadDp * density).toInt())
-    val heightPx = (heightDp * density).toInt()
+    val pillWidthPx = maxOf((36 * density).toInt(), (textWidthPx + effectivePadDp * density).toInt())
+    val pillHeightPx = (heightDp * density).toInt()
+
+    // zpožděná tramvaj / metro: červený rámeček KOLEM štítku (bitmapa se o něj zvětší, barevná část zůstane stejně velká)
+    val lateRing = if (late > 0 && !highlighted) (4f * density).toInt() else 0
+    val widthPx = pillWidthPx + 2 * lateRing
+    val heightPx = pillHeightPx + 2 * lateRing
 
     val bitmap = createBitmap(widthPx, heightPx)
     val canvas = Canvas(bitmap)
 
-    val bgColor = vehicleColor(isTrain, delay, phase)
+    val bgColor = vehicleColor(vs, phase)
 
     val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = bgColor
         style = Paint.Style.FILL
     }
     val inset = strokePx / 2f
-    val rect = RectF(inset, inset, widthPx - inset, heightPx - inset)
+    val rect = RectF(lateRing + inset, lateRing + inset, lateRing + pillWidthPx - inset, lateRing + pillHeightPx - inset)
     val radius = rect.height() / 2f
+    if (lateRing > 0) {
+        val outer = RectF(0f, 0f, widthPx.toFloat(), heightPx.toFloat())
+        canvas.drawRoundRect(outer, outer.height() / 2f, outer.height() / 2f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = LATE_COLOR })
+    }
     canvas.drawRoundRect(rect, radius, radius, bgPaint)
 
     if (highlighted) {
@@ -211,14 +294,17 @@ internal fun arrowSizeForZoom(zoom: Float): Float = when {
     else -> 0.3f
 }
 
-internal fun arrowSpacingForZoom(zoom: Float): Float = when {
-    zoom >= 17f -> 180f
-    zoom >= 15f -> 300f
-    zoom >= 13f -> 500f
-    zoom >= 11f -> 900f
-    zoom >= 9f -> 1600f
-    else -> 3000f
+/**
+ * Rozestup šipek na trase v metrech tak, aby byly na obrazovce zhruba [ARROW_GAP_DP] od sebe při jakémkoli zoomu
+ * (dřív pevné metry: při oddálení se šipky slévaly, na zoomu 9 byly ~8 dp od sebe). Počítá se z celé úrovně zoomu,
+ * takže se mění jen na hranicích úrovní (žádná rekompozice při plynulém zoomu).
+ */
+internal fun arrowSpacingForZoom(zoom: Float): Float {
+    val metersPerDp = 156_543.03 * kotlin.math.cos(Math.toRadians(50.0)) / Math.pow(2.0, kotlin.math.floor(zoom.toDouble()))
+    return (ARROW_GAP_DP * metersPerDp).toFloat().coerceAtLeast(150f)
 }
+
+private const val ARROW_GAP_DP = 90.0
 
 /** Šipky podél trasy v lineárním čase (kumulativní vzdálenosti + binární vyhledávání). */
 internal fun createRouteArrows(route: List<LatLng>, spacingMeters: Float = 300f): List<RouteArrow> {

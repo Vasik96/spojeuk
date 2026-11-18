@@ -7,6 +7,13 @@ import kotlin.math.hypot
 
 // ───────────────────────── přiřazení vozu ke spoji ─────────────────────────
 
+/**
+ * Jak daleko od zastávky spoje vůz ještě smí být. Stanice metra jsou ~1 km od sebe (mezi nimi bývá souprava
+ * přes 400 m od nejbližší), meziměstské autobusy jezdí dlouhé úseky bez zastávek.
+ */
+internal fun maxStopDistance(v: Vehicle): Double =
+    if (v.mode == "metro" || (v.source == SourceIds.PID && isMetroLine(v.line))) 1_500.0 else 700.0
+
 data class TripMatchResult(val tid: Int, val exact: Boolean)
 
 /** Strategie, jak z polohy vozu zjistit spoj z jízdního řádu. Každý zdroj si vybírá svou. */
@@ -74,7 +81,13 @@ object TripEnricher {
     private fun adoptsTimetableLine(v: Vehicle) = v.source == SourceIds.DUK || v.source == SourceIds.TRAIN || v.source == SourceIds.PID
 
     fun enrich(v: Vehicle, tt: Timetable): Vehicle {
-        val m = match(v, tt) ?: return v
+        val m = match(v, tt)
+        if (m == null) {
+            // vlak, který teď podle JŘ nejede (souprava stojí po oběhu, DÚK posílá vlastní číslo linky "905"):
+            // aspoň skutečná linka podle čísla vlaku (U5, S88) místo "905" / "Os 19024"
+            if (v.train && adoptsTimetableLine(v)) tt.trainLine(v.cis)?.let { return v.copy(line = it) }
+            return v
+        }
         val trip = tt.trips[m.tid] ?: return v
         var out = v.copy(tid = m.tid, tripMatch = if (m.exact) TripMatch.EXACT else TripMatch.HEURISTIC)
         if (!m.exact) out = out.copy(cis = trip.cis.ifBlank { v.cis }, trip = trip.num.ifBlank { v.trip })
@@ -149,6 +162,7 @@ class TripLocator(private val tt: Timetable) : TripProgress {
     fun matchByPosition(v: Vehicle, agencyKeywords: List<String>): Int? {
         val now = nowPrague()
         val wantedHead = foldText(v.destination)
+        val maxDist = maxStopDistance(v)
         var best: Int? = null
         var bestScore = SCORE_LIMIT
         for (daysBack in 0L..1L) {
@@ -158,24 +172,39 @@ class TripLocator(private val tt: Timetable) : TripProgress {
             for (tid in tt.tripsOfLine(v.line, agencyKeywords)) {
                 val trip = tt.trips[tid] ?: continue
                 if (trip.svc !in active || rel < trip.t0 - 900 || rel > trip.t1 + 900) continue
-                val score = scoreTrip(v, tid, trip, rel, wantedHead) ?: continue
+                val score = scoreTrip(v, tid, trip, rel, wantedHead, maxDist) ?: continue
                 if (score < bestScore) { best = tid; bestScore = score }
             }
         }
         return best
     }
 
-    private fun scoreTrip(v: Vehicle, tid: Int, trip: DbTrip, rel: Double, wantedHead: String): Double? {
+    private fun scoreTrip(v: Vehicle, tid: Int, trip: DbTrip, rel: Double, wantedHead: String, maxDist: Double): Double? {
         val times = tt.tripTimes(tid) ?: return null
+        // Vzdálenost k ÚSEKU mezi dvěma po sobě jdoucími zastávkami a čas interpolovaný po něm (ne jen k zastávkám):
+        // vůz uprostřed dlouhého úseku (AE Dejvická → Letiště, příměstské linky) je od zastávek daleko, ale na trase.
         var score = Double.MAX_VALUE
         var legHeading: Double? = null
-        for (i in times.stops.indices) {
-            val s = tt.stops[times.stops[i]] ?: continue
-            if (!s.hasCoords) continue
-            val d = Geo.distanceM(v.lat, v.lng, s.lat, s.lng)
-            if (d > MAX_STOP_DIST_M) continue
-            val c = d + 0.5 * abs(times.dep[i] - rel)
-            if (c < score) { score = c; legHeading = headingAt(times.stops, i) }
+        val k = cos(Math.toRadians(v.lat)) * Geo.M_PER_DEG_LNG
+        val px = v.lng * k
+        val py = v.lat * Geo.M_PER_DEG_LAT
+        var prev = -1
+        for (j in times.stops.indices) {
+            val b = tt.stops[times.stops[j]] ?: continue
+            if (!b.hasCoords) continue
+            val i = prev
+            prev = j
+            if (i < 0) continue
+            val a = tt.stops[times.stops[i]]!!
+            val ax = a.lng * k; val ay = a.lat * Geo.M_PER_DEG_LAT
+            val dx = b.lng * k - ax; val dy = b.lat * Geo.M_PER_DEG_LAT - ay
+            val len2 = dx * dx + dy * dy
+            val f = if (len2 < 1e-9) 0.0 else (((px - ax) * dx + (py - ay) * dy) / len2).coerceIn(0.0, 1.0)
+            val d = hypot(px - ax - dx * f, py - ay - dy * f)
+            if (d > maxDist) continue
+            val t = times.dep[i] + (times.arr[j] - times.dep[i]) * f
+            val c = d + 0.5 * abs(t - rel)
+            if (c < score) { score = c; legHeading = Geo.bearingDeg(a.lat, a.lng, b.lat, b.lng) }
         }
         if (score == Double.MAX_VALUE) return null
 
@@ -202,17 +231,8 @@ class TripLocator(private val tt: Timetable) : TripProgress {
         return score
     }
 
-    private fun headingAt(ids: IntArray, i: Int): Double? {
-        val j = if (i + 1 < ids.size) i else i - 1
-        if (j < 0) return null
-        val a = tt.stops[ids[j]]
-        val b = tt.stops[ids[j + 1]]
-        if (a == null || b == null || !a.hasCoords || !b.hasCoords) return null
-        return Geo.bearingDeg(a.lat, a.lng, b.lat, b.lng)
-    }
-
     /** Záloha pro vozy bez použitelného cis: dnešní spoj stejné linky vedoucí nejblíž vozu. */
-    fun nearestOnLine(line: String, lat: Double, lng: Double): Int? {
+    fun nearestOnLine(line: String, lat: Double, lng: Double, maxDist: Double = DEFAULT_STOP_DIST_M): Int? {
         val now = nowPrague()
         val today = now.toLocalDate()
         val rel = secondsSinceMidnight(today, now)
@@ -229,11 +249,11 @@ class TripLocator(private val tt: Timetable) : TripProgress {
                 if (d < bestDist) { bestDist = d; best = tid }
             }
         }
-        return if (bestDist <= MAX_STOP_DIST_M) best else null
+        return if (bestDist <= maxDist) best else null
     }
 
     private companion object {
         const val SCORE_LIMIT = 800.0
-        const val MAX_STOP_DIST_M = 400.0
+        const val DEFAULT_STOP_DIST_M = 700.0
     }
 }

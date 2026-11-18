@@ -2,6 +2,7 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.ui.res.stringResource
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
@@ -117,7 +118,7 @@ internal fun VehicleDetailBottomSheet(
                 .padding(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text("Informace o spoji:", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(stringResource(R.string.vd_trip_info), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Surface(
@@ -139,18 +140,27 @@ internal fun VehicleDetailBottomSheet(
             Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                // Bez čísla vozu (metro PID ho nehlásí): server vůz sleduje podle spoje, uid "gtrip:<GTFS spoj>"
+                val tripRef = vehicle.serverUid.takeIf { it.startsWith("gtrip:") }?.removePrefix("gtrip:")
                 Text(
-                    if (vehicle.id != 0) {
-                        "ID vozidla: ${vehicle.source}:${vehicle.id}"
-                    } else {
-                        "ID vozidla: není dostupné"
+                    when {
+                        vehicle.id != 0 -> stringResource(R.string.vd_vehicle_id, "${vehicle.source}:${vehicle.id}")
+                        tripRef != null -> stringResource(R.string.vd_trip_id, tripRef)
+                        else -> stringResource(R.string.vd_vehicle_id_na)
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (vehicle.id == 0 && vehicleStyle(vehicle).name.startsWith("METRO")) {
+                    Text(
+                        stringResource(R.string.vd_metro_no_set),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
 
                 Text(
-                    "Zdroj polohy: ${api.sourceName(vehicle.source)}",
+                    stringResource(R.string.vd_source, api.sourceName(vehicle.source)),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -185,12 +195,14 @@ internal fun VehicleDetailBottomSheet(
                                 appState.journeyStops = null
                                 onDismiss()
                             } else {
-                                android.widget.Toast.makeText(ctx, "Trasu se nepodařilo určit", android.widget.Toast.LENGTH_SHORT).show()
+                                android.widget.Toast.makeText(ctx, tr(R.string.route_not_found), android.widget.Toast.LENGTH_SHORT).show()
                             }
                         } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                             throw e
                         } catch (e: Exception) {
                             android.util.Log.w("VehicleDetailSheet", "Chyba při načítání trasy: ${e.message}")
+                            // dřív se chyba jen zalogovala a tlačítko "nic neudělalo"
+                            android.widget.Toast.makeText(ctx, tr(R.string.route_not_found), android.widget.Toast.LENGTH_SHORT).show()
                         } finally {
                             appState.routeLoading = false
                         }
@@ -213,9 +225,9 @@ internal fun VehicleDetailBottomSheet(
                         if (loading) {
                             Wavy(20.dp, color = MaterialTheme.colorScheme.primary)
                             Spacer(Modifier.width(8.dp))
-                            Text("Načítám trasu…")
+                            Text(stringResource(R.string.vd_loading_route))
                         } else {
-                            Text("Zobrazit trasu spoje")
+                            Text(stringResource(R.string.vd_show_route))
                         }
                     }
                 }
@@ -224,8 +236,8 @@ internal fun VehicleDetailBottomSheet(
             HorizontalDivider()
 
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Zpoždění:", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                val delayText = if (vehicle.delay != 0) "${vehicle.delay} min" else "Včas (0 min)"
+                Text(stringResource(R.string.vd_delay), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                val delayText = if (vehicle.delay != 0) stringResource(R.string.vd_delay_min, vehicle.delay) else stringResource(R.string.vd_on_time)
                 val delayBg = if (vehicle.delay > 3) Color(0xFFC62828) else Color(0xFF00838F)
                 AnimatedContent(
                     targetState = delayText to delayBg,
@@ -246,7 +258,7 @@ internal fun VehicleDetailBottomSheet(
             ) {
                 tripInfo?.nextStop?.let {
                     Text(
-                        "Příští zastávka: $it",
+                        stringResource(R.string.vd_next_stop, it),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium
                     )
@@ -254,23 +266,23 @@ internal fun VehicleDetailBottomSheet(
 
                 tripInfo?.finalStop?.let {
                     Text(
-                        "Konečná zastávka: $it",
+                        stringResource(R.string.vd_final_stop, it),
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
             }
 
             if (vehicle.agency.isNotBlank()) {
-                Text("Dopravce: ${cleanAgencyName(vehicle.agency)}", style = MaterialTheme.typography.bodyMedium)
+                Text(stringResource(R.string.vd_operator, cleanAgencyName(vehicle.agency)), style = MaterialTheme.typography.bodyMedium)
             }
 
             if (vehicle.airConditioned == true || vehicle.accessible == true) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (vehicle.airConditioned == true) {
-                        FeatureChip(Icons.Default.AcUnit, "Klimatizace")
+                        FeatureChip(Icons.Default.AcUnit, stringResource(R.string.vd_ac))
                     }
                     if (vehicle.accessible == true) {
-                        FeatureChip(Icons.AutoMirrored.Filled.Accessible, "Bezbariérový")
+                        FeatureChip(Icons.AutoMirrored.Filled.Accessible, stringResource(R.string.vd_accessible))
                     }
                 }
             }

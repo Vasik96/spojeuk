@@ -2,6 +2,8 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.pluralStringResource
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
@@ -179,14 +181,13 @@ private const val MORE_PAGE = 6
 
 private const val WALK_MAX_MIN = 20
 
-private val DEPART_FMT = DateTimeFormatter.ofPattern("EEE d. M.", java.util.Locale.forLanguageTag("cs"))
 
 private fun departChipLabel(dt: LocalDateTime): String {
     val today = todayPrague()
     val day = when (dt.toLocalDate()) {
-        today -> "Dnes"
-        today.plusDays(1) -> "Zítra"
-        else -> dt.format(DEPART_FMT)
+        today -> tr(R.string.day_today)
+        today.plusDays(1) -> tr(R.string.day_tomorrow)
+        else -> dt.format(DateTimeFormatter.ofPattern(tr(R.string.date_short_pattern), I18n.locale()))
     }
     return "$day ${dt.format(DateTimeFormatter.ofPattern("HH:mm"))}"
 }
@@ -342,7 +343,7 @@ internal fun SearchScreen(
             val cands = runCatching { api.nearestCandidates(lat, lng) }.getOrNull().orEmpty()
             if (cands.isEmpty()) {
                 locatingTarget = null
-                toast("Nejbližší zastávku se nepodařilo najít")
+                toast(tr(R.string.search_nearest_not_found))
                 return@launch
             }
 
@@ -353,7 +354,7 @@ internal fun SearchScreen(
             locatingTarget = null
             val picked = appState.stops.firstOrNull { it.name == stop.name } ?: stop
             onPick(picked)
-            toast("Nejbližší zastávka: ${splitStopName(picked.name).first} (${fmtDist(dist)})")
+            toast(tr(R.string.search_nearest_found, splitStopName(picked.name).first, fmtDist(dist)))
         }
     }
 
@@ -367,7 +368,7 @@ internal fun SearchScreen(
         }
         requestFix(context, FIX_MAX_AGE_MS) { loc ->
             if (loc != null) resolveNearest(loc.latitude, loc.longitude, target, onPick)
-            else { locatingTarget = null; toast("Polohu se nepodařilo zjistit") }
+            else { locatingTarget = null; toast(tr(R.string.search_location_failed)) }
         }
     }
 
@@ -379,7 +380,7 @@ internal fun SearchScreen(
         val pending = pendingLocation
         pendingLocation = null
         if (granted && pending != null) fetchNearest(pending.first, pending.second)
-        else toast("Bez oprávnění k poloze nelze najít nejbližší zastávku")
+        else toast(tr(R.string.search_no_location_permission))
     }
 
     fun useMyLocation(target: String, onPick: (Stop) -> Unit) {
@@ -562,7 +563,7 @@ internal fun SearchScreen(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (appState.search === s) appState.searchError = "Hledání selhalo: ${e.message}"
+                if (appState.search === s) appState.searchError = tr(R.string.search_failed, e.message.orEmpty())
             } finally {
                 withContext(NonCancellable) {
                     if (appState.search === s) appState.searchLoading = false
@@ -605,7 +606,7 @@ internal fun SearchScreen(
                 throw e
             } catch (e: Exception) {
                 if (appState.search === s) {
-                    appState.searchError = "Obnovení selhalo: ${e.message}"
+                    appState.searchError = tr(R.string.search_refresh_failed, e.message.orEmpty())
                 }
             } finally {
                 withContext(NonCancellable) {
@@ -644,7 +645,7 @@ internal fun SearchScreen(
                 throw e
             } catch (e: Exception) {
                 if (appState.search === s) {
-                    appState.searchError = "Načtení dalších spojů selhalo: ${e.message}"
+                    appState.searchError = tr(R.string.search_more_failed, e.message.orEmpty())
                     appState.loadMoreFailed = true
                 }
             } finally {
@@ -696,7 +697,7 @@ internal fun SearchScreen(
             } catch (e: Exception) {
                 if (appState.search === s) {
                     appState.searchError =
-                        "Načtení dřívějších spojů selhalo: ${e.message}"
+                        tr(R.string.search_earlier_failed, e.message.orEmpty())
                 }
             } finally {
                 withContext(NonCancellable) {
@@ -807,9 +808,9 @@ internal fun SearchScreen(
                             showTimePicker = true
                         }
                     }
-                ) { Text("Další") }
+                ) { Text(stringResource(R.string.common_next)) }
             },
-            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("Zrušit") } }
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text(stringResource(R.string.common_cancel)) } }
         ) {
             DatePicker(state = dateState)
         }
@@ -824,7 +825,7 @@ internal fun SearchScreen(
         )
         AlertDialog(
             onDismissRequest = { showTimePicker = false },
-            title = { Text("Čas odjezdu") },
+            title = { Text(stringResource(R.string.search_departure_time)) },
             text = {
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     TimePicker(state = timeState)
@@ -836,10 +837,10 @@ internal fun SearchScreen(
                     appState.departAt = LocalDateTime.of(d, LocalTime.of(timeState.hour, timeState.minute))
                     showTimePicker = false
                     if (appState.from != null && appState.to != null) runSearch()
-                }) { Text("Hotovo") }
+                }) { Text(stringResource(R.string.common_done)) }
             },
             dismissButton = {
-                TextButton(onClick = { showTimePicker = false; showDatePicker = true }) { Text("Zpět") }
+                TextButton(onClick = { showTimePicker = false; showDatePicker = true }) { Text(stringResource(R.string.common_back)) }
             }
         )
     }
@@ -857,7 +858,7 @@ internal fun SearchScreen(
         ) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 StopField(
-                    label = "Odkud",
+                    label = stringResource(R.string.search_from),
                     externalText = { appState.fromQuery },
                     onTextChange = { t ->
                         appState.fromQuery = t
@@ -891,7 +892,7 @@ internal fun SearchScreen(
                     }) {
                         Icon(
                             Icons.Default.SwapVert,
-                            contentDescription = "Prohodit zastávky",
+                            contentDescription = stringResource(R.string.search_swap),
                             modifier = Modifier.graphicsLayer { rotationZ = animatedSwapRotation }
                         )
                     }
@@ -899,7 +900,7 @@ internal fun SearchScreen(
                 }
 
                 StopField(
-                    label = "Kam",
+                    label = stringResource(R.string.search_to),
                     externalText = { appState.toQuery },
                     onTextChange = { t ->
                         appState.toQuery = t
@@ -960,13 +961,13 @@ internal fun SearchScreen(
                                 if (appState.from != null && appState.to != null && appState.searched) runSearch()
                             }
                         },
-                        label = { Text("Teď") },
+                        label = { Text(stringResource(R.string.search_now)) },
                         leadingIcon = { Icon(Icons.Default.Schedule, null, Modifier.size(18.dp)) }
                     )
                     FilterChip(
                         selected = appState.departAt != null,
                         onClick = { showDatePicker = true },
-                        label = { Text(appState.departAt?.let { departChipLabel(it) } ?: "Vybrat datum a čas") },
+                        label = { Text(appState.departAt?.let { departChipLabel(it) } ?: stringResource(R.string.search_pick_datetime)) },
                         leadingIcon = { Icon(Icons.Default.CalendarMonth, null, Modifier.size(18.dp)) }
                     )
                 }
@@ -1003,7 +1004,7 @@ internal fun SearchScreen(
                                 Icon(Icons.Default.Search, contentDescription = null)
                             }
                             Spacer(Modifier.width(8.dp))
-                            Text(if (loading) "Hledám spoje…" else "Najít spojení")
+                            Text(if (loading) stringResource(R.string.search_searching) else stringResource(R.string.search_find))
                         }
                     }
                 }
@@ -1016,7 +1017,7 @@ internal fun SearchScreen(
     val resultsHeader: @Composable () -> Unit = {
         if (appState.searched && !appState.searchLoading) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Výsledky", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.search_results), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                 if (appState.hasEarlier) {
                     TextButton(
                         onClick = { loadEarlier() },
@@ -1025,7 +1026,7 @@ internal fun SearchScreen(
                         if (appState.loadingEarlier) {
                             Wavy(24.dp)
                             Spacer(Modifier.width(4.dp))
-                            Text("Načítám…")
+                            Text(stringResource(R.string.common_loading))
                         } else {
                             Icon(
                                 Icons.Default.ArrowUpward,
@@ -1033,12 +1034,12 @@ internal fun SearchScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(Modifier.width(4.dp))
-                            Text("Dřívější")
+                            Text(stringResource(R.string.search_earlier))
                         }
                     }
                 }
                 Text(
-                    "${appState.journeys.size} nalezeno",
+                    stringResource(R.string.search_found, appState.journeys.size),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1088,8 +1089,8 @@ internal fun SearchScreen(
                             },
                         tint = MaterialTheme.colorScheme.primary
                     )
-                    Text("Kam dnes vyrazíš?", style = MaterialTheme.typography.headlineSmall)
-                    Text("Vyber výchozí a cílovou zastávku.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(stringResource(R.string.search_empty_title), style = MaterialTheme.typography.headlineSmall)
+                    Text(stringResource(R.string.search_empty_text), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         } else if (appState.searchLoading && appState.journeys.isEmpty()) {
@@ -1129,13 +1130,13 @@ internal fun SearchScreen(
                         Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
                             when {
                                 appState.loadMoreFailed -> TextButton(onClick = { appState.loadMoreFailed = false }) {
-                                    Text("Načíst další – zkusit znovu")
+                                    Text(stringResource(R.string.search_load_more_retry))
                                 }
                                 appState.loadingMore -> Wavy(32.dp)
                                 appState.journeys.isEmpty() && !appState.hasMore && !appState.searchLoading ->
-                                    Text("Nenašel se žádný spoj do konce dne.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(stringResource(R.string.search_none_until_end_of_day), color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 !appState.hasMore ->
-                                    Text("To je vše na dnes.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(stringResource(R.string.search_all_for_today), color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -1298,7 +1299,7 @@ private fun StopField(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                imageVector = if (label == "Odkud") Icons.Default.TripOrigin else Icons.Default.Place,
+                imageVector = if (label == stringResource(R.string.search_from)) Icons.Default.TripOrigin else Icons.Default.Place,
                 contentDescription = null,
                 tint = colors.primary
             )
@@ -1329,7 +1330,7 @@ private fun StopField(
                         )
                     } else {
                         Text(
-                            "Vyber zastávku",
+                            stringResource(R.string.search_pick_stop),
                             style = MaterialTheme.typography.titleMedium,
                             color = colors.onSurfaceVariant.copy(alpha = 0.7f)
                         )
@@ -1348,7 +1349,7 @@ private fun StopField(
                 exit = fadeOut(tween(100)) + scaleOut(targetScale = 0.8f)
             ) {
                 IconButton(onClick = { onTextChange("") }) {
-                    Icon(Icons.Default.Clear, "Vymazat")
+                    Icon(Icons.Default.Clear, stringResource(R.string.common_clear))
                 }
             }
         }
@@ -1467,7 +1468,7 @@ private fun StopPickerSheet(
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                placeholder = { Text("Hledat zastávku…") },
+                placeholder = { Text(stringResource(R.string.search_stop_placeholder)) },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
                     unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -1477,7 +1478,7 @@ private fun StopPickerSheet(
                 trailingIcon = {
                     if (query.isNotEmpty()) {
                         IconButton(onClick = { query = "" }) {
-                            Icon(Icons.Default.Clear, "Vymazat")
+                            Icon(Icons.Default.Clear, stringResource(R.string.common_clear))
                         }
                     }
                 },
@@ -1503,9 +1504,9 @@ private fun StopPickerSheet(
                             },
                             text = {
                                 Column {
-                                    Text("Moje poloha", fontWeight = FontWeight.Medium)
+                                    Text(stringResource(R.string.my_location), fontWeight = FontWeight.Medium)
                                     Text(
-                                        "Najít nejbližší zastávku",
+                                        stringResource(R.string.search_find_nearest),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -1517,7 +1518,7 @@ private fun StopPickerSheet(
                     if (options.isNotEmpty()) {
                         item(key = "header") {
                             Text(
-                                "Často používané zastávky",
+                                stringResource(R.string.search_frequent_stops),
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.primary,
@@ -1553,7 +1554,7 @@ private fun StopPickerSheet(
                                 ) {
                                     Icon(
                                         Icons.Default.Close,
-                                        contentDescription = "Odebrat z používaných",
+                                        contentDescription = stringResource(R.string.search_remove_frequent),
                                         modifier = Modifier.size(18.dp)
                                     )
                                 }
@@ -1573,7 +1574,7 @@ private fun StopPickerSheet(
                 if (options.isEmpty() && query.isNotBlank()) {
                     item(key = "empty") {
                         Text(
-                            "Nic nenalezeno",
+                            stringResource(R.string.search_nothing_found),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(20.dp)
                         )
@@ -1629,7 +1630,7 @@ private fun JourneyCard(
 
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowForward,
-                            contentDescription = "Příjezd",
+                            contentDescription = stringResource(R.string.search_arrival),
                             modifier = Modifier.size(22.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1670,7 +1671,7 @@ private fun JourneyCard(
 
 
                         Text(
-                            "${j.durationMinutes} min jízdy",
+                            stringResource(R.string.search_ride_minutes, j.durationMinutes),
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant
                         )
@@ -1681,12 +1682,12 @@ private fun JourneyCard(
                                 j.delay > 3 -> Triple(
                                     colors.errorContainer,
                                     colors.onErrorContainer,
-                                    "Zpoždění ${j.delay} min"
+                                    tr(R.string.search_delay_min, j.delay)
                                 )
                                 else -> Triple(
                                     colors.tertiaryContainer,
                                     colors.onTertiaryContainer,
-                                    "Zpoždění ${j.delay} min"
+                                    tr(R.string.search_delay_min, j.delay)
                                 )
                             }
 
@@ -1722,7 +1723,7 @@ private fun JourneyCard(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(Modifier.width(4.dp))
-                    Text("Mapa")
+                    Text(stringResource(R.string.nav_map))
                 }
             }
 
@@ -1755,7 +1756,7 @@ private fun JourneyCard(
                 j.lines.drop(1).forEach { extraLine ->
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowForward,
-                        contentDescription = "Přestup",
+                        contentDescription = stringResource(R.string.search_transfer),
                         modifier = Modifier.size(20.dp),
                         tint = colors.onSurfaceVariant
                     )
@@ -1781,8 +1782,8 @@ private fun JourneyCard(
             // 3. Chůze k zastávce
             val walkText = when {
                 j.boardWalkMin != null ->
-                    "${j.boardWalkMin} min pěšky na ${splitStopName(j.boardStopName.orEmpty()).first}"
-                walk != null -> "${walk.minutes} min chůze k zastávce · ${fmtDist(walk.distanceM)}"
+                    tr(R.string.search_walk_to_board, j.boardWalkMin, splitStopName(j.boardStopName.orEmpty()).first)
+                walk != null -> tr(R.string.search_walk_to_stop, walk.minutes, fmtDist(walk.distanceM))
                 else -> null
             }
             if (walkText != null) {
@@ -1817,7 +1818,7 @@ private fun JourneyCard(
                     verticalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     Text(
-                        "Trasa spoje",
+                        stringResource(R.string.search_route),
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant,
                         fontWeight = FontWeight.Bold
@@ -1876,7 +1877,7 @@ private fun JourneyCard(
             ) {
                 if (j.isTransfer) {
                     j.transferList.forEachIndexed { idx, t ->
-                        val prefix = if (j.transferList.size > 1) "${idx + 1}. přestup" else "Přestup"
+                        val prefix = if (j.transferList.size > 1) tr(R.string.search_transfer_n, idx + 1) else tr(R.string.search_transfer)
                         val at = t.at.takeIf { it.isNotBlank() }
                         if (at != null && at.contains("→")) {
                             val parts = at.split("→", limit = 2)
@@ -1890,7 +1891,7 @@ private fun JourneyCard(
                                 )
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                                    contentDescription = "do",
+                                    contentDescription = stringResource(R.string.search_to_arrow),
                                     modifier = Modifier.size(14.dp),
                                     tint = colors.onSurface
                                 )
@@ -1901,27 +1902,27 @@ private fun JourneyCard(
                             }
                         } else {
                             Text(
-                                "$prefix: ${at ?: "mezi spoji"}",
+                                "$prefix: ${at ?: tr(R.string.search_between_trips)}",
                                 style = MaterialTheme.typography.bodyMedium
                             )
                         }
                         Text(
-                            "čekání ${t.waitMin} min" +
-                                    (t.walkMin?.let { " · $it min pěšky" } ?: ""),
+                            tr(R.string.search_wait, t.waitMin) +
+                                    (t.walkMin?.let { tr(R.string.search_wait_walk, it) } ?: ""),
                             style = MaterialTheme.typography.bodyMedium,
                             color = colors.onSurfaceVariant
                         )
                     }
                 } else {
                     Text(
-                        "${j.stopsCount ?: "—"} zastávek · přímý spoj",
+                        j.stopsCount?.let { pluralStringResource(R.plurals.search_direct_stops, it, it) } ?: stringResource(R.string.search_direct_unknown),
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
 
                 if (j.destination.isNotBlank()) {
                     Text(
-                        "Směr ${splitStopName(j.destination).first}",
+                        stringResource(R.string.search_direction, splitStopName(j.destination).first),
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant
                     )

@@ -2,6 +2,17 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.material3.Checkbox
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Subway
+import androidx.compose.material.icons.filled.Tram
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.pluralStringResource
 import com.vasik96.spojeuk.BuildConfig
 
 import android.Manifest
@@ -213,11 +224,11 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     appState.updateVehicles(it)
                     appState.heldCount = api.heldCount()
                     appState.vehicleSource = api.sourceLabel()
-                    appState.mapError = if (api.vehicleFetchFailing()) "Polohy vozidel se nepodařilo načíst" else null
+                    appState.mapError = if (api.vehicleFetchFailing()) tr(R.string.map_positions_failed) else null
                 }
                 .onFailure {
                     if (it is CancellationException) throw it
-                    appState.mapError = "Polohy vozidel se nepodařilo načíst"
+                    appState.mapError = tr(R.string.map_positions_failed)
                 }
             appState.vehiclesLoaded = true
             // při výpadku zkoušet častěji, ať se polohy vrátí hned, jak server / síť zase jede
@@ -327,7 +338,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             if (match.approximate) {
                 android.widget.Toast.makeText(
                     context,
-                    "ID spoje nenalezeno. Zobrazen nejbližší bus linky ${ref.line}, může být jiný.",
+                    tr(R.string.map_trip_id_not_found, ref.line),
                     android.widget.Toast.LENGTH_LONG
                 ).show()
             }
@@ -339,10 +350,10 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             appState.pulsePhase = 0
             val notYetDeparted = ref.departureTimeMillis?.let { it > System.currentTimeMillis() } == true
             val msg = when {
-                appState.mapError != null -> "Polohy vozidel se nepodařilo načíst"
-                isMetroLine(ref.line) -> "Metro nemá živou polohu, zobrazuji jen trasu"
-                notYetDeparted -> "Spoj ještě nevyjel, zobrazuji trasu"
-                else -> "Vozidlo tohoto spoje se na mapě nepodařilo najít, zobrazuji trasu"
+                appState.mapError != null -> tr(R.string.map_positions_failed)
+                isMetroLine(ref.line) -> tr(R.string.map_metro_no_live)
+                notYetDeparted -> tr(R.string.map_not_departed)
+                else -> tr(R.string.map_vehicle_not_found)
             }
             android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
             if (route.isNotEmpty()) {
@@ -382,16 +393,17 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     }
 
     val hideOthers = appState.hideOtherVehiclesOnMap
-    val mapMode = appState.mapModeFilter
+    val mapCats = appState.mapCategories
+    val allCats = mapCats.size == MapCategory.entries.size
     val activeVehicles: List<Pair<String, Vehicle>> = remember(
-        keyed, strictMode, hideOthers, locked, mapMode
+        keyed, strictMode, hideOthers, locked, mapCats
     ) {
         if (strictMode && hideOthers && locked != null) {
             val match = keyed.firstOrNull { it.second.uid == locked.uid }
             listOf(match ?: ("locked_${locked.uid}" to locked))
         } else {
             keyed.filter { (_, x) ->
-                mapMode.accepts(x.train) && (
+                (allCats || mapCategory(x) in mapCats) && (
                         x.source != SourceIds.TRAIN ||
                                 x.inUsteckyKraj()
                         )
@@ -446,7 +458,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                             proj.fromScreenLocation(android.graphics.Point(upPos.x.toInt(), upPos.y.toInt()))
                         }.getOrNull() ?: return@awaitEachGesture
                         val degPerDp = 360.0 / (256.0 * Math.pow(2.0, cameraPositionState.position.zoom.toDouble()))
-                        googleLayer.hitTest(ll.latitude, ll.longitude, degPerDp)?.let { appState.selectVehicle(it) }
+                        val hits = googleLayer.hitTest(ll.latitude, ll.longitude, degPerDp)
+                        if (hits.size == 1) appState.selectVehicle(hits[0])
+                        else if (hits.size > 1) appState.vehicleChoices = hits
                     }
                 },
                 cameraPositionState = cameraPositionState,
@@ -556,7 +570,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         // Mapy.cz vyžaduje uvedení zdroje dat (logo Mapy.cz viz poznámka v README)
         if (appState.mapProvider == MapProvider.MAPYCZ && BuildConfig.MAPYCZ_API_KEY.isNotBlank()) {
             Text(
-                "© Seznam.cz a.s. a další, © OpenStreetMap",
+                stringResource(R.string.map_mapy_attribution),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
@@ -571,6 +585,15 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         }
 
         var showHeldInfo by remember { mutableStateOf(false) }
+        var showCategoryFilter by remember { mutableStateOf(false) }
+
+        if (active && showCategoryFilter) {
+            CategoryFilterDialog(
+                selected = appState.mapCategories,
+                onChange = { appState.updateMapCategories(it) },
+                onDismiss = { showCategoryFilter = false }
+            )
+        }
 
         ElevatedCard(
             modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth(),
@@ -582,11 +605,11 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         Icon(Icons.Default.Map, null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("Mapa vozidel", style = MaterialTheme.typography.titleMedium)
+                            Text(stringResource(R.string.map_title), style = MaterialTheme.typography.titleMedium)
                             Text(
-                                if (!appState.vehiclesLoaded && appState.vehicles.isEmpty()) "Načítání poloh vozidel…"
-                                else if (mapMode == ModeFilter.ALL) "${appState.vehicles.size} poloh · aktualizace po 6s"
-                                else "${activeVehicles.size} z ${appState.vehicles.size} poloh · aktualizace po 6s",
+                                if (!appState.vehiclesLoaded && appState.vehicles.isEmpty()) stringResource(R.string.map_loading_positions)
+                                else if (allCats) pluralStringResource(R.plurals.map_positions_count, appState.vehicles.size, appState.vehicles.size)
+                                else pluralStringResource(R.plurals.map_positions_filtered, appState.vehicles.size, activeVehicles.size, appState.vehicles.size),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -603,13 +626,13 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         }
                         if (appState.routeLoading || (!appState.vehiclesLoaded && appState.vehicles.isEmpty())) { Wavy(24.dp); Spacer(Modifier.width(8.dp)) }
                         if (appState.mapError != null) {
-                            Text("Offline", color = MaterialTheme.colorScheme.error)
+                            Text(stringResource(R.string.map_offline), color = MaterialTheme.colorScheme.error)
                         }
                         //if (appState.heldCount > OUTAGE_MIN) {
                         IconButton(onClick = { showHeldInfo = true }) {
                             Icon(
                                 Icons.Default.Info,
-                                contentDescription = "Upozornění na zdroj dat",
+                                contentDescription = stringResource(R.string.map_source_info),
                             )
                         }
                         //}
@@ -628,34 +651,98 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         ),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    ModeFilter.entries.forEach { mode ->
-                        FilterChip(
-                            selected = appState.mapModeFilter == mode,
-                            onClick = { appState.mapModeFilter = mode },
-                            label = { Text(mode.label) },
-                            leadingIcon = when (mode) {
-                                ModeFilter.BUS -> ({ Icon(Icons.Default.DirectionsBus, null, Modifier.size(18.dp)) })
-                                ModeFilter.TRAIN -> ({ Icon(Icons.Default.Train, null, Modifier.size(18.dp)) })
-                                ModeFilter.ALL -> null
-                            }
-                        )
+                    // filtr druhů dopravy: jedno tlačítko se shrnutím, výběr v dialogu
+                    FilterChip(
+                        selected = !allCats,
+                        onClick = { showCategoryFilter = true },
+                        label = {
+                            Text(
+                                when {
+                                    allCats -> stringResource(R.string.map_filter_all)
+                                    mapCats.isEmpty() -> stringResource(R.string.map_filter_none)
+                                    else -> MapCategory.entries.filter { it in mapCats }.joinToString(", ") { tr(it.labelRes) }
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        leadingIcon = { Icon(Icons.Default.FilterList, null, Modifier.size(18.dp)) },
+                        trailingIcon = { Icon(Icons.Default.ArrowDropDown, null, Modifier.size(18.dp)) }
+                    )
+                    // barevné tečky: co je na mapě vidět
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        for (c in MapCategory.entries) if (c in mapCats) {
+                            Icon(
+                                categoryIcon(c), null,
+                                tint = Color(c.style.color),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }
+        }
+
+        // víc vozů pod jedním ťuknutím: výběr
+        if (active && appState.vehicleChoices.isNotEmpty()) {
+            AlertDialog(
+                onDismissRequest = { appState.vehicleChoices = emptyList() },
+                title = { Text(stringResource(R.string.map_pick_vehicle)) },
+                text = {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        for (v in appState.vehicleChoices) {
+                            val vs = vehicleStyle(v)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        appState.vehicleChoices = emptyList()
+                                        appState.selectVehicle(v)
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Text(
+                                    v.line,
+                                    color = if (vs.darkText) Color.Black else Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .background(Color(vehicleColor(vs)), RoundedCornerShape(50))
+                                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                                Text(
+                                    v.destination.ifBlank { cleanAgencyName(v.agency) },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { appState.vehicleChoices = emptyList() }) { Text(stringResource(R.string.common_cancel)) }
+                }
+            )
         }
 
         if (active && showHeldInfo) {
             AlertDialog(
                 onDismissRequest = { showHeldInfo = false },
                 icon = { Icon(Icons.Default.Info, null) },
-                title = { Text("Zdroje dat") },
+                title = { Text(stringResource(R.string.map_sources_title)) },
                 text = {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         Text(
-                            "Některé zdroje nemusí poskytovat aktuální polohu – ty starší jsou označené červeně. Přesné stáří dat najdete v detailu konkrétního vozidla."
+                            stringResource(R.string.map_sources_text)
                         )
                         Spacer(Modifier.height(12.dp))
-                        Text("Diagnostika spojení", style = MaterialTheme.typography.labelLarge)
+                        Text(stringResource(R.string.map_diagnostics), style = MaterialTheme.typography.labelLarge)
                         Text(
                             FeedDiag.text(),
                             style = MaterialTheme.typography.bodySmall,
@@ -664,7 +751,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { showHeldInfo = false }) { Text("Rozumím") }
+                    TextButton(onClick = { showHeldInfo = false }) { Text(stringResource(R.string.common_ok_understood)) }
                 }
             )
         }
@@ -691,7 +778,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     appState.walkRoute = null
                     appState.journeyWalks = emptyList()
                 }
-            ) { Icon(Icons.Default.Close, contentDescription = "Skrýt trasu") }
+            ) { Icon(Icons.Default.Close, contentDescription = stringResource(R.string.map_hide_route)) }
         }
 
         FloatingActionButton(
@@ -710,7 +797,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 }
             },
             modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
-        ) { Icon(Icons.Default.MyLocation, contentDescription = "Moje poloha") }
+        ) { Icon(Icons.Default.MyLocation, contentDescription = stringResource(R.string.my_location)) }
 
         AnimatedVisibility(
             visible = !isMapReady,
@@ -731,7 +818,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     ) {
                         Wavy(size = 48.dp, color = MaterialTheme.colorScheme.primary)
                         Text(
-                            text = "Načítání mapy…",
+                            text = stringResource(R.string.map_loading),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -847,7 +934,7 @@ private fun GoogleVehicleOverlay(
             val missing = layer.takeMissingLabels()
             if (missing.isNotEmpty()) {
                 withContext(Dispatchers.Default) {
-                    for (v in missing) prerenderMarker(context, v.line, v.train, v.delay, 0)
+                    for (v in missing) prerenderMarker(context, v.line, vehicleStyle(v), 0, lateMinutes(v))
                 }
             }
         }
@@ -905,9 +992,11 @@ private const val MAX_NEW_IMAGES_PER_PUSH = 10
 
 // popis vozidla pro vykreslení: ikona + řazení, přepočítá se jen při změně vozidel / zvýraznění
 private class VehicleDraw(val key: String, val v: Vehicle, val iconPhase: Int) {
-    val imgId = "veh|${v.line}|${v.train}|${v.delay > 3}|$iconPhase"
+    val style = vehicleStyle(v)
+    val late = lateMinutes(v)
+    val imgId = "veh|${v.line}|${style.name}|$iconPhase|$late"
     val sort = if (iconPhase != 0) 2 else 1
-    val colorKey = if (v.train) "b" else if (v.delay > 3) "r" else "g"
+    val colorKey = style.name
 }
 
 private const val VEH_DOT_LAYER = "vehicles-dots"
@@ -952,13 +1041,16 @@ private fun ensureVehicleLayer(style: Style) {
                 ),
                 PropertyFactory.circleColor(
                     Expression.match(
-                        Expression.get("k"), Expression.color(vehicleColor(false, 0)),
-                        Expression.stop("r", Expression.color(vehicleColor(false, 4))),
-                        Expression.stop("b", Expression.color(vehicleColor(true, 0)))
+                        Expression.get("k"), Expression.color(VehicleStyle.BUS.color),
+                        *VehicleStyle.entries.map { Expression.stop(it.name, Expression.color(it.color)) }.toTypedArray()
                     )
                 ),
                 PropertyFactory.circleOpacity(Expression.coalesce(Expression.get("opacity"), Expression.literal(1.0f))),
-                PropertyFactory.circleStrokeColor("#FFFFFF"),
+                // tramvaj / metro se zpožděním: červený okraj tečky
+                PropertyFactory.circleStrokeColor(
+                    Expression.match(Expression.get("late"), Expression.color(0xFFFFFFFF.toInt()),
+                        Expression.stop(1, Expression.color(LATE_COLOR)))
+                ),
                 PropertyFactory.circleStrokeWidth(1f),
                 PropertyFactory.circleStrokeOpacity(0.8f)
             ).withFilter(notHl).also { it.setMaxZoom(DOT_ZOOM_ML) }
@@ -1115,6 +1207,9 @@ private fun MapLibreScreenContent(
                         val radiusSq = (radiusPx * radiusPx).toDouble()
                         var clickedVehicle: Vehicle? = null
                         var minSq = Double.MAX_VALUE
+                        // vozy, jejichž ikona místo ťuknutí kryje (štítky přes sebe): nabídne se výběr
+                        val overlapSq = (14f * density).let { (it * it).toDouble() }
+                        val covering = ArrayList<Pair<Double, Vehicle>>()
 
                         for ((k, v) in latestVehicles) {
                             val pos = hub.positionOf(k) ?: LatLng(v.lat, v.lng)
@@ -1127,8 +1222,13 @@ private fun MapLibreScreenContent(
                                 minSq = distSq
                                 clickedVehicle = v
                             }
+                            if (distSq <= overlapSq) covering += distSq to v
                         }
 
+                        if (covering.size >= 2) {
+                            appState.vehicleChoices = covering.sortedBy { it.first }.map { it.second }.distinctBy { it.uid }
+                            return true
+                        }
                         if (clickedVehicle != null) {
                             appState.selectVehicle(clickedVehicle)
                             return true
@@ -1491,7 +1591,7 @@ private fun MapLibreScreenContent(
             if (missing.isNotEmpty()) {
                 val newBitmaps = withContext(Dispatchers.Default) {
                     missing.map { (imgId, d) ->
-                        val bmp = markerBitmap(context, d.v.line, d.v.train, d.v.delay, d.iconPhase)
+                        val bmp = markerBitmap(context, d.v.line, d.style, d.iconPhase, d.late)
                             .copy(Bitmap.Config.ARGB_8888, false).apply {
                                 setDensity(context.resources.displayMetrics.densityDpi)
                             }
@@ -1518,7 +1618,10 @@ private fun MapLibreScreenContent(
                         it.addNumberProperty("sort", d.sort)
                     }
                     if (hl) it.addNumberProperty("hl", 1)
-                    else if (dotMode) it.addStringProperty("k", d.colorKey)
+                    else if (dotMode) {
+                        it.addStringProperty("k", d.colorKey)
+                        if (d.late > 0) it.addNumberProperty("late", 1)
+                    }
                 }
             }
 
@@ -1604,16 +1707,74 @@ private fun splitSources(label: String): List<String> {
 }
 
 private fun sourceLabelText(label: String, normal: Color, bad: Color) = buildAnnotatedString {
-    withStyle(SpanStyle(color = normal)) { append("Zdroj: ") }
+    withStyle(SpanStyle(color = normal)) { append(tr(R.string.source_prefix)) }
+    val staleSuffix = tr(R.string.source_stale_suffix).trim()
     if (label == SourceLabel.NONE) {
         withStyle(SpanStyle(color = bad)) { append(label) }
         return@buildAnnotatedString
     }
     splitSources(label).forEachIndexed { i, part ->
         if (i > 0) withStyle(SpanStyle(color = normal)) { append(", ") }
-        val stale = "zastaral" in part.lowercase()
+        val stale = part.endsWith(staleSuffix)
         withStyle(SpanStyle(color = if (stale) bad else normal)) { append(part) }
     }
+}
+
+private fun categoryIcon(c: MapCategory) = when (c) {
+    MapCategory.BUS -> Icons.Default.DirectionsBus
+    MapCategory.TRAM -> Icons.Default.Tram
+    MapCategory.METRO -> Icons.Default.Subway
+    MapCategory.TRAIN -> Icons.Default.Train
+}
+
+/** Výběr druhů dopravy na mapě (změna platí hned). */
+@Composable
+private fun CategoryFilterDialog(
+    selected: Set<MapCategory>,
+    onChange: (Set<MapCategory>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Default.FilterList, null) },
+        title = { Text(stringResource(R.string.map_filter_title)) },
+        text = {
+            Column {
+                for (c in MapCategory.entries) {
+                    val on = c in selected
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onChange(if (on) selected - c else selected + c) }
+                            .padding(vertical = 6.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Checkbox(checked = on, onCheckedChange = null)
+                        Icon(categoryIcon(c), null, tint = Color(c.style.color))
+                        Column(Modifier.weight(1f)) {
+                            Text(stringResource(c.labelRes), style = MaterialTheme.typography.bodyLarge)
+                            if (c == MapCategory.BUS) {
+                                Text(
+                                    stringResource(R.string.map_filter_bus_note),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_done)) } },
+        dismissButton = {
+            TextButton(
+                onClick = { onChange(MapCategory.entries.toSet()) },
+                enabled = selected.size != MapCategory.entries.size
+            ) { Text(stringResource(R.string.map_filter_select_all)) }
+        }
+    )
 }
 
 /** Čtení selectedVehicle je izolované tady, aby se při výběru / rematch nerekomponovala celá mapa. */

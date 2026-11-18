@@ -277,6 +277,22 @@ internal class PathMeasure(
         return scanWindow(px, py, -1.0, Double.MAX_VALUE, null, hasDir, vx, vy, maxOffset)
     }
 
+    /** Nejbližší zastávka na trase za [s] (m od začátku), nebo null. */
+    fun nextStopAfter(s: Double): Double? {
+        var i = java.util.Arrays.binarySearch(stopDistances, s)
+        i = if (i < 0) -i - 1 else i + 1
+        return if (i < stopDistances.size) stopDistances[i] else null
+    }
+
+    /** Jednotkový směr trasy (x = východ, y = sever) v místě [s]. */
+    fun tangentAt(s: Double): Pair<Double, Double> {
+        val idx = segmentStart(s.coerceIn(0.0, totalMeters))
+        val dx = xs[idx + 1] - xs[idx]
+        val dy = ys[idx + 1] - ys[idx]
+        val len = hypot(dx, dy)
+        return if (len <= 1e-9) 0.0 to 0.0 else (dx / len) to (dy / len)
+    }
+
     fun pointAt(s: Double): LatLng {
         val d = s.coerceIn(0.0, totalMeters)
         var idx = java.util.Arrays.binarySearch(cum, d)
@@ -293,113 +309,139 @@ internal class PathMeasure(
 /** Délka animace bez predikce z bodu A do bodu B (1 s). */
 private const val FAST_ANIM_DURATION_MS = 1_000.0
 
-/** Nejvýš o kolik metrů se vozidlo předběhne před poslední ověřený fix. */
-private const val MAX_LEAD_M = 120.0
+/** Skok delší než tohle není jízda (výměna vozu za jiný, chyba zdroje): bez animace. */
+private const val TELEPORT_M = 3_000.0
 
-/** Jak dlouho po posledním fixu se do predikce ještě počítá čas (pak vůz čeká na další fix). */
-private const val MAX_PREDICT_SINCE_FIX_S = 12.0
+/** O kolik sekund jízdy smí predikce předběhnout poslední ověřenou polohu (pak vůz počká na další fix). */
+private const val LEAD_HORIZON_S = 6.0
 
 /** Poloha starší než tohle (s) se už nepředpovídá, vůz zůstává tam, kde ho server naposledy viděl. */
 private const val MAX_PREDICT_DATA_AGE_S = 45.0
 
-/** Skok delší než tohle není jízda (výměna vozu za jiný, chyba zdroje): bez animace. */
-private const val TELEPORT_M = 3_000.0
+/** Za jak dlouho (s) dorovná vykreslená poloha rozdíl oproti predikci. */
+private const val RESPONSE_S = 3.0
+
+/** Plynulé přenesení vykreslené polohy na novou polohu po trase (vstup na trasu, velká oprava). */
+private const val GLIDE_MS = 1_200.0
+
+/** Realtime poloha tolik za vykreslenou: predikce se mýlila (jiné místo trasy), opraví se i směrem zpět. */
+private const val BEHIND_RESYNC_M = 250.0
+
+/** Zastávka, ke které má poslední realtime poloha blíž než tohle, se bere jako projetá / obsloužená. */
+private const val STOP_PASSED_M = 15.0
+
+/** Pohodlné brzdění k zastávce / konci predikce (m/s²). */
+private const val BRAKE_MS2 = 1.1
+
+/** Odchylka směru jízdy od směru trasy, od které trasa k vozu nepatří (cos 100°). */
+private const val DIR_MISMATCH_DOT = -0.17
+
+/** Poloha se stejným místem a časem pozorování do tolika ms je stále tentýž fix (server ji jen drží). */
+private const val SAME_FIX_MS = 2_500L
 
 /**
- * Pohyb jednoho vozidla. Podporuje:
- * 1) Běžnou lineární animaci A -> B pro ne-predikční režim nebo vozy mimo trasu.
- * 2) Spojitou predikci po trase spoje: interpolaci polohy po trase silnice bez teleportů,
- *    plynulý nájezd na trasu po jejím načtení, respektování reálné rychlosti a zastávek.
+ * Pohyb jednoho vozidla.
+ *
+ * Bez predikce: rychlá (1 s) animace A -> B na každý nový fix.
+ *
+ * S predikcí:
+ *  - **Po trase** spoje (když trasa sedí se směrem jízdy): vůz jede jen dopředu rychlostí naměřenou ze skutečného
+ *    postupu mezi fixy a předpovídá nejvýš [LEAD_HORIZON_S] jízdy před poslední ověřenou polohou, a ne dál než
+ *    k příští zastávce, kterou realtime poloha ještě neprojela (u ní plynule zastaví a čeká na data o odjezdu).
+ *    Když je predikce napřed, zpomalí / počká (necouvá). Zpět se posune jen podle realtime dat (> [BEHIND_RESYNC_M]).
+ *  - **Bez trasy** (není načtená / nesedí se směrem): plynulá jízda k poslední realtime poloze po celý interval
+ *    mezi aktualizacemi (ne 1 s skok a pak stání).
+ *  - **Směr** určuje jen azimut ze zdroje, a kde chybí nebo není spolehlivý (DPMÚL), pohyb mezi realtime polohami.
+ *    Predikce směr nikdy neurčuje.
+ *
+ * Hodiny jsou parametr kvůli testům ([elapsed] = SystemClock.elapsedRealtime, [wall] = čas pozorování fixů).
  */
 internal class VehicleMotion(
     lat: Double,
     lng: Double,
     obsMs: Long,
-    val isTrain: Boolean = false
+    val isTrain: Boolean = false,
+    private val elapsed: () -> Long = { SystemClock.elapsedRealtime() },
+    private val wall: () -> Long = { System.currentTimeMillis() },
 ) {
-    private var fixObsMs = obsMs
-    private var fixRecvMs = SystemClock.elapsedRealtime()
+    private var shown = LatLng(lat, lng)
 
-    // Lineární animace pro fallback / bez predikce / plynulý nájezd na trasu
-    private var from = LatLng(lat, lng)
-    private var to = from
-    private var t0 = fixRecvMs
+    // poslední NOVÝ fix (ne držená kopie)
+    private var lastFix = shown
+    private var lastObsMs = obsMs
+    private var lastFixRecvMs = elapsed()
+    private var intervalMs = 6_000.0         // obvyklý odstup nových fixů (pro plynulou jízdu bez trasy)
+    private var lastDir: Pair<Double, Double>? = null
+
+    // lineární animace (bez predikce, bez trasy)
+    private var from = shown
+    private var to = shown
+    private var t0 = lastFixRecvMs
     private var durMs = 1.0
 
-    // Spojitý pohyb po trase
+    // po trase
     private var route: PathMeasure? = null
-    private var sCurr = Double.NaN         // aktuálně vykreslená pozice (m od začátku trasy)
-    private var sTarget = Double.NaN       // cílová extrapolovaná pozice (m od začátku trasy)
-    private var sLastFix = Double.NaN      // pozice z posledního serverového fixu
-    private var lastFixRecvMs = 0L
-
-    // Cestovní rychlost v m/s: vlak ~18 m/s (~65 km/h), autobus ~8.8 m/s (~32 km/h)
-    private var vCruise = if (isTrain) 18.0 else 8.8
-    private var vCurrent = 0.0
-
+    private var onRoute = false
+    private var sDisp = Double.NaN            // vykreslená poloha (m od začátku trasy), jen roste
+    private var vDisp = 0.0                   // vykreslená rychlost (m/s)
+    private var sFix = Double.NaN             // poslední ověřená poloha na trase
+    private var sFixAtMs = 0L                 // kdy (elapsed) byl vůz na sFix
+    private var vEst = 0.0                    // naměřená rychlost (m/s)
     private var lastTickMs = 0L
+    private var mismatches = 0
+    private var missed = 0
 
-    // Pobyt na zastávce
-    private var isDwelling = false
-    private var dwellStartMs = 0L
-    private var dwellDurationMs = 10_000L
-    private var dwellStopDist = -1.0
+    // plynulé přenesení na trasu
+    private var gliding = false
+    private var glideFrom = shown
+    private var glideT0 = 0L
 
-    // Detekce stání na konečné / na místě
-    private var isStationary = false
-    private var stationaryFixCount = 0
-    private var realtimeMoveCount = 0
-    private var lastFixPos: LatLng? = null
+    private val vMaxAbs = if (isTrain) 45.0 else 22.0
+    private val accel = if (isTrain) 0.8 else 1.5
+    private val decel = if (isTrain) 1.2 else 2.5
 
-    // Poslední jistá pozice na trase (pro znovunalezení po výpadku) a počet fixů v řadě, které na trasu nesedly
-    private var lastGoodS = Double.NaN
-    private var lastGoodMs = 0L
-    private var missedFixes = 0
-    private var poorFits = 0
-    private var catchUpDurMs = FAST_ANIM_DURATION_MS
+    private fun planLinear(a: LatLng, b: LatLng, now: Long, ms: Double) {
+        from = a; to = b; t0 = now; durMs = ms.coerceAtLeast(1.0)
+    }
 
-    // Plynulý přechod ze surové polohy na trasu (žádný instantní teleport při načtení trasy)
-    private var isOffRoute = true
-    private var transitioningToRoute = false
-    private var needRouteInit = false
+    private fun leaveRoute(now: Long) {
+        onRoute = false
+        gliding = false
+        sDisp = Double.NaN
+        sFix = Double.NaN
+        vDisp = 0.0
+        planLinear(shown, shown, now, 1.0)
+    }
 
-    // 1-sekundová animace k nejnovější realtime pozici, když je realtime fix napřed
-    private var isCatchingUp = false
-    private var catchUpStartS = Double.NaN
-    private var catchUpEndS = Double.NaN
-    private var catchUpStartPos = from
-    private var catchUpT0 = fixRecvMs
-
-    private var shown = from
-
-    private fun planFallback(a: LatLng, b: LatLng, now: Long, ms: Double) {
-        from = a
-        to = b
-        t0 = now
-        durMs = ms.coerceAtLeast(1.0)
+    private fun startGlide(now: Long) {
+        glideFrom = shown
+        glideT0 = now
+        gliding = true
     }
 
     fun setRoute(r: PathMeasure?) {
         if (r === route) return
         route = r
-        lastGoodS = Double.NaN
-        missedFixes = 0
-        poorFits = 0
-        if (r == null) {
-            sCurr = Double.NaN
-            sTarget = Double.NaN
-            sLastFix = Double.NaN
-            isOffRoute = true
-            transitioningToRoute = false
-            needRouteInit = false
-            isCatchingUp = false
-        } else {
-            needRouteInit = true
-            isOffRoute = false
-        }
+        mismatches = 0
+        missed = 0
+        // stará poloha po trase k nové trase nepatří; napojí se při dalším fixu (plynule)
+        if (onRoute) leaveRoute(elapsed())
     }
 
-    /** Zaregistruje nový fix. */
+    /** Jednotkový směr jízdy: azimut ze zdroje, jinak pohyb mezi realtime polohami. Nikdy z predikce. */
+    private fun direction(heading: Double?, moveVec: Pair<Double, Double>?): Pair<Double, Double>? {
+        if (heading != null && heading.isFinite()) {
+            val rad = Math.toRadians(heading)
+            return sin(rad) to cos(rad)
+        }
+        if (moveVec != null) {
+            val len = hypot(moveVec.first, moveVec.second)
+            if (len >= 8.0) return (moveVec.first / len) to (moveVec.second / len)
+        }
+        return null
+    }
+
+    /** Zaregistruje fix. [heading] = azimut ze zdroje, jen když je spolehlivý (DPMÚL ho nedává). */
     fun onFix(
         lat: Double,
         lng: Double,
@@ -408,436 +450,162 @@ internal class VehicleMotion(
         predict: Boolean = false
     ): Boolean {
         val np = LatLng(lat, lng)
-        val now = SystemClock.elapsedRealtime()
+        val now = elapsed()
 
-        if (np == to && !predict) {
-            fixObsMs = obsMs
-            return false
-        }
+        // server polohu drží, dokud zdroj nepošle novou: stejné místo a čas pozorování = žádná nová informace
+        // (dřív se to bralo jako "vůz stojí" a predikce ho zastavila)
+        if (np == lastFix && kotlin.math.abs(obsMs - lastObsMs) < SAME_FIX_MS) return false
 
-        fixObsMs = obsMs
-        val curPos = shown
-        val moveDist = if (lastFixPos != null) haversineMeters(np, lastFixPos!!) else 0.0
-
-        // Směrový vektor pohybu mezi serverovými fixy (x=East, y=North v metrech)
-        val moveVec: Pair<Double, Double>? = if (lastFixPos != null && moveDist >= 6.0) {
+        val moveDist = haversineMeters(lastFix, np)
+        val moveVec: Pair<Double, Double>? = if (moveDist >= 8.0) {
             val k = cos(Math.toRadians(lat))
-            val dx = (lng - lastFixPos!!.longitude) * Math.toRadians(1.0) * k * EARTH_R
-            val dy = (lat - lastFixPos!!.latitude) * Math.toRadians(1.0) * EARTH_R
-            dx to dy
+            ((lng - lastFix.longitude) * Math.toRadians(1.0) * k * EARTH_R) to
+                    ((lat - lastFix.latitude) * Math.toRadians(1.0) * EARTH_R)
         } else null
+        // čas mezi pozorováními (přesnější než čas příjmu), jinak mezi příjmy
+        val dtObsS = if (obsMs > 0 && lastObsMs > 0 && obsMs > lastObsMs) (obsMs - lastObsMs) / 1000.0
+        else (now - lastFixRecvMs) / 1000.0
+        val prevFix = lastFix
+        val dtRecv = now - lastFixRecvMs
+        if (dtRecv in 1_500L..20_000L) intervalMs = intervalMs * 0.7 + dtRecv * 0.3
+        lastFix = np
+        lastObsMs = obsMs
+        lastFixRecvMs = now
+        direction(heading, moveVec)?.let { lastDir = it }
 
-        if (haversineMeters(curPos, np) > TELEPORT_M) {
-            from = np; to = np; t0 = now; durMs = 1.0
+        if (haversineMeters(shown, np) > TELEPORT_M) {
+            leaveRoute(now)
             shown = np
-            sCurr = Double.NaN; sTarget = Double.NaN; sLastFix = Double.NaN
-            lastGoodS = Double.NaN; missedFixes = 0
-            lastFixPos = np; lastFixRecvMs = now
-            isOffRoute = true; transitioningToRoute = false
+            planLinear(np, np, now, 1.0)
             return true
-        }
-
-        val dtFixSec = if (lastFixRecvMs > 0L) ((now - lastFixRecvMs) / 1000.0).coerceIn(1.0, 30.0) else 6.0
-
-        if (lastFixPos != null && moveDist >= 8.0) {
-            realtimeMoveCount++
-        } else if (lastFixPos != null && moveDist < 4.0) {
-            realtimeMoveCount = 0
         }
 
         val r = route
-        if (!predict || r == null) {
-            planFallback(curPos, np, now, FAST_ANIM_DURATION_MS)
-            to = np
-            lastFixPos = np
-            lastFixRecvMs = now
-            isOffRoute = true
-            transitioningToRoute = false
+        if (!predict) {
+            if (onRoute) leaveRoute(now)
+            planLinear(shown, np, now, FAST_ANIM_DURATION_MS)
             return true
         }
 
-        // Oporou pro hledání je poslední FIX na trase (ne vykreslená, předsazená poloha): ta se pohybuje
-        // jen podle skutečných dat a nepředbíhá, takže okno nikdy neujede od reality.
-        val trackS = if (!sLastFix.isNaN()) sLastFix else sCurr
-        val tracked = !(sCurr.isNaN() || isOffRoute)
-        var proj = r.project(
+        val ageS = when {
+            obsMs <= 0 -> 0.0
+            else -> ((wall() - obsMs) / 1000.0).coerceAtLeast(0.0)
+        }
+
+        val proj = r?.project(
             p = np,
-            nearS = if (tracked) trackS else null,
+            nearS = if (onRoute) sFix else null,
             heading = heading,
             moveVec = moveVec,
             isTrain = isTrain,
-            dtSec = dtFixSec,
-            expectedSpeed = vCruise,
-            hintS = if (!tracked && !lastGoodS.isNaN()) {
-                lastGoodS + vCruise * ((now - lastGoodMs) / 1000.0).coerceIn(0.0, 120.0) * 0.5
-            } else null
+            dtSec = dtObsS.coerceIn(1.0, 30.0),
+            expectedSpeed = if (vEst > 0.5) vEst else if (isTrain) 15.0 else 7.0,
         )
 
-        // Kontrola shody: když dva fixy za sebou sedí na trasu špatně (> POOR_FIT_M), asi jsme uvízli na špatném
-        // místě (např. po odlehlém fixu uskočila poloha o stovky metrů vpřed). Zkusíme okolí na obě strany.
-        var resynced = false
-        if (tracked && proj != null && proj.offsetMeters > POOR_FIT_M) {
-            poorFits++
-            if (poorFits >= 2) {
-                val alt = r.project(
-                    p = np, nearS = trackS, heading = heading, moveVec = moveVec, isTrain = isTrain,
-                    dtSec = dtFixSec, expectedSpeed = vCruise, wide = true
-                )
-                if (alt != null && alt.offsetMeters < POOR_FIT_M * 0.6 && alt.offsetMeters < proj.offsetMeters - 20.0) {
-                    proj = alt
-                    resynced = true
-                }
-                poorFits = 0
+        // trasa musí sedět se směrem jízdy (azimut / realtime pohyb), jinak k vozu nepatří
+        val dir = lastDir
+        val dirOk = proj == null || dir == null || r == null || run {
+            val t = r.tangentAt(proj.s)
+            t.first * dir.first + t.second * dir.second >= DIR_MISMATCH_DOT
+        }
+        if (proj != null && !dirOk) mismatches++ else if (proj != null) mismatches = 0
+
+        // parkující vůz na konečné mimo osu trasy zůstává na své GPS poloze (ať se stojící vozy neslijí do bodu)
+        val parkedAtTerminus = proj != null && r != null && moveDist < 12.0 && proj.offsetMeters > 20.0 &&
+                (proj.s <= 40.0 || proj.s >= r.totalMeters - 40.0)
+
+        if (proj == null || !dirOk || parkedAtTerminus) {
+            if (onRoute && proj == null && missed < 2) {
+                // jeden dva fixy mimo trasu (šum GPS): zůstává se na trase, predikce dojede na horizont a počká
+                missed++
+                return true
             }
-        } else if (proj != null) {
-            poorFits = 0
-        }
-
-        if (proj == null && tracked && missedFixes < MAX_MISSED_FIXES) {
-            // Fix nesedí na trasu (šum GPS, krátký výpadek): zůstáváme na trase a pokračujeme predikcí,
-            // místo abychom po jednom špatném bodu zahodili trasu a pak hledali na celé délce (skok na jiné rameno).
-            missedFixes++
-            lastFixPos = np
-            lastFixRecvMs = now
+            if (onRoute && !dirOk && mismatches < 2) return true   // jednorázově nesedí směr: ignorovat
+            if (onRoute) leaveRoute(now)
+            // plynulá jízda k realtime poloze po celý interval mezi aktualizacemi
+            planLinear(shown, np, now, if (parkedAtTerminus) FAST_ANIM_DURATION_MS else intervalMs.coerceIn(2_500.0, 9_000.0))
             return true
         }
+        missed = 0
 
-        if (proj == null) {
-            // Vůz je mimo trasu (objížďka apod.) -> plynulá lineární animace na nový fix
-            if (!sCurr.isNaN() && !isOffRoute) { lastGoodS = sLastFix.takeUnless { it.isNaN() } ?: sCurr; lastGoodMs = now }
-            planFallback(curPos, np, now, FAST_ANIM_DURATION_MS)
-            to = np
-            lastFixPos = np
-            lastFixRecvMs = now
-            isOffRoute = true
-            transitioningToRoute = false
-            return true
-        }
-
-        missedFixes = 0
-        val sFix = proj.s
-        val isNearStartTerminus = sFix <= 40.0
-        val isNearEndTerminus = sFix >= r.totalMeters - 40.0
-        val isNearTerminus = isNearStartTerminus || isNearEndTerminus
-
-        // Pokud vůz stojí/parkuje na konečné/startovní zastávce a je mimo hlavní osu trasy (>20 m od osy),
-        // necháme ho na surové GPS pozici v jeho konkrétním stání, aby se 5-10 parkujících autobusů nesloučilo do jediného bodu.
-        if (isNearTerminus && moveDist < 12.0 && proj.offsetMeters > 20.0) {
-            planFallback(curPos, np, now, FAST_ANIM_DURATION_MS)
-            to = np
-            lastFixPos = np
-            lastFixRecvMs = now
-            isOffRoute = true
-            transitioningToRoute = false
-            return true
-        }
-
-        if (resynced) {
-            // oprava polohy po trase (ne přímkou): vykreslená poloha se přesadí na ověřené místo
-            sCurr = sFix
-            sLastFix = sFix
-            isCatchingUp = false
-            isDwelling = false
-            vCurrent = vCruise * 0.8
-        }
-        lastGoodS = sFix
-        lastGoodMs = now
-        val targetPoint = r.pointAt(sFix)
-
-        if (moveDist < 15.0 || isNearTerminus) {
-            stationaryFixCount++
+        // rychlost ze skutečného postupu po trase
+        val newS = proj.s
+        val fresh = ageS <= MAX_PREDICT_DATA_AGE_S
+        if (onRoute && !sFix.isNaN()) {
+            val ds = newS - sFix
+            val vInst = when {
+                moveDist < 6.0 -> 0.0                                // stojí
+                ds <= 0.0 -> 0.0
+                else -> (ds / dtObsS.coerceIn(1.0, 60.0)).coerceAtMost(vMaxAbs)
+            }
+            vEst = if (vInst == 0.0) 0.0 else if (vEst < 0.5) vInst else vEst * 0.4 + vInst * 0.6
         } else {
-            stationaryFixCount = 0
+            // první fix na trase: rychlost z realtime pohybu před napojením, jinak zatím stojí
+            vEst = if (moveVec != null && prevFix != np) (moveDist / dtObsS.coerceIn(1.0, 60.0)).coerceAtMost(vMaxAbs) else 0.0
         }
-        val isStat = stationaryFixCount >= 2 || isNearEndTerminus
-        isStationary = isStat
+        if (!fresh || newS >= (r!!.totalMeters - 30.0)) vEst = 0.0
 
-        if (sCurr.isNaN() || isOffRoute) {
-            sCurr = sFix
-            sTarget = sFix
-            sLastFix = sFix
-            lastFixRecvMs = now
-            lastFixPos = np
-            isOffRoute = false
-            isDwelling = false
-            if (!isStat) vCurrent = vCruise * 0.8
+        sFix = newS
+        sFixAtMs = now - (ageS.coerceAtMost(30.0) * 1000).toLong()
 
-            // Plynulý nájezd z dosavadní vizuální polohy na trasu (žádný skok/teleport!)
-            val dist = haversineMeters(curPos, targetPoint)
-            if (dist >= 1.0) {
-                planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
-                to = targetPoint
-                transitioningToRoute = true
-            } else {
-                transitioningToRoute = false
-            }
-            isCatchingUp = false
+        if (!onRoute) {
+            // napojení na trasu: plynule z dosavadní vykreslené polohy
+            onRoute = true
+            sDisp = newS
+            vDisp = vEst
+            lastTickMs = now
+            startGlide(now)
             return true
         }
 
-        // Výpočet reálné rychlosti z po sobě jdoucích fixů
-        if (lastFixRecvMs > 0 && !sLastFix.isNaN()) {
-            val dtSec = ((now - lastFixRecvMs) / 1000.0).coerceIn(2.0, 45.0)
-            val dsM = sFix - sLastFix
-            if (dsM > 10.0 && !isStat) {
-                val vCalc = dsM / dtSec
-                val minV = if (isTrain) 4.0 else 2.5
-                val maxV = if (isTrain) 35.0 else 14.5
-                if (vCalc in minV..maxV) {
-                    val defaultV = if (isTrain) 18.0 else 8.8
-                    vCruise = (if (vCruise <= 0.0) defaultV else vCruise) * 0.7 + vCalc * 0.3
-                }
-            }
+        val behind = newS - sDisp
+        if (behind > maxOf(300.0, vEst * 25.0) || -behind > BEHIND_RESYNC_M) {
+            // predikce se rozešla s realitou (výpadek dat / dřívější špatné napojení): přenést plynule na realtime polohu
+            sDisp = newS
+            vDisp = vEst
+            startGlide(now)
         }
-        if (vCruise <= 0.0) vCruise = if (isTrain) 18.0 else 8.8
-        if (isStat) vCurrent = 0.0
-
-        if (sFix > sCurr + 1.0 && !isStat) {
-            if (sFix - sCurr > 150.0) {
-                // Skok/výpadek/první načtení trasy s velkým odstupem (>150 m): okamžitá přesynchronizace sCurr na sFix (žádný zběsilý sprint po trase!)
-                sCurr = sFix
-                sLastFix = sFix
-                isCatchingUp = false
-                planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
-                to = targetPoint
-                transitioningToRoute = true
-            } else {
-                // Realtime pozice je mírně napřed oproti predikci -> krátká plynulá animace k realtime pozici po trase
-                planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
-                to = targetPoint
-                catchUpStartS = sCurr
-                catchUpEndS = sFix
-                catchUpStartPos = curPos
-                catchUpT0 = 0L
-                catchUpDurMs = ((sFix - sCurr) / 100.0 * 1000.0).coerceIn(FAST_ANIM_DURATION_MS, 3_000.0)
-                isCatchingUp = true
-                transitioningToRoute = false
-                isDwelling = false
-            }
-        } else if (sFix < sCurr - 150.0 && !isStat) {
-            // Predikce předběhla reálný fix o více než 150 m: okamžité přenastavení na sFix
-            sCurr = sFix
-            sLastFix = sFix
-            isCatchingUp = false
-            planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
-            to = targetPoint
-            transitioningToRoute = true
-        } else if (isStat) {
-            isCatchingUp = false
-            transitioningToRoute = false
-        }
-
-        sLastFix = sFix
-        lastFixRecvMs = now
-        lastFixPos = np
-
-        val ageSec = when {
-            obsMs <= 0 -> 0.0
-            obsMs > 10_000_000_000L -> ((System.currentTimeMillis() - obsMs) / 1000.0).coerceIn(0.0, 4.0)
-            else -> ((SystemClock.elapsedRealtime() - obsMs) / 1000.0).coerceIn(0.0, 4.0)
-        }
-
-        val extrapolatedS = (sFix + vCruise * ageSec).coerceAtMost(r.totalMeters)
-        sTarget = extrapolatedS
-
-        // Pokud server nahlásil, že vůz už je za zastávkou, zrušíme čekání
-        if (isDwelling && sFix > dwellStopDist + 25.0) {
-            isDwelling = false
-        }
-
-        to = targetPoint
         return true
     }
 
-    /** Pozice v čase [now] (SystemClock.elapsedRealtime). Levné, bez alokací kromě LatLng. */
+    /** Pozice v čase [now] (elapsedRealtime). */
     fun positionAt(now: Long): LatLng {
         val r = route
-        if (r != null && needRouteInit) {
-            needRouteInit = false
-            val curPos = shown
-            val proj = r.project(curPos, nearS = null, isTrain = isTrain)
-            if (proj != null) {
-                sCurr = proj.s
-                sTarget = proj.s
-                sLastFix = proj.s
-                lastFixRecvMs = now
-                val isNearEndTerminus = proj.s >= r.totalMeters - 40.0
-                if (isNearEndTerminus) {
-                    isStationary = true
-                    vCurrent = 0.0
-                } else if (!isStationary) {
-                    vCurrent = vCruise * 0.8
-                }
-                val targetPoint = r.pointAt(proj.s)
-                val dist = haversineMeters(curPos, targetPoint)
-                if (dist >= 1.0) {
-                    planFallback(curPos, targetPoint, now, FAST_ANIM_DURATION_MS)
-                    to = targetPoint
-                    transitioningToRoute = true
-                } else {
-                    transitioningToRoute = false
-                }
-                isOffRoute = false
-            } else {
-                sCurr = Double.NaN
-                sTarget = Double.NaN
-                sLastFix = Double.NaN
-                isOffRoute = true
-                transitioningToRoute = false
-            }
-        }
-
-        if (r == null || sCurr.isNaN() || isOffRoute) {
+        if (!onRoute || r == null || sDisp.isNaN()) {
             val f = ((now - t0) / durMs).coerceIn(0.0, 1.0)
             val pos = lerpLatLng(from, to, f)
             shown = pos
             return pos
         }
 
-        if (isCatchingUp) {
-            if (catchUpT0 <= 0L) catchUpT0 = now
-            val elapsedMs = now - catchUpT0
-            if (elapsedMs < catchUpDurMs) {
-                val f = (elapsedMs / catchUpDurMs).coerceIn(0.0, 1.0)
-                sCurr = catchUpStartS + (catchUpEndS - catchUpStartS) * f
-                // vždy po trase (ne po přímce, ta by u smyčky / kruháče řezala přes budovy);
-                // případný počáteční posun od osy trasy se plynule vytrácí
-                val routePos = r.pointAt(sCurr)
-                val axis0 = r.pointAt(catchUpStartS)
-                val pos = LatLng(
-                    routePos.latitude + (catchUpStartPos.latitude - axis0.latitude) * (1.0 - f),
-                    routePos.longitude + (catchUpStartPos.longitude - axis0.longitude) * (1.0 - f)
-                )
-                shown = pos
-                return pos
-            } else {
-                // 1s animace k realtime pozici dokončena, sCurr je na sFix a predikce odtud pokračuje
-                isCatchingUp = false
-                sCurr = catchUpEndS
-                if (!isStationary) vCurrent = vCruise * 0.8
-                shown = r.pointAt(sCurr)
-            }
-        }
-
-        if (transitioningToRoute) {
-            val f = ((now - t0) / durMs).coerceIn(0.0, 1.0)
-            if (f >= 1.0) {
-                transitioningToRoute = false
-            }
-            val routePos = r.pointAt(sCurr)
-            val pos = lerpLatLng(from, routePos, f)
-            shown = pos
-            return pos
-        }
-
-        if (lastTickMs <= 0L) lastTickMs = now
-        val dtSec = ((now - lastTickMs) / 1000.0).coerceIn(0.001, 0.2)
+        val dt = if (lastTickMs <= 0L) 0.0 else ((now - lastTickMs) / 1000.0).coerceIn(0.0, 2.0)
         lastTickMs = now
 
-        val totalMeters = r.totalMeters
-        if (isStationary || sCurr >= totalMeters) {
-            val goalS = if (sCurr >= totalMeters) totalMeters else sLastFix
-            if (kotlin.math.abs(goalS - sCurr) > 0.5) {
-                val step = (vCruise * dtSec * 0.8).coerceAtMost(kotlin.math.abs(goalS - sCurr))
-                sCurr = if (sCurr < goalS) sCurr + step else sCurr - step
-            }
-            val p = r.pointAt(sCurr)
-            shown = p
-            return p
-        }
+        // cíl predikce: poslední ověřená poloha + naměřená rychlost × čas od ní (nejvýš LEAD_HORIZON_S)
+        val leadS = ((now - sFixAtMs) / 1000.0).coerceIn(0.0, LEAD_HORIZON_S)
+        var sTarget = (sFix + vEst * leadS).coerceAtMost(r.totalMeters)
+        // zastávky: dál než k příští zastávce, kterou realtime poloha ještě neprojela, se nepředpovídá;
+        // vůz u ní zastaví a pokračuje, až data ukážou, že odjel
+        r.nextStopAfter(sFix + STOP_PASSED_M)?.let { if (it < sTarget) sTarget = it }
+        val err = sTarget - sDisp
+        val vMax = maxOf(vEst * 1.5, vEst + 3.0).coerceAtMost(vMaxAbs)
+        // plynulé brzdění do cíle (zastávka / konec horizontu predikce): v ≤ √(2·a·zbývající dráha)
+        val vBrake = sqrt(2.0 * BRAKE_MS2 * err.coerceAtLeast(0.0))
+        val vCmd = if (err <= 0.0) 0.0 else minOf((vEst + err / RESPONSE_S).coerceIn(0.0, vMax), vBrake)
+        vDisp = if (vDisp < vCmd) (vDisp + accel * dt).coerceAtMost(vCmd) else (vDisp - decel * dt).coerceAtLeast(vCmd)
+        // jen dopředu a nikdy za cíl predikce
+        sDisp = (sDisp + vDisp * dt).coerceAtMost(maxOf(sDisp, sTarget)).coerceIn(0.0, r.totalMeters)
+        if (sDisp >= sTarget && vCmd == 0.0) vDisp = 0.0
 
-        // Predikce dopředu po trase: kompenzace latence serverových dat, max. 120 m dopředu před posledním ověřeným fixem
-        val leadSec = if (isTrain) 5.0 else 3.0
-        // Čas od posledního fixu se do predikce počítá jen omezeně (MAX_PREDICT_SINCE_FIX_S): když nové fixy
-        // nechodí (server / síť nejde, poloha se nemění), vůz nesmí jet dál po trase až na konečnou.
-        val timeSinceFixSec = ((now - lastFixRecvMs) / 1000.0).coerceIn(0.0, MAX_PREDICT_SINCE_FIX_S)
-        // Stáří samotné polohy (ne kdy dorazila): stará poloha (cache po startu, držená z minula) se nepředpovídá vůbec,
-        // vůz mohl dávno stát nebo jet jinam.
-        val dataAgeSec = when {
-            fixObsMs <= 0 -> 0.0
-            fixObsMs > 10_000_000_000L -> ((System.currentTimeMillis() - fixObsMs) / 1000.0).coerceAtLeast(0.0)
-            else -> ((SystemClock.elapsedRealtime() - fixObsMs) / 1000.0).coerceAtLeast(0.0)
+        var pos = r.pointAt(sDisp)
+        if (gliding) {
+            val f = ((now - glideT0) / GLIDE_MS).coerceIn(0.0, 1.0)
+            val e = f * f * (3 - 2 * f)
+            pos = lerpLatLng(glideFrom, pos, e)
+            if (f >= 1.0) gliding = false
         }
-        val leadM = if (dataAgeSec > MAX_PREDICT_DATA_AGE_S) 0.0
-        else (vCruise * (timeSinceFixSec + leadSec)).coerceAtMost(MAX_LEAD_M)
-        val currentTargetS = (sLastFix + leadM).coerceAtMost(totalMeters)
-
-        if (isDwelling) {
-            if (now - dwellStartMs >= dwellDurationMs || (!sLastFix.isNaN() && sLastFix > dwellStopDist + 40.0)) {
-                isDwelling = false
-            } else {
-                val p = r.pointAt(dwellStopDist)
-                shown = p
-                return p
-            }
-        }
-
-        val err = currentTargetS - sCurr
-        val catchUpFactor = when {
-            err > 0 -> 1.0 + (err / 200.0).coerceAtMost(0.20)
-            // před cílem predikce vůz zpomalí až zastaví a počká na další fix (dřív jel dál aspoň 40 % rychlosti donekonečna)
-            err < 0 -> (1.0 + err / 40.0).coerceAtLeast(0.0)
-            else -> 1.0
-        }
-        var targetV = vCruise * catchUpFactor
-
-        val stops = r.stopDistances
-        var nextStopDist = -1.0
-        var prevStopDist = -1.0
-        for (sd in stops) {
-            if (sd > sCurr) {
-                if (nextStopDist < 0.0) nextStopDist = sd
-            } else {
-                prevStopDist = sd
-            }
-        }
-
-        if (nextStopDist > 0.0) {
-            val distToStop = nextStopDist - sCurr
-            if (distToStop <= 120.0 && sLastFix <= nextStopDist + 40.0) {
-                if (distToStop <= 3.0) {
-                    isDwelling = true
-                    dwellStartMs = now
-                    dwellDurationMs = if (isTrain) 25_000L else 12_000L
-                    dwellStopDist = nextStopDist
-                    sCurr = nextStopDist
-                    vCurrent = 0.0
-                    val p = r.pointAt(nextStopDist)
-                    shown = p
-                    return p
-                } else {
-                    val decelRatio = distToStop / 120.0
-                    targetV = (targetV * decelRatio * decelRatio).coerceAtLeast(0.8)
-                }
-            }
-        }
-
-        if (prevStopDist > 0.0) {
-            val distFromStop = sCurr - prevStopDist
-            if (distFromStop in 0.0..60.0) {
-                val accelFactor = distFromStop / 60.0
-                targetV *= (0.25 + 0.75 * accelFactor)
-            }
-        }
-
-        val maxAccel = (if (isTrain) 0.8 else 1.5) * dtSec
-        if (vCurrent < targetV) {
-            vCurrent = (vCurrent + maxAccel).coerceAtMost(targetV)
-        } else {
-            vCurrent = (vCurrent - maxAccel * 1.5).coerceAtLeast(targetV)
-        }
-
-        val nextS = (sCurr + vCurrent * dtSec).coerceIn(0.0, totalMeters)
-        if (nextS > currentTargetS) {
-            // tvrdý strop: dál než predikovaný cíl se nikdy nejede (couvat se taky nezačne, o srovnání se postará další fix)
-            sCurr = kotlin.math.max(sCurr, currentTargetS)
-            vCurrent = 0.0
-        } else {
-            sCurr = nextS
-        }
-        val p = r.pointAt(sCurr)
-        shown = p
-        return p
+        shown = pos
+        return pos
     }
 }
 
@@ -859,7 +627,9 @@ internal class VehicleKeyer {
         val tid: Int,
         val line: String,
         val pos: LatLng,
-        val heading: Double?
+        val heading: Double?,
+        /** uid, který nezávisí na poloze (od serveru, nebo zdroj + číslo vozu). */
+        val stable: Boolean,
     )
 
     private data class Match(
@@ -880,6 +650,10 @@ internal class VehicleKeyer {
 
     private fun normLine(line: String): String =
         line.trim().uppercase().filterNot { it.isWhitespace() }
+
+    /** uid, podle kterého jde vůz poznat i v příští odpovědi (serverové "p<lat>,<lng>" se mění s polohou). */
+    private fun hasStableUid(v: Vehicle): Boolean =
+        if (v.serverUid.isNotEmpty()) !v.serverUid.startsWith("p") else v.id != 0
 
     private fun directionCompatible(a: Double?, b: Double?): Boolean {
         if (a == null || b == null) return true
@@ -903,20 +677,25 @@ internal class VehicleKeyer {
             return key
         }
 
-        // 1. Zachování identity v rámci stejného zdroje nebo přes stejné ID vozidla.
+        // 1. Identita vozu. Server dává stabilní uid napříč zdroji ("v451" = tentýž vůz z DÚK i DPMÚL, "d834" Děčín,
+        //    "g3:1234" tramvaj PID, "t1193" vlak). Samotná čísla vozů se mezi zdroji a druhy dopravy opakují
+        //    (Ústí 834 i Děčín 834, PID tramvaj i autobus 1234, vlak 665 i autobus 665; běžně desítky kolizí naráz),
+        //    proto se podle čísla nikdy nepáruje napříč zdroji: klíč by přeskakoval mezi dvěma vozy a animace by
+        //    "letěla" přes město. Bez stabilního uid jen v rámci stejného zdroje.
+        val prevByUid = HashMap<String, Int>(prev.size * 2)
+        for ((p, old) in prev.withIndex()) if (old.stable) prevByUid.putIfAbsent(old.uid, p)
         for ((i, v) in list.withIndex()) {
-            val pi = prev.indices.firstOrNull { p ->
-                if (p in usedPrev) return@firstOrNull false
-
-                val old = prev[p]
-
-                when {
-                    v.serverUid.isNotEmpty() && v.uid == old.uid -> true
-                    v.id != 0 && old.id != 0 && sameVehicleId(v.id, old.id) -> true
-                    old.source == v.source && v.id != 0 -> old.id == v.id
-                    old.source == v.source && v.cis.isNotBlank() && v.trip.isNotBlank() ->
-                        old.cis == v.cis && old.trip == v.trip
-                    else -> false
+            val pi = if (hasStableUid(v)) {
+                prevByUid[v.uid]?.takeIf { it !in usedPrev }
+            } else {
+                prev.indices.firstOrNull { p ->
+                    if (p in usedPrev) return@firstOrNull false
+                    val old = prev[p]
+                    !old.stable && old.source == v.source && when {
+                        v.id != 0 -> old.id == v.id
+                        v.cis.isNotBlank() && v.trip.isNotBlank() -> old.cis == v.cis && old.trip == v.trip
+                        else -> false
+                    }
                 }
             }
 
@@ -1064,7 +843,8 @@ internal class VehicleKeyer {
                 tid = v.tid,
                 line = normLine(v.line),
                 pos = LatLng(v.lat, v.lng),
-                heading = v.heading
+                heading = v.heading,
+                stable = hasStableUid(v),
             )
         }
 
