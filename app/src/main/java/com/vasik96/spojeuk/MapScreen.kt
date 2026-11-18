@@ -166,7 +166,7 @@ private fun Vehicle.inUsteckyKraj() = lat in USTECKY_LAT && lng in USTECKY_LNG
 
 // Při oddálení (pod touto úrovní, v měřítku Google Maps) se místo štítků s číslem linky kreslí malé tečky
 // (tisíce štítků přes sebe jsou nečitelné; u MapLibre navíc tisíce ikon a GeoJSON prvků při každém snímku).
-internal const val DOT_ZOOM_GOOGLE = 11.6f
+internal const val DOT_ZOOM_GOOGLE = 10.8f
 internal const val DOT_HYSTERESIS = 0.15f             // jen Google: proti blikání na hranici
 private const val DOT_ZOOM_ML = 11f                   // MapLibre (má zoom o 1 menší, tj. Google 12); stop výrazu potřebuje celé číslo
 
