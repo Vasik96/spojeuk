@@ -1,35 +1,28 @@
 package com.vasik96.spojeuk
 
 import android.content.Context
+import android.graphics.Bitmap
+import androidx.compose.runtime.mutableIntStateOf
 import com.google.android.gms.maps.GoogleMap
-import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.Marker
 import com.google.android.gms.maps.model.MarkerOptions
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.ln
+import kotlin.math.sin
 
 /**
- * Nativní správce markerů pro Google Maps.
+ * Vozidla (a trasa) na Google mapě.
  *
- * Každé volání na [Marker] (position, icon, zIndex, tag, id…) je Binder IPC do mapového jádra a běží na hlavním vlákně.
- * Proto:
- *  - markery existují pro všechna vozidla; mimo záběr se jen občas dorovnají (jádro je nekreslí),
- *  - práce s markery má časový rozpočet na snímek, záběr má přednost, zbytek se dodělá v dalších snímcích,
- *  - stav (pozice, ikona, zIndex, vozidlo) se drží v Kotlinu a na marker se zapisuje jen skutečná změna,
- *  - během pohybu kamery se existujícím markerům pozice nemění (jádro je posouvá s mapou samo).
+ * Perfetto: každý MARKER prochází v každém snímku labelovacím / kolizním enginem mapy (~6 µs na viditelný marker
+ * na GL vlákně) => 2500 vozidel v záběru = 15–20 ms na snímek, mapa ~20 fps. Polyline tečky jsou ještě horší
+ * (~400 ms na snímek) a TileOverlay mění velikost teček při zoomu a bliká. Proto vozidla NEJSOU objekty mapy:
+ * tahle třída jen připraví snímek poloh / ikon a kreslí ho [GoogleDotOverlay] vlastním canvasem nad mapou
+ * (pozice z kamery, pevná velikost v dp, mapové jádro o vozidlech neví). Nativní markery má jen trasa.
  */
 internal class GoogleVehicleLayer(private val context: Context) {
-    private class Slot(val marker: Marker, val id: String) {
-        var lat = 0.0
-        var lng = 0.0
-        var desc: BitmapDescriptor? = null
-        var z = 0f
-        lateinit var vehicle: Vehicle
-    }
-
     private var googleMap: GoogleMap? = null
-    private val slots = HashMap<String, Slot>()          // klíč vozidla -> marker
-    private val byMarkerId = HashMap<String, String>()   // id markeru -> klíč vozidla (bez IPC v click listeneru)
 
     private val routeMarkers = ArrayList<Marker>()
     private var lastRoute: List<LatLng>? = null
@@ -39,40 +32,55 @@ internal class GoogleVehicleLayer(private val context: Context) {
     private var lastArrows: List<RouteArrow>? = null
     private var lastArrowColor = 0
 
-    var isDotMode = false
+    // ── snímek vozidel pro [GoogleDotOverlay]. Zapisuje i čte se jen na hlavním vlákně. ──
+    var count = 0
+        private set
+    var wx = DoubleArray(0)          // světové souřadnice 0..1 (Web Mercator)
+        private set
+    var wy = DoubleArray(0)
+        private set
+    var color = IntArray(0)          // barva tečky
+        private set
+    var label = arrayOfNulls<Bitmap>(0)   // štítek s číslem linky; null = tečka
+        private set
+    private var lat = DoubleArray(0)
+    private var lng = DoubleArray(0)
+    private var vehicles = arrayOfNulls<Vehicle>(0)
+    var hl = -1                      // index zvýrazněného vozidla (kreslí se poslední), -1 = žádné
+        private set
+    /** Změna snímku => překreslení overlaye (kamera se čte zvlášť). */
+    val version = mutableIntStateOf(0)
+
+    var isDotMode = true
         private set
 
-    fun updateMode(zoom: Float): Boolean {
-        isDotMode = if (isDotMode) zoom < DOT_ZOOM_GOOGLE + DOT_HYSTERESIS else zoom < DOT_ZOOM_GOOGLE
+    /**
+     * Štítky od [DOT_ZOOM_GOOGLE] (s hysterezí proti blikání). Pojistka: při extrémním počtu vozidel v záběru
+     * zůstanou tečky (tisíce štítků přes sebe jsou nečitelné a zbytečně drahé na kreslení).
+     */
+    fun updateMode(zoom: Float, visibleCount: Int): Boolean {
+        val zoomOk = if (isDotMode) zoom >= DOT_ZOOM_GOOGLE + DOT_HYSTERESIS else zoom >= DOT_ZOOM_GOOGLE
+        val countOk = if (isDotMode) visibleCount <= LABEL_ENTER_MAX else visibleCount <= LABEL_LEAVE_MAX
+        isDotMode = !(zoomOk && countOk)
         return isDotMode
     }
 
-    fun attach(map: GoogleMap, onVehicleSelected: (Vehicle) -> Unit) {
+    fun attach(map: GoogleMap) {
         if (googleMap === map) return
         detach()
         googleMap = map
-        map.setOnMarkerClickListener { marker ->
-            val key = byMarkerId[marker.id]
-            val v = key?.let { slots[it]?.vehicle }
-            if (v != null) {
-                onVehicleSelected(v)
-                true
-            } else {
-                false
-            }
-        }
     }
 
     fun detach() {
         clearAll()
-        googleMap?.setOnMarkerClickListener(null)
         googleMap = null
     }
 
     fun clearAll() {
-        for (s in slots.values) runCatching { s.marker.remove() }
-        slots.clear()
-        byMarkerId.clear()
+        for (i in 0 until count) { vehicles[i] = null; label[i] = null }
+        count = 0
+        hl = -1
+        version.intValue++
         clearRoute()
     }
 
@@ -95,217 +103,90 @@ internal class GoogleVehicleLayer(private val context: Context) {
         return out
     }
 
-    private class Cand(
-        val key: String,
-        val vehicle: Vehicle,
-        val lat: Double,
-        val lng: Double,
-        val slot: Slot?,
-        val isHl: Boolean,
-    ) {
-        var dist = 0.0
-    }
-
-    private var offCursor = 0   // round-robin přes vozidla mimo záběr
-
     /**
-     * Synchronizuje markery s vozidly.
+     * Připraví snímek všech vozidel pro overlay (polohy z hubu, barva, štítek). Levné: žádné volání mapy.
      *
-     * Markery existují pro VŠECHNA vozidla (žádné proředění, žádné odebírání mimo záběr). Mimo záběr je mapové jádro
-     * nekreslí, takže skoro nic nestojí, a najetí na Prahu / oddálení pak nevyžaduje žádné vytváření markerů.
-     * Práce má časový rozpočet na snímek a jde v pořadí:
-     *  1. vozidla v záběru od středu (vytvoření, ikona, pozice),
-     *  2. odebrání vozidel, která zmizela z dat,
-     *  3. ve zbylém čase dopředu vozidla mimo záběr (vytvoření, ikona, občas pozice).
-     *
-     * @param view viditelná oblast (s malým okrajem); null = vše
-     * @param movePositions false během pohybu kamery: existující markery se nehýbou (jádro je posouvá s mapou samo)
-     * @param prewarm v režimu teček těsně před přepnutím: chystat štítky dopředu, ať přepnutí nic nestojí
-     * @return true, pokud zbývá práce (zavolat znovu v dalším snímku)
+     * @param view viditelná oblast (s okrajem); štítky se dopředu chystají jen pro ni
+     * @param prewarm v režimu teček těsně před přepnutím: chystat štítky dopředu, ať se při přepnutí jen vymění
+     * @return true, pokud se čeká na štítky kreslené na pozadí (zavolat znovu v dalším snímku)
      */
     fun updateVehicles(
         activeVehicles: List<Pair<String, Vehicle>>,
         hub: MotionHub,
-        dot: Boolean,
         targetUid: String?,
         phase: Int,
         view: ViewBox?,
-        movePositions: Boolean,
         prewarm: Boolean,
     ): Boolean {
-        val map = googleMap ?: return false
-        val deadline = System.nanoTime() + (if (movePositions) BUDGET_IDLE_MS else BUDGET_MOVING_MS) * 1_000_000L
-        fun outOfTime() = System.nanoTime() > deadline
-        var descBudget = MAX_NEW_DESC_PER_PASS
+        val dot = isDotMode
         var pending = false
 
-        /** Descriptor štítku, pokud je hotový (případně ho vytvoří z hotové bitmapy v rámci rozpočtu). */
-        fun label(v: Vehicle): BitmapDescriptor? {
+        /** Bitmapa štítku, pokud je hotová; jinak se objedná kreslení na pozadí. */
+        fun labelOf(v: Vehicle): Bitmap? {
             val key = labelKey(v.line, v.train, v.delay, 0)
-            cachedMarkerDescriptor(key)?.let { return it }
-            if (hasMarkerBitmap(key)) {
-                if (descBudget > 0) { descBudget--; return descriptorFromCachedBitmap(key) }
-            } else if (missingLabels.size < MAX_MISSING) {
-                missingLabels[key] = v
-            }
+            cachedMarkerBitmap(key)?.let { return it }
+            if (missingLabels.size < MAX_MISSING) missingLabels[key] = v
             pending = true
             return null
         }
 
-        fun create(c: Cand) {
-            val desc = iconFor(c.vehicle, c.isHl, phase, dot, false, null, ::label)
-            val z = if (c.isHl) 2.0f else 1.0f
-            val m = map.addMarker(
-                MarkerOptions()
-                    .position(LatLng(c.lat, c.lng))
-                    .icon(desc)
-                    .anchor(0.5f, 0.5f)
-                    .zIndex(z)
-            ) ?: return
-            val s = Slot(m, m.id)
-            s.lat = c.lat; s.lng = c.lng; s.desc = desc; s.z = z; s.vehicle = c.vehicle
-            slots[c.key] = s
-            byMarkerId[s.id] = c.key
+        val cap = activeVehicles.size
+        if (wx.size < cap) {
+            val sz = cap + cap / 4 + 16
+            wx = DoubleArray(sz); wy = DoubleArray(sz); color = IntArray(sz); label = arrayOfNulls(sz)
+            lat = DoubleArray(sz); lng = DoubleArray(sz); vehicles = arrayOfNulls(sz)
         }
-
-        /** Ikona a zIndex existujícího markeru; false = nestihlo se. */
-        fun refreshIcon(c: Cand, slot: Slot, pre: Boolean): Boolean {
-            val desc = iconFor(c.vehicle, c.isHl, phase, dot, pre, slot.desc, ::label)
-            if (slot.desc !== desc) {
-                if (!c.isHl && outOfTime()) return false
-                slot.marker.setIcon(desc)
-                slot.desc = desc
-            }
-            val z = if (c.isHl) 2.0f else 1.0f
-            if (slot.z != z) { slot.marker.zIndex = z; slot.z = z }
-            return true
-        }
-
-        // ── rozdělení na záběr / mimo záběr ──
-        val inView = ArrayList<Cand>()
-        val offView = ArrayList<Cand>(activeVehicles.size)
-        val seen = HashSet<String>(activeVehicles.size * 2 + 16)
-        for ((key, vehicle) in activeVehicles) {
-            seen += key
-            val slot = slots[key]
-            slot?.vehicle = vehicle   // jen v paměti (klik), žádné setTag IPC
+        var n = 0
+        var h = -1
+        for ((key, v) in activeVehicles) {
             val p = hub.positionOf(key)
-            val lat = p?.latitude ?: vehicle.lat
-            val lng = p?.longitude ?: vehicle.lng
-            val isHl = targetUid != null && vehicle.uid == targetUid
-            val c = Cand(key, vehicle, lat, lng, slot, isHl)
-            if (isHl || view == null || view.contains(lat, lng)) inView += c else offView += c
-        }
-
-        // ── 1. záběr, od středu ──
-        val cy = view?.let { (it.s + it.n) / 2 } ?: 0.0
-        val cx = view?.let { (it.w + it.e) / 2 } ?: 0.0
-        for (c in inView) { val dy = c.lat - cy; val dx = c.lng - cx; c.dist = dy * dy + dx * dx }
-        inView.sortWith(compareBy<Cand>({ !it.isHl }, { it.dist }))
-        for (c in inView) {
-            val slot = c.slot
-            if (slot == null) {
-                if (!c.isHl && outOfTime()) { pending = true; continue }
-                create(c)
-                continue
+            val la = p?.latitude ?: v.lat
+            val lo = p?.longitude ?: v.lng
+            val isHl = targetUid != null && v.uid == targetUid
+            wx[n] = (lo + 180.0) / 360.0
+            val sn = sin(Math.toRadians(la)).coerceIn(-0.9999, 0.9999)
+            wy[n] = 0.5 - ln((1 + sn) / (1 - sn)) / (4 * PI)
+            color[n] = vehicleColor(v.train, v.delay, if (isHl) phase else 0)
+            lat[n] = la; lng[n] = lo; vehicles[n] = v
+            val inView = view == null || view.contains(la, lo)
+            label[n] = when {
+                // zvýrazněné: pulzující štítek (jen pár variant, kreslí se hned)
+                isHl && !dot -> markerBitmap(context, v.line, v.train, v.delay, phase)
+                isHl -> null
+                !dot -> if (inView) labelOf(v) else cachedMarkerBitmap(labelKey(v.line, v.train, v.delay, 0))
+                else -> { if (prewarm && inView) labelOf(v); null }
             }
-            if (movePositions && (abs(slot.lat - c.lat) > 1e-6 || abs(slot.lng - c.lng) > 1e-6)) {
-                slot.marker.position = LatLng(c.lat, c.lng)
-                slot.lat = c.lat; slot.lng = c.lng
-            }
-            if (!refreshIcon(c, slot, prewarm && dot)) pending = true
+            if (isHl) h = n
+            n++
         }
-
-        // ── 2. vozidla, která zmizela z dat ──
-        if (slots.size > seen.size || slots.keys.any { it !in seen }) {
-            var removed = 0
-            val it = slots.entries.iterator()
-            while (it.hasNext()) {
-                val (key, s) = it.next()
-                if (key in seen) continue
-                if (removed >= MIN_REMOVALS && outOfTime()) { pending = true; break }
-                runCatching { s.marker.remove() }
-                byMarkerId.remove(s.id)
-                it.remove()
-                removed++
-            }
-        }
-
-        // ── 3. mimo záběr ve zbylém čase (round-robin, ať se dostane na všechny) ──
-        val n = offView.size
-        if (n > 0) {
-            var i = 0
-            var cursor = offCursor % n
-            while (i < n) {
-                if (outOfTime()) {
-                    // zbývá vytvořit / přebarvit? (pouhé dorovnání pozice nespěchá a další snímek nevynucuje)
-                    for (k in 0 until n - i) {
-                        val c = offView[(cursor + k) % n]
-                        val sl = c.slot
-                        if (sl == null || (dot && sl.desc !== dotDescriptor(context, vehicleColor(c.vehicle.train, c.vehicle.delay, 0))) ||
-                            (!dot && sl.desc !== cachedMarkerDescriptor(labelKey(c.vehicle.line, c.vehicle.train, c.vehicle.delay, 0)))
-                        ) { pending = true; break }
-                    }
-                    break
-                }
-                val c = offView[cursor]
-                val slot = c.slot
-                if (slot == null) {
-                    create(c)
-                } else {
-                    if (movePositions && (abs(slot.lat - c.lat) > OFF_MOVE_DEG || abs(slot.lng - c.lng) > OFF_MOVE_DEG)) {
-                        slot.marker.position = LatLng(c.lat, c.lng)
-                        slot.lat = c.lat; slot.lng = c.lng
-                    }
-                    if (!refreshIcon(c, slot, false)) { pending = true; break }
-                }
-                cursor = (cursor + 1) % n
-                i++
-            }
-            offCursor = cursor
-        }
+        for (i in n until count) { vehicles[i] = null; label[i] = null }
+        count = n
+        hl = h
+        version.intValue++
         return pending
     }
 
     /**
-     * Okamžité vyhodnocení ťuknutí (bez čekání ~300 ms na vyloučení dvojkliku, které dělá OnMarkerClickListener).
-     * Počítá se jen z pozic v paměti, žádné volání mapy. [lat]/[lng] = místo ťuknutí, [degPerDpLng] = stupně délky na dp.
+     * Okamžité vyhodnocení ťuknutí. Počítá se jen z pozic v paměti, žádné volání mapy.
+     * [lat]/[lng] = místo ťuknutí, [degPerDpLng] = stupně délky na dp.
      */
     fun hitTest(lat: Double, lng: Double, degPerDpLng: Double): Vehicle? {
         val degPerDpLat = degPerDpLng * kotlin.math.cos(Math.toRadians(lat))
-        val (halfW, halfH) = if (isDotMode) 12.0 to 12.0 else 26.0 to 16.0   // dp, se slušnou rezervou na prst
-        var best: Slot? = null
+        val density = context.resources.displayMetrics.density
+        var best: Vehicle? = null
         var bestD = Double.MAX_VALUE
-        for (s in slots.values) {
-            val dx = (s.lng - lng) / degPerDpLng
-            val dy = (s.lat - lat) / degPerDpLat
+        for (i in 0 until count) {
+            val b = label[i]
+            // dp, se slušnou rezervou na prst
+            val halfW = if (b != null) b.width / density / 2.0 + 4.0 else 12.0
+            val halfH = if (b != null) b.height / density / 2.0 + 3.0 else 12.0
+            val dx = (this.lng[i] - lng) / degPerDpLng
+            val dy = (this.lat[i] - lat) / degPerDpLat
             if (abs(dx) > halfW || abs(dy) > halfH) continue
-            val d = dx * dx + dy * dy - (if (s.z > 1f) 1e6 else 0.0)   // zvýrazněné má přednost
-            if (d < bestD) { bestD = d; best = s }
+            val d = dx * dx + dy * dy - (if (i == hl) 1e6 else 0.0)   // zvýrazněné má přednost
+            if (d < bestD) { bestD = d; best = vehicles[i] }
         }
-        return best?.vehicle
-    }
-
-    private inline fun iconFor(
-        vehicle: Vehicle,
-        isHl: Boolean,
-        phase: Int,
-        dot: Boolean,
-        prewarm: Boolean,
-        current: BitmapDescriptor?,
-        label: (Vehicle) -> BitmapDescriptor?,
-    ): BitmapDescriptor {
-        val iconPhase = if (isHl) phase else 0
-        val dotDesc = dotDescriptor(context, vehicleColor(vehicle.train, vehicle.delay, iconPhase))
-        return when {
-            dot -> {
-                if (prewarm && !isHl) label(vehicle)   // jen připravit, nezobrazovat
-                dotDesc
-            }
-            isHl -> markerDescriptor(context, vehicle.line, vehicle.train, vehicle.delay, iconPhase)
-            // štítek ještě není => zatím nechat, co je (tečku), vymění se v dalším průchodu
-            else -> label(vehicle) ?: current ?: dotDesc
-        }
+        return best
     }
 
     fun updateRoute(
@@ -357,11 +238,8 @@ internal class GoogleVehicleLayer(private val context: Context) {
     }
 
     private companion object {
-        const val BUDGET_IDLE_MS = 8L       // práce s markery za jeden snímek (snímek má 16 ms)
-        const val BUDGET_MOVING_MS = 4L     // během gesta méně, ať se mapa hýbe plynule
-        const val MIN_REMOVALS = 20
-        const val MAX_NEW_DESC_PER_PASS = 24
-        const val OFF_MOVE_DEG = 2e-4       // mimo záběr se pozice dorovnává jen při posunu > ~20 m
         const val MAX_MISSING = 256
+        const val LABEL_ENTER_MAX = 1500    // pojistka: štítky, když je v záběru nejvýš tolik vozidel…
+        const val LABEL_LEAVE_MAX = 1800    // …a zpět na tečky až nad tímto počtem
     }
 }

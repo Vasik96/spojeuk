@@ -19,30 +19,13 @@ import androidx.core.graphics.drawable.toDrawable
 // bitmapy se dají použít beze změny, jen BitmapDescriptor je specifický pro Google.
 
 private val markerIconCache = ConcurrentHashMap<String, BitmapDrawable>()
-private val descCache = ConcurrentHashMap<String, BitmapDescriptor>()
 
-internal fun markerDescriptor(ctx: Context, line: String, train: Boolean, delay: Int, phase: Int): BitmapDescriptor =
-    descCache.getOrPut("$line:$train:${delay > 3}:$phase") {
-        BitmapDescriptorFactory.fromBitmap(
-            createLineMarkerDrawable(ctx, line, train, delay, phase).bitmap
-        )
-    }
-
-// ── štítky po částech: bitmapa se kreslí na pozadí, descriptor (IPC do mapy) se tvoří na hlavním vlákně po dávkách ──
+// ── štítky vozidel: bitmapa se kreslí na pozadí (prerenderMarker), overlay na mapě si bere hotové (cachedMarkerBitmap) ──
 
 internal fun labelKey(line: String, train: Boolean, delay: Int, phase: Int): String = "$line:$train:${delay > 3}:$phase"
 
-/** Hotový descriptor štítku, nebo null (nic nekreslí). */
-internal fun cachedMarkerDescriptor(key: String): BitmapDescriptor? = descCache[key]
-
-internal fun hasMarkerBitmap(key: String): Boolean = markerIconCache.containsKey(key)
-
-/** Descriptor z již nakreslené bitmapy (bez kreslení), null když bitmapa ještě není. */
-internal fun descriptorFromCachedBitmap(key: String): BitmapDescriptor? {
-    descCache[key]?.let { return it }
-    val d = markerIconCache[key] ?: return null
-    return descCache.getOrPut(key) { BitmapDescriptorFactory.fromBitmap(d.bitmap) }
-}
+/** Hotová bitmapa štítku, nebo null (nic nekreslí). */
+internal fun cachedMarkerBitmap(key: String): Bitmap? = markerIconCache[key]?.bitmap
 
 /** Nakreslí bitmapu štítku do cache. Bezpečné volat mimo hlavní vlákno. */
 internal fun prerenderMarker(ctx: Context, line: String, train: Boolean, delay: Int, phase: Int) {
@@ -64,7 +47,6 @@ internal fun vehicleColor(train: Boolean, delay: Int, phase: Int = 0): Int = whe
 // ───────────── malé tečky pro oddálenou mapu (bez čísla linky) ─────────────
 
 private val dotBitmapCache = ConcurrentHashMap<Int, Bitmap>()
-private val dotDescCache = ConcurrentHashMap<Int, BitmapDescriptor>()
 
 /** Malá tečka (cca 9 dp) v barvě vozidla s jemným světlým okrajem, aby šla vidět na tmavé i světlé mapě. */
 internal fun dotBitmap(ctx: Context, color: Int): Bitmap = dotBitmapCache.getOrPut(color) {
@@ -77,9 +59,6 @@ internal fun dotBitmap(ctx: Context, color: Int): Bitmap = dotBitmapCache.getOrP
     c.drawCircle(r, r, r - 1.2f * density, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color })
     bmp
 }
-
-internal fun dotDescriptor(ctx: Context, color: Int): BitmapDescriptor =
-    dotDescCache.getOrPut(color) { BitmapDescriptorFactory.fromBitmap(dotBitmap(ctx, color)) }
 
 /** phase: 0 = normální, 1 = zvýraznění A (žlutá, velká), 2 = zvýraznění B (oranžová, menší). */
 private fun createLineMarkerDrawable(

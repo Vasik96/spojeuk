@@ -120,14 +120,8 @@ class SpojeAppState(
     /** Čas (elapsedRealtime) posledního kliknutí na vozidlo; smyčky markerů po tu dobu nic nepočítají, ať sheet naběhne hned. */
     @Volatile var vehicleSelectedAtMs: Long = 0L
 
-    /** Zpožděný klik z mapy (onClick markeru): pokud tap už vozidlo vybral, nepřepisovat výběr jiným (sousedním) vozidlem. */
-    fun selectVehicleLate(v: Vehicle) {
-        if (android.os.SystemClock.elapsedRealtime() - vehicleSelectedAtMs < 1000L) return
-        selectVehicle(v)
-    }
-
     fun selectVehicle(v: Vehicle) {
-        // tap vyhodnocený hned při zvednutí prstu + pozdější (zpožděný) klik z mapy => druhé volání ignorovat
+        // stejné vozidlo znovu (např. opakované ťuknutí) => nic
         if (selectedVehicle?.uid == v.uid) return
         vehicleSelectedAtMs = android.os.SystemClock.elapsedRealtime()
         android.util.Log.d("SheetLag", "selectVehicle: +${vehicleSelectedAtMs - TouchDiag.lastUpAt} ms od zvednutí prstu")
