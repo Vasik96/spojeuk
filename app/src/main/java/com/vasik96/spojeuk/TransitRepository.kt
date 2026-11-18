@@ -76,6 +76,7 @@ class TransitRepository(context: Context? = null) {
     }
     private fun onTimetableLoaded(tt: Timetable) {
         Log.i(TAG, "DB: hasGid=${tt.hasGid} trips=${tt.meta["trips"]} tag=${tt.meta["tag"]}")
+        prewarmPlanner()
         hub.onTimetableLoaded()
         scope.launch { runCatching { saveTrainLines(tt.trainLineTable()) }.onFailure { Log.w(TAG, "uložení linek vlaků selhalo: ${it.message}") } }
         if (!tt.hasGid) scheduleShapeUpgrade()
@@ -241,10 +242,19 @@ class TransitRepository(context: Context? = null) {
         count: Int = 8,
         modeFilter: ModeFilter = ModeFilter.ALL,
     ): List<Journey> = withContext(Dispatchers.IO) {
+        val t0 = System.nanoTime()
         val b = store.ensure()
-
+        val t1 = System.nanoTime()
         val journeys = b.planner.find(fromName, toName, startTime, count, modeFilter = modeFilter)
-        withRouteStops(withLiveDelays(journeys))
+        val t2 = System.nanoTime()
+        val live = withLiveDelays(journeys)
+        val t3 = System.nanoTime()
+        val out = withRouteStops(live)
+        val t4 = System.nanoTime()
+        fun ms(a: Long, b: Long) = (b - a) / 1_000_000
+        Log.d("SearchPerf", "$fromName → $toName: JŘ ${ms(t0, t1)} ms, plánovač ${ms(t1, t2)} ms, " +
+                "živá zpoždění ${ms(t2, t3)} ms, zastávky ${ms(t3, t4)} ms, celkem ${ms(t0, t4)} ms (${out.size} spojení)")
+        out
     }
 
     suspend fun searchMoreLater(
@@ -269,9 +279,26 @@ class TransitRepository(context: Context? = null) {
         withRouteStops(withLiveDelays(b.planner.moreEarlier(fromName, toName, current, hours = hours, modeFilter = modeFilter)))
     }
 
+    /**
+     * Síť spojů pro dnešek (a večer i pro zítřek, kam hledání přetéká přes půlnoc) se postaví na pozadí hned po načtení
+     * jízdního řádu: stavba projde všechny spoje a trvá sekundy, dřív ji zaplatilo až první "Najít spojení".
+     */
+    private fun prewarmPlanner() {
+        scope.launch(Dispatchers.Default) {
+            val b = store.current ?: return@launch
+            val now = nowPrague()
+            runCatching {
+                b.planner.net(now.toLocalDate())
+                if (now.hour >= 18) b.planner.net(now.toLocalDate().plusDays(1))
+            }.onFailure { Log.w(TAG, "příprava plánovače selhala: ${it.message}") }
+        }
+    }
+
     /** Doplní do spojení živé zpoždění (z posledního sloučeného stavu vozů). */
     private suspend fun withLiveDelays(journeys: List<Journey>): List<Journey> {
-        runCatching { hub.refresh(maxAgeMs = 10_000) }
+        // na čerstvé polohy se čeká jen krátce: na pomalé síti by hledání čekalo až 15 s (opakované pokusy),
+        // jinak se vezmou poslední známé polohy
+        runCatching { kotlinx.coroutines.withTimeoutOrNull(LIVE_DELAY_WAIT_MS) { hub.refresh(maxAgeMs = 10_000) } }
         val fleet = hub.fleet
         for (j in journeys) {
             for (leg in j.rawLegs) {
@@ -546,6 +573,9 @@ class TransitRepository(context: Context? = null) {
             }
     }
 }
+
+/** Jak dlouho hledání spojení čeká na čerstvé polohy vozů (živá zpoždění), než použije poslední známé. */
+private const val LIVE_DELAY_WAIT_MS = 1_200L
 
 /** Jak daleko dopředu se dá ve výsledcích scrollovat. */
 private const val SEARCH_SPAN_HOURS = 24L

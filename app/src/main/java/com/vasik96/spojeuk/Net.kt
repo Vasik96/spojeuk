@@ -374,7 +374,9 @@ class Planner(val tt: Timetable) {
             if (nets.size >= 4) {
                 nets.remove(nets.keys.first())
             }
-            Net(tt, day)
+            // projde všechny spoje JŘ (statisíce) => sekundy; proto se dnešek staví předem (TransitRepository.prewarmPlanner)
+            val t0 = System.nanoTime()
+            Net(tt, day).also { android.util.Log.d("SearchPerf", "síť pro $day postavena za ${(System.nanoTime() - t0) / 1_000_000} ms") }
         }
     }
 
