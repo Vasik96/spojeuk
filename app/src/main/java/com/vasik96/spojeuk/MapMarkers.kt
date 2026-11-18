@@ -28,6 +28,27 @@ internal fun markerDescriptor(ctx: Context, line: String, train: Boolean, delay:
         )
     }
 
+// ── štítky po částech: bitmapa se kreslí na pozadí, descriptor (IPC do mapy) se tvoří na hlavním vlákně po dávkách ──
+
+internal fun labelKey(line: String, train: Boolean, delay: Int, phase: Int): String = "$line:$train:${delay > 3}:$phase"
+
+/** Hotový descriptor štítku, nebo null (nic nekreslí). */
+internal fun cachedMarkerDescriptor(key: String): BitmapDescriptor? = descCache[key]
+
+internal fun hasMarkerBitmap(key: String): Boolean = markerIconCache.containsKey(key)
+
+/** Descriptor z již nakreslené bitmapy (bez kreslení), null když bitmapa ještě není. */
+internal fun descriptorFromCachedBitmap(key: String): BitmapDescriptor? {
+    descCache[key]?.let { return it }
+    val d = markerIconCache[key] ?: return null
+    return descCache.getOrPut(key) { BitmapDescriptorFactory.fromBitmap(d.bitmap) }
+}
+
+/** Nakreslí bitmapu štítku do cache. Bezpečné volat mimo hlavní vlákno. */
+internal fun prerenderMarker(ctx: Context, line: String, train: Boolean, delay: Int, phase: Int) {
+    createLineMarkerDrawable(ctx, line, train, delay, phase)
+}
+
 internal fun markerBitmap(ctx: Context, line: String, train: Boolean, delay: Int, phase: Int): Bitmap =
     createLineMarkerDrawable(ctx, line, train, delay, phase).bitmap
 

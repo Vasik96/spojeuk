@@ -74,8 +74,6 @@ private const val CR: Byte = 13
 private const val COMMA: Byte = 44
 private const val QUOTE: Byte = 34
 
-private val WS = Regex("\\s+")
-
 /** Čte soubor po řádcích přímo z bajtů; žádný String na řádek. */
 private class ByteLineReader(private val input: InputStream, bufSize: Int = 1 shl 18) : Closeable {
     var buf = ByteArray(bufSize)
@@ -279,27 +277,68 @@ private class TripBuffer {
     fun clear() { n = 0 }
 }
 
-/** Mapuje stop_id → malé int "code" (pro rychlé porovnávání) a code → ID v DB. */
+/**
+ * Mapuje stop_id → malé int "code" (pro rychlé porovnávání) a code → ID v DB.
+ * Hledá se přímo nad bajty řádku (vlastní hash tabulka), takže pro miliony řádků stop_times
+ * nevzniká žádný String; ten se vytvoří jen jednou pro každou novou zastávku.
+ */
 private class StopInterner(private val region: Set<String>, expected: Int) {
-    private val map = HashMap<String, Int>(expected * 2 + 16)
     val names = ArrayList<String>()
+    private val keys = ArrayList<ByteArray>()
+    private val hashes = ArrayList<Int>()
+    private var table = IntArray(Integer.highestOneBit(expected * 2).coerceAtLeast(1024) * 2) { -1 }
+    private var mask = table.size - 1
     var isRegion = BooleanArray(expected + 16)
         private set
     private var dbId = IntArray(expected + 16)
     val order = ArrayList<Int>()      // pořadí přidělení DB ID (dbId = index + 1)
 
-    fun code(name: String): Int {
-        val existing = map[name]
-        if (existing != null) return existing
+    private fun hash(b: ByteArray, s: Int, len: Int): Int {
+        var h = -0x7ee3623b   // FNV-1a
+        for (i in s until s + len) h = (h xor (b[i].toInt() and 0xFF)) * 0x01000193
+        return h xor (h ushr 16)
+    }
+
+    fun code(b: ByteArray, s: Int, len: Int): Int {
+        val h = hash(b, s, len)
+        var i = h and mask
+        while (true) {
+            val c = table[i]
+            if (c < 0) break
+            if (hashes[c] == h) {
+                val k = keys[c]
+                if (k.size == len) {
+                    var eq = true
+                    for (j in 0 until len) if (k[j] != b[s + j]) { eq = false; break }
+                    if (eq) return c
+                }
+            }
+            i = (i + 1) and mask
+        }
         val c = names.size
+        val key = b.copyOfRange(s, s + len)
+        val name = String(key, Charsets.UTF_8)
+        keys.add(key)
+        hashes.add(h)
         names.add(name)
-        map[name] = c
+        table[i] = c
         if (c >= isRegion.size) {
             isRegion = isRegion.copyOf(c * 2)
             dbId = dbId.copyOf(c * 2)
         }
         isRegion[c] = name in region
+        if (names.size * 2 > table.size) rehash()
         return c
+    }
+
+    private fun rehash() {
+        table = IntArray(table.size * 2) { -1 }
+        mask = table.size - 1
+        for (c in names.indices) {
+            var i = hashes[c] and mask
+            while (table[i] >= 0) i = (i + 1) and mask
+            table[i] = c
+        }
     }
 
     fun dbIdFor(code: Int): Int {
@@ -313,10 +352,25 @@ private class StopInterner(private val region: Set<String>, expected: Int) {
     }
 }
 
+/** "123456 7" → ("123456", "7"), jinak null (bez regexu, volá se pro každý spoj). */
+private fun splitTwoWords(x: String): Pair<String, String>? {
+    val t = x.trim()
+    var i = 0
+    while (i < t.length && !t[i].isWhitespace()) i++
+    if (i == 0 || i == t.length) return null
+    var j = i
+    while (j < t.length && t[j].isWhitespace()) j++
+    for (k in j until t.length) if (t[k].isWhitespace()) return null
+    return t.substring(0, i) to t.substring(j)
+}
+
 // ───────────────────────── GTFS → SQLite ─────────────────────────
 
-/** Jeden GTFS zip k importu. [rail] = vlaky z CZPTT: širší oblast a číslo vlaku místo ČIS čísla. */
-class GtfsFeed(val zip: File, val rail: Boolean = false)
+/**
+ * Jeden GTFS zip k importu. [rail] = vlaky z CZPTT: širší oblast a číslo vlaku místo ČIS čísla.
+ * [awaitReady] blokuje, dokud zip není stažený (import prvního feedu tak může začít, zatímco se druhý ještě stahuje).
+ */
+class GtfsFeed(val zip: File, val rail: Boolean = false, val awaitReady: () -> Unit = {})
 
 class GtfsImporter(private val dbFile: File) {
 
@@ -364,9 +418,13 @@ class GtfsImporter(private val dbFile: File) {
             tmpDb.delete()
 
             val db = SQLiteDatabase.openOrCreateDatabase(tmpDb, null)
-            db.rawQuery("PRAGMA synchronous = OFF;", null).close()
-            db.rawQuery("PRAGMA journal_mode = MEMORY;", null).close()
-            db.rawQuery("PRAGMA temp_store = MEMORY;", null).close()
+            // rawQuery se na Androidu vykoná až při čtení kurzoru => moveToFirst, jinak se PRAGMA vůbec neprovede
+            fun pragma(sql: String) = runCatching { db.rawQuery("PRAGMA $sql", null).use { it.moveToFirst() } }
+            pragma("synchronous = OFF")
+            pragma("journal_mode = OFF")        // nová dočasná DB, při chybě se stejně celá zahodí
+            pragma("locking_mode = EXCLUSIVE")
+            pragma("temp_store = MEMORY")
+            pragma("cache_size = -16384")       // 16 MB stránkové cache
 
             db.beginTransaction()
             try {
@@ -388,6 +446,7 @@ class GtfsImporter(private val dbFile: File) {
                     fun prog(p: Float) = progress(((fi + p) / feeds.size) * 0.95f)
 
                     // soubory se čtou rovnou ze zipu (stop_times.txt má stovky MB, rozbalení na disk a znovu čtení se šetří)
+                    feed.awaitReady()
                     prog(0.05f)
                     val zf = ZipFile(feed.zip)
                     openZips.add(zf)
@@ -497,10 +556,10 @@ class GtfsImporter(private val dbFile: File) {
                             cis = ""
                             num = meta.shortName.substringAfterLast(' ').filter { it.isDigit() }.trimStart('0')
                         } else {
-                            val sn = meta.shortName.split(WS)
-                            if (sn.size == 2 && sn[0].all { it.isDigit() }) {
-                                cis = sn[0].padStart(6, '0')
-                                num = sn[1]
+                            val sn = splitTwoWords(meta.shortName)
+                            if (sn != null && sn.first.all { it.isDigit() }) {
+                                cis = sn.first.padStart(6, '0')
+                                num = sn.second
                             } else {
                                 val p = tripId.split(":")
                                 if (p.size >= 5) {
@@ -585,7 +644,7 @@ class GtfsImporter(private val dbFile: File) {
                                 }
                                 if (curMeta == null) continue
 
-                                val code = stops.code(String(b, ss, sl, Charsets.UTF_8))
+                                val code = stops.code(b, ss, sl)
                                 tb.add(
                                     code,
                                     parseIntBytes(b, sc.fs[2], sc.fe[2]),

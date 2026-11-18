@@ -182,10 +182,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     var isMapReady by remember { mutableStateOf(false) }
     // Google: všechny dlaždice načtené (onMapLoaded). Zatím nic nezdržuje, jen se podle toho zapíná modrá tečka polohy.
     var googleTilesLoaded by remember { mutableStateOf(false) }
-    // Google: true = oddáleno, vozidla jsou jen tečky
-    val googleSize = remember { IntArray(2) }   // rozměr mapy v px (pro výpočet viditelné oblasti bez dotazu na mapu)
     val googleLayer = remember(context) { GoogleVehicleLayer(context) }
-    val overlayTick = remember { mutableLongStateOf(0L) }   // změna = překreslit Canvas s vozidly
 
     // Mapa se zobrazí hned (dřív tu byla 140ms pauza s "Načítání mapy…"). Vytváří se předem na pozadí (viz SpojeApp, mapVisited),
     // takže po přepnutí na záložku už jen odkryje hotovou mapu.
@@ -408,14 +405,6 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val predict = appState.predictVehiclePositions
     LaunchedEffect(activeVehicles, predict) { hub.update(activeVehicles, predict) }
 
-    LaunchedEffect(hub, active, appState.mapProvider, isMapReady) {
-        if (!active || appState.mapProvider != MapProvider.GOOGLE || !isMapReady) return@LaunchedEffect
-        while (true) {
-            delay(100.milliseconds)
-            overlayTick.longValue = SystemClock.elapsedRealtime()
-        }
-    }
-
     val systemDark = isSystemInDarkTheme()
     val appDark = when (appState.appTheme) {
         AppTheme.SYSTEM -> systemDark
@@ -430,7 +419,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
     val scheme = if (useDarkMap) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT
 
-    Box(modifier = modifier.fillMaxSize().onSizeChanged { googleSize[0] = it.width; googleSize[1] = it.height }) {
+    Box(modifier = modifier.fillMaxSize()) {
         if (appState.mapProvider == MapProvider.GOOGLE) {
             GoogleMap(
                 modifier = Modifier.fillMaxSize(),
@@ -510,7 +499,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     phase = phase,
                     appState = appState,
                     showFullRoute = showFullRoute,
-                    tick = overlayTick,
+                    active = active,
                 )
             }
         } else {
@@ -728,10 +717,10 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
 
 /**
- * Vozidla, šipky na trase, začátek / konec a zastávky nad Google mapou, kreslené jedním Canvasem (viz
- * [GoogleVehicleLayer]). Canvas nemá žádný pointerInput, takže všechna gesta propouští mapě pod sebou.
- * Čte pozici kamery přímo ve fázi kreslení => při tažení / zoomu se překreslí sám bez rekomponování.
- * Rekomponuje se jen při změně trasy, vozidel nebo půlstupně zoomu (velikost / rozestup šipek).
+ * Vozidla, šipky na trase, začátek / konec a zastávky nad Google mapou jako nativní markery (viz [GoogleVehicleLayer]).
+ * Nic tady nečte pozici kamery během kompozice => pohyb / zoom mapy nevyvolá rekompozici.
+ * Vozidla obsluhuje jedna smyčka: pohyb (hub), culling na viditelnou oblast a zápis do markerů.
+ * Během gesta se existující markery nehýbou (jádro je posouvá s mapou samo), jen se přidávají nově viditelná vozidla.
  */
 @Composable
 private fun GoogleVehicleOverlay(
@@ -743,13 +732,15 @@ private fun GoogleVehicleOverlay(
     phase: Int,
     appState: SpojeAppState,
     showFullRoute: Boolean,
-    tick: androidx.compose.runtime.LongState,
+    active: Boolean,
 ) {
     val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
+    val context = LocalContext.current
 
-    val currentCam = cameraPositionState.position
-    val zoomBucket by remember { derivedStateOf { (currentCam.zoom * 2).toInt() } }
-    val arrowSpacing = remember(zoomBucket) { arrowSpacingForZoom(zoomBucket / 2f) }
+    // rozestup šipek se mění jen na hranicích zoomu => rekompozice jen tehdy, ne při každém snímku zoomu
+    val arrowSpacing by remember(cameraPositionState) {
+        derivedStateOf { arrowSpacingForZoom(cameraPositionState.position.zoom) }
+    }
 
     val route = appState.tripRoute
     val full = appState.fullRoute
@@ -761,15 +752,78 @@ private fun GoogleVehicleOverlay(
         else withContext(Dispatchers.Default) { createRouteArrows(route = route, spacingMeters = arrowSpacing) }
     }
 
-    val tickVal = tick.longValue
-    val zoom = currentCam.zoom
-
-    LaunchedEffect(activeVehicles, zoom, targetUid, phase, tickVal) {
-        layer.updateVehicles(activeVehicles, hub, zoom, targetUid, phase)
-    }
-
     LaunchedEffect(route, full, useFull, stopDots, arrows, arrowArgb) {
         layer.updateRoute(route, full, useFull, stopDots, arrows, arrowArgb)
+    }
+
+    val latestVehicles by rememberUpdatedState(activeVehicles)
+    val latestTarget by rememberUpdatedState(targetUid)
+    val latestPhase by rememberUpdatedState(phase)
+
+    LaunchedEffect(layer, hub, active) {
+        if (!active) return@LaunchedEffect
+        var lastCam: CameraPosition? = null
+        var view: ViewBox? = null
+        var keepView: ViewBox? = null
+        var lastVehicles: List<Pair<String, Vehicle>>? = null
+        var lastTarget: String? = null
+        var lastPhase = -1
+        var pending = false
+
+        while (true) {
+            val moving = cameraPositionState.isMoving
+            val dot = layer.isDotMode
+            delay(
+                when {
+                    pending && moving -> 50L
+                    pending -> 16L
+                    moving -> GOOGLE_MOVING_INTERVAL_MS
+                    !dot -> GOOGLE_VEHICLE_INTERVAL_MS
+                    else -> GOOGLE_DOT_INTERVAL_MS
+                }
+            )
+            val now = SystemClock.elapsedRealtime()
+            if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
+
+            val cam = cameraPositionState.position
+            val camChanged = cam != lastCam || view == null
+            if (camChanged) {
+                lastCam = cam
+                layer.updateMode(cam.zoom)
+                val b = runCatching { cameraPositionState.projection?.visibleRegion?.latLngBounds }.getOrNull()
+                if (b != null) {
+                    val base = ViewBox(b.southwest.latitude, b.southwest.longitude, b.northeast.latitude, b.northeast.longitude)
+                    view = base.expanded(0.25)
+                    keepView = base.expanded(0.6)
+                }
+            }
+
+            val vehicles = latestVehicles
+            val tgt = latestTarget
+            val ph = latestPhase
+            val metaChanged = vehicles !== lastVehicles || tgt != lastTarget || ph != lastPhase
+            lastVehicles = vehicles; lastTarget = tgt; lastPhase = ph
+
+            val movePositions = !cameraPositionState.isMoving
+            var moved = false
+            if (movePositions) {
+                hub.ensureRoutes(view, enabled = !layer.isDotMode)
+                moved = hub.tick(now, view)
+            }
+            if (!moved && !metaChanged && !camChanged && !pending) continue
+
+            // štítky se chystají už kousek před přepnutím z teček, ať se při přepnutí jen vymění ikony
+            val prewarm = layer.isDotMode && cam.zoom >= DOT_ZOOM_GOOGLE - LABEL_PREWARM_ZOOM
+            pending = layer.updateVehicles(
+                vehicles, hub, layer.isDotMode, tgt, ph, view, keepView, movePositions, prewarm
+            )
+            val missing = layer.takeMissingLabels()
+            if (missing.isNotEmpty()) {
+                withContext(Dispatchers.Default) {
+                    for (v in missing) prerenderMarker(context, v.line, v.train, v.delay, 0)
+                }
+            }
+        }
     }
 }
 
@@ -816,6 +870,10 @@ private const val VEHICLE_UPDATE_INTERVAL_MS = 33L
 // oddáleno (tečky): pohyb o pixel trvá dlouho, stačí řídké aktualizace
 private const val DOT_UPDATE_INTERVAL_MS = 250L
 private const val DOT_UPDATE_INTERVAL_FAR_MS = 500L
+private const val GOOGLE_VEHICLE_INTERVAL_MS = 66L     // Google: každý zápis do markeru je IPC, proto ne každý snímek
+private const val GOOGLE_DOT_INTERVAL_MS = 500L
+private const val GOOGLE_MOVING_INTERVAL_MS = 150L
+private const val LABEL_PREWARM_ZOOM = 1.0f            // o kolik úrovní před přepnutím na štítky se začnou kreslit    // během gesta jen přidávání nově viditelných vozidel
 private const val MAX_NEW_IMAGES_PER_PUSH = 10
 
 // popis vozidla pro vykreslení: ikona + řazení, přepočítá se jen při změně vozidel / zvýraznění

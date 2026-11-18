@@ -135,18 +135,58 @@ class TimetableStore(
         if (target == pendingFile && (meta()["tag"] == tag || stagedTag == tag)) { log("Data jsou aktuální."); return true }
 
         val dir = dbFile.parentFile
-        val feeds = listOf("jdf-region.zip" to false, "czptt-region.zip" to true).map { (name, rail) ->
+        val names = listOf("jdf-region.zip" to false, "czptt-region.zip" to true)
+
+        // Oba zipy se stahují souběžně a import autobusů začne, jakmile je stažený jejich zip
+        // (vlaky se mezitím dostahují). Celkový postup: 20 % stahování, 80 % import.
+        val total = java.util.concurrent.atomic.AtomicLongArray(names.size)
+        val done = java.util.concurrent.atomic.AtomicLongArray(names.size)
+        val importMilli = java.util.concurrent.atomic.AtomicInteger(0)
+        val lastReported = java.util.concurrent.atomic.AtomicInteger(-1)
+        fun report() {
+            var t = 0L; var d = 0L
+            for (i in names.indices) { t += total[i]; d += done[i] }
+            val dl = if (t > 0) (d.toFloat() / t).coerceIn(0f, 1f) else 0f
+            val p = 0.2f * dl + 0.8f * importMilli.get() / 1000f
+            val pct = (p * 1000).toInt()
+            val prev = lastReported.get()
+            if (pct > prev && lastReported.compareAndSet(prev, pct)) progress(p)
+        }
+
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(names.size)
+        val feeds = names.mapIndexed { i, (name, rail) ->
             val f = File(dir, if (rail) "gtfs_rail.zip" else "gtfs.zip")
-            log("Stahuji $name…")
-            open("$REGION_BASE_URL/$name").use { resp ->
-                val body = resp.body ?: error("Prázdná odpověď")
-                FileOutputStream(f).use { out -> body.byteStream().copyTo(out, 65536) }
+            val job = pool.submit {
+                open("$REGION_BASE_URL/$name").use { resp ->
+                    val body = resp.body ?: error("Prázdná odpověď")
+                    total.set(i, body.contentLength().coerceAtLeast(0L))
+                    log("Stahuji $name (${body.contentLength().coerceAtLeast(0L) / 1048576} MB)…")
+                    body.byteStream().use { input ->
+                        FileOutputStream(f).use { out ->
+                            val buf = ByteArray(1 shl 17)
+                            while (true) {
+                                val r = input.read(buf)
+                                if (r < 0) break
+                                out.write(buf, 0, r)
+                                done.addAndGet(i, r.toLong())
+                                report()
+                            }
+                        }
+                    }
+                }
             }
-            GtfsFeed(f, rail)
+            GtfsFeed(f, rail) {
+                try {
+                    job.get()
+                } catch (e: java.util.concurrent.ExecutionException) {
+                    throw e.cause ?: e
+                }
+            }
         }
         try {
-            GtfsImporter(target).importGtfs(feeds, tag, log, progress)
+            GtfsImporter(target).importGtfs(feeds, tag, log) { importMilli.set((it * 1000).toInt()); report() }
         } finally {
+            pool.shutdownNow()
             feeds.forEach { it.zip.delete() }
         }
         return true
