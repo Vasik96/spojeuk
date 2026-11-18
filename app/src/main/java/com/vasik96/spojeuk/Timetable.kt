@@ -113,29 +113,7 @@ class Timetable(val dbFile: File) {
 
             db.forEachRow("PRAGMA table_info(trip)") { if (it.getString(1) == "gid") hasGid = true }
 
-            val gidCol = if (hasGid) ", gid" else ""
-            // linky, dopravci, cíle a čísla ČIS se opakují u statisíců spojů; sdílená instance šetří paměť i GC
-            val pool = HashMap<String, String>(8192)
-            fun intern(x: String?): String? = if (x == null) null else pool.getOrPut(x) { x }
-            db.forEachRow("SELECT id, line, agency, cis, num, head, svc, wheel, t0, t1$gidCol FROM trip") { c ->
-                val id = c.getInt(0)
-                val trip = DbTrip(
-                    id = id,
-                    line = intern(c.getString(1)) ?: "?",
-                    agency = intern(c.getString(2)) ?: "",
-                    cis = intern(c.getString(3)) ?: "",
-                    num = intern(c.getString(4)) ?: "",
-                    head = intern(c.getString(5)) ?: "",
-                    svc = c.getInt(6),
-                    wheel = c.getInt(7),
-                    t0 = c.getInt(8),
-                    t1 = c.getInt(9),
-                    gid = if (hasGid) c.getString(10) ?: "" else "",
-                )
-                trips[id] = trip
-                if (trip.cis.isNotBlank()) tripsByKey.getOrPut("${trip.cis}:${trip.num}") { mutableListOf() }.add(id)
-                if (trip.isTrain && trip.num.isNotBlank()) tripsByTrain.getOrPut(trip.num) { mutableListOf() }.add(id)
-            }
+            loadTrips()
 
             db.forEachRow("SELECT id, dow, d0, d1 FROM svc") { c ->
                 val id = c.getInt(0)
@@ -148,6 +126,63 @@ class Timetable(val dbFile: File) {
             }
         } finally {
             db.close()
+        }
+    }
+
+    /**
+     * Tabulka spojů (statisíce řádků, hlavně textové sloupce) je nejdražší část načítání (~2,6 s v jednom vlákně):
+     * čte se souběžně v několika spojeních nad rozsahy id, indexy podle čísla spoje / vlaku se postaví po spojení
+     * ve stejném pořadí jako dřív (podle id).
+     */
+    private fun loadTrips() {
+        val gidCol = if (hasGid) ", gid" else ""
+        val maxId = readDb().rawQuery("SELECT max(id) FROM trip", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+        val parts = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
+        val step = maxId / parts + 1
+
+        fun readPart(lo: Int, hi: Int): HashMap<Int, DbTrip> {
+            val out = HashMap<Int, DbTrip>(step * 2)
+            // linky, dopravci, cíle a čísla ČIS se opakují u statisíců spojů; sdílená instance šetří paměť i GC
+            val pool = HashMap<String, String>(8192)
+            fun intern(x: String?): String? = if (x == null) null else pool.getOrPut(x) { x }
+            val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
+            try {
+                db.forEachRow("SELECT id, line, agency, cis, num, head, svc, wheel, t0, t1$gidCol FROM trip WHERE id BETWEEN $lo AND $hi") { c ->
+                    val id = c.getInt(0)
+                    out[id] = DbTrip(
+                        id = id,
+                        line = intern(c.getString(1)) ?: "?",
+                        agency = intern(c.getString(2)) ?: "",
+                        cis = intern(c.getString(3)) ?: "",
+                        num = intern(c.getString(4)) ?: "",
+                        head = intern(c.getString(5)) ?: "",
+                        svc = c.getInt(6),
+                        wheel = c.getInt(7),
+                        t0 = c.getInt(8),
+                        t1 = c.getInt(9),
+                        gid = if (hasGid) c.getString(10) ?: "" else "",
+                    )
+                }
+            } finally {
+                db.close()
+            }
+            return out
+        }
+
+        val results = if (parts <= 1) listOf(readPart(0, maxId)) else {
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(parts)
+            try {
+                (0 until parts).map { i -> pool.submit<HashMap<Int, DbTrip>> { readPart(i * step, minOf(maxId, (i + 1) * step - 1)) } }
+                    .map { f -> try { f.get() } catch (e: java.util.concurrent.ExecutionException) { throw e.cause ?: e } }
+            } finally {
+                pool.shutdown()
+            }
+        }
+        for (r in results) trips.putAll(r)
+        for (id in trips.keys.sorted()) {
+            val trip = trips.getValue(id)
+            if (trip.cis.isNotBlank()) tripsByKey.getOrPut("${trip.cis}:${trip.num}") { mutableListOf() }.add(id)
+            if (trip.isTrain && trip.num.isNotBlank()) tripsByTrain.getOrPut(trip.num) { mutableListOf() }.add(id)
         }
     }
 

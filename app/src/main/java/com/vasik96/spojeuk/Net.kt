@@ -28,81 +28,131 @@ sealed class ParentRef {
     data class Ride(val patternIdx: Int, val tripIdx: Int, val boardIdx: Int, val alightIdx: Int) : ParentRef()
 }
 
-/** Jízdní řád jednoho dne (včetně přesahu z včerejška a rána zítřka), časy v s od půlnoci dne. */
-class Net(val tt: Timetable, val day: LocalDate) {
+/** Jízdní řád jednoho dne (včetně přesahu z včerejška a rána zítřka), časy v s od půlnoci dne. Staví [Net.build]. */
+class Net private constructor(
+    val tt: Timetable,
+    val day: LocalDate,
+    val patterns: List<Pattern>,
+    val stopPats: Map<Int, List<Pair<Int, Int>>>,
+) {
+    /** Klíč vzoru = pořadí zastávek jako surové bajty z DB (bez převodu na List<Int>, který stál přes sekundu). */
+    private class StopsKey(val bytes: ByteArray) {
+        private val h = bytes.contentHashCode()
+        override fun hashCode() = h
+        override fun equals(other: Any?) = other is StopsKey && other.h == h && other.bytes.contentEquals(bytes)
+    }
 
-    val patterns: List<Pattern>
-    val stopPats: Map<Int, List<Pair<Int, Int>>>
+    companion object {
+        /** Souběžná čtení DB při stavbě sítě (telefony mají 6–8 jader, čtení z SQLite je vázané na CPU). */
+        private val READ_THREADS = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
 
-    init {
-        val active = HashMap<Int, MutableList<Int>>()
-
-        val svcsYest = tt.activeSvcs(day.minusDays(1))
-        val svcsToday = tt.activeSvcs(day)
-        val svcsTmrw = tt.activeSvcs(day.plusDays(1))
-
-        for ((tid, t) in tt.trips) {
-            if (t.svc in svcsYest && t.t1 >= 86400) {
-                active.getOrPut(tid) { mutableListOf() }.add(-86400)
+        /**
+         * Postaví sítě pro víc dní JEDNÍM průchodem databází (večer hledání potřebuje dnešek i zítřek; dřív se jízdní
+         * řád četl pro každý den zvlášť, ~2,5 s na den), souběžně v několika vláknech.
+         */
+        fun build(tt: Timetable, days: List<LocalDate>): Map<LocalDate, Net> {
+            // pro každý den: spoj -> posuny (-1 den = přesah z včerejška, 0, +1 den = ráno zítřka)
+            val actives = days.map { day ->
+                val active = HashMap<Int, IntArray>()
+                val svcsYest = tt.activeSvcs(day.minusDays(1))
+                val svcsToday = tt.activeSvcs(day)
+                val svcsTmrw = tt.activeSvcs(day.plusDays(1))
+                for ((tid, t) in tt.trips) {
+                    val a = t.svc in svcsYest && t.t1 >= 86400
+                    val b = t.svc in svcsToday
+                    val c = t.svc in svcsTmrw && t.t0 <= NEXT_DAY_CUTOFF
+                    if (!a && !b && !c) continue
+                    var n = 0
+                    val offs = IntArray((if (a) 1 else 0) + (if (b) 1 else 0) + (if (c) 1 else 0))
+                    if (a) offs[n++] = -86400
+                    if (b) offs[n++] = 0
+                    if (c) offs[n] = 86400
+                    active[tid] = offs
+                }
+                active
             }
-            if (t.svc in svcsToday) {
-                active.getOrPut(tid) { mutableListOf() }.add(0)
-            }
-            if (t.svc in svcsTmrw && t.t0 <= NEXT_DAY_CUTOFF) {
-                active.getOrPut(tid) { mutableListOf() }.add(86400)
-            }
-        }
 
-        val groups = HashMap<List<Int>, MutableList<TripInstance>>()
-        val db = SQLiteDatabase.openDatabase(tt.dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
-
-        try {
-            db.rawQuery("SELECT trip, stops, arr, dep FROM trip_times", null).use { cursor ->
-                val cTrip = cursor.getColumnIndexOrThrow("trip")
-                val cStops = cursor.getColumnIndexOrThrow("stops")
-                val cArr = cursor.getColumnIndexOrThrow("arr")
-                val cDep = cursor.getColumnIndexOrThrow("dep")
-
-                while (cursor.moveToNext()) {
-                    val tid = cursor.getInt(cTrip)
-                    val offsets = active[tid] ?: continue
-                    val stops = bytesToIntArray(cursor.getBlob(cStops)).toList()
-                    val arr = bytesToIntArray(cursor.getBlob(cArr))
-                    val dep = bytesToIntArray(cursor.getBlob(cDep))
-
-                    for (off in offsets) {
-                        val arrOff = IntArray(arr.size) { arr[it] + off }
-                        val depOff = IntArray(dep.size) { dep[it] + off }
-                        groups.getOrPut(stops) { mutableListOf() }.add(
-                            TripInstance(depOff[0], tid, arrOff, depOff)
-                        )
+            // Čtení dat jízd (desítky MB blobů) je hlavní cena: běží souběžně v několika spojeních nad rozsahy ID spojů
+            // (trip je INTEGER PRIMARY KEY, rozsah je levný), každé vlákno si plní vlastní mapy, nakonec se spojí.
+            val maxTid = tt.trips.keys.maxOrNull() ?: 0
+            val parts = READ_THREADS.coerceAtMost(maxOf(1, maxTid / 1000))
+            fun readPart(lo: Int, hi: Int): List<HashMap<StopsKey, MutableList<TripInstance>>> {
+                val groups = days.map { HashMap<StopsKey, MutableList<TripInstance>>() }
+                val db = SQLiteDatabase.openDatabase(tt.dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
+                try {
+                    // bez JOIN filtru podle služeb (měřeno: souběžné čtení s ním bylo pomalejší); neaktivní spoje se
+                    // přeskočí níž ještě před převodem jejich dat
+                    val sql = "SELECT trip, stops, arr, dep FROM trip_times WHERE trip BETWEEN $lo AND $hi"
+                    db.rawQuery(sql, null).use { cursor ->
+                        while (cursor.moveToNext()) {
+                            val tid = cursor.getInt(0)
+                            var key: StopsKey? = null
+                            var arr: IntArray? = null
+                            var dep: IntArray? = null
+                            for (di in days.indices) {
+                                val offsets = actives[di][tid] ?: continue
+                                if (key == null) {
+                                    key = StopsKey(cursor.getBlob(1))
+                                    arr = bytesToIntArray(cursor.getBlob(2))
+                                    dep = bytesToIntArray(cursor.getBlob(3))
+                                }
+                                val g = groups[di].getOrPut(key) { ArrayList() }
+                                for (off in offsets) {
+                                    val a = if (off == 0) arr!! else IntArray(arr!!.size) { arr[it] + off }
+                                    val d = if (off == 0) dep!! else IntArray(dep!!.size) { dep[it] + off }
+                                    g.add(TripInstance(d[0], tid, a, d))
+                                }
+                            }
+                        }
                     }
+                } finally {
+                    db.close()
+                }
+                return groups
+            }
+
+            val step = maxTid / parts + 1
+            val results = if (parts <= 1) listOf(readPart(0, maxTid)) else {
+                val pool = java.util.concurrent.Executors.newFixedThreadPool(parts)
+                try {
+                    (0 until parts).map { i -> pool.submit<List<HashMap<StopsKey, MutableList<TripInstance>>>> { readPart(i * step, minOf(maxTid, (i + 1) * step - 1)) } }
+                        .map { f ->
+                            try { f.get() } catch (e: java.util.concurrent.ExecutionException) { throw e.cause ?: e }
+                        }
+                } finally {
+                    pool.shutdown()
                 }
             }
-        } finally {
-            db.close()
-        }
-
-        val patsList = ArrayList<Pattern>()
-        val stopPatsMap = HashMap<Int, MutableList<Pair<Int, Int>>>()
-
-        for ((stopsList, instances) in groups) {
-            instances.sortBy { it.de0 }
-            val pi = patsList.size
-            val stops = stopsList.toIntArray()
-            val tids = instances.map { it.tid }.toIntArray()
-            val arrs = instances.map { it.arr }.toTypedArray()
-            val deps = instances.map { it.dep }.toTypedArray()
-            val cols = Array(stops.size) { i -> IntArray(instances.size) { j -> deps[j][i] } }
-
-            patsList.add(Pattern(stops, tids, arrs, deps, cols))
-            for ((pos, s) in stops.withIndex()) {
-                stopPatsMap.getOrPut(s) { mutableListOf() }.add(pi to pos)
+            val groups = days.indices.map { di ->
+                val merged = HashMap<StopsKey, MutableList<TripInstance>>()
+                for (r in results) for ((k, v) in r[di]) {
+                    val g = merged[k]
+                    if (g == null) merged[k] = v else g.addAll(v)
+                }
+                merged
             }
+
+            return days.indices.associate { di -> days[di] to assemble(tt, days[di], groups[di]) }
         }
 
-        patterns = patsList
-        stopPats = stopPatsMap
+        private fun assemble(tt: Timetable, day: LocalDate, groups: Map<StopsKey, MutableList<TripInstance>>): Net {
+            val patsList = ArrayList<Pattern>(groups.size)
+            val stopPatsMap = HashMap<Int, MutableList<Pair<Int, Int>>>()
+            for ((key, instances) in groups) {
+                instances.sortBy { it.de0 }
+                val pi = patsList.size
+                val stops = bytesToIntArray(key.bytes)
+                val tids = IntArray(instances.size) { instances[it].tid }
+                val arrs = Array(instances.size) { instances[it].arr }
+                val deps = Array(instances.size) { instances[it].dep }
+                val cols = Array(stops.size) { i -> IntArray(instances.size) { j -> deps[j][i] } }
+                patsList.add(Pattern(stops, tids, arrs, deps, cols))
+                for ((pos, st) in stops.withIndex()) {
+                    stopPatsMap.getOrPut(st) { mutableListOf() }.add(pi to pos)
+                }
+            }
+            return Net(tt, day, patsList, stopPatsMap)
+        }
     }
 
     private fun binarySearchLeft(arr: IntArray, target: Int): Int {
@@ -365,19 +415,29 @@ class Net(val tt: Timetable, val day: LocalDate) {
     }
 }
 
+private const val MAX_NETS = 2
+
 class Planner(val tt: Timetable) {
     private val nets = HashMap<LocalDate, Net>()
 
     @Synchronized
     fun net(day: LocalDate): Net {
-        return nets.getOrPut(day) {
-            if (nets.size >= 4) {
-                nets.remove(nets.keys.first())
-            }
-            // projde všechny spoje JŘ (statisíce) => sekundy; proto se dnešek staví předem (TransitRepository.prewarmPlanner)
-            val t0 = System.nanoTime()
-            Net(tt, day).also { android.util.Log.d("SearchPerf", "síť pro $day postavena za ${(System.nanoTime() - t0) / 1_000_000} ms") }
-        }
+        nets[day]?.let { return it }
+        prepare(listOf(day))
+        return nets.getValue(day)
+    }
+
+    /** Postaví chybějící sítě pro [days] najednou (jeden průchod DB, viz [Net.build]). */
+    @Synchronized
+    fun prepare(days: List<LocalDate>) {
+        val missing = days.distinct().filter { it !in nets }
+        if (missing.isEmpty()) return
+        val t0 = System.nanoTime()
+        val built = Net.build(tt, missing)
+        // síť dne zabírá ~100 MB (statisíce jízd s časy): drží se nejvýš dva dny (dnešek + zítřek), víc hrozí OOM / GC
+        while (nets.size + built.size > MAX_NETS && nets.isNotEmpty()) nets.remove(nets.keys.first())
+        nets.putAll(built)
+        android.util.Log.d("SearchPerf", "síť pro $missing postavena za ${(System.nanoTime() - t0) / 1_000_000} ms")
     }
 
     fun find(
@@ -400,6 +460,8 @@ class Planner(val tt: Timetable) {
         // Okno se prochází po dnech: každý den má vlastní jízdní řád (Net), takže hledání
         // může pokračovat přes půlnoc a nekončí u přesahu z předchozího dne.
         var day = start.toLocalDate()
+        // večer hledání skoro vždy přeteče do zítřka: obě sítě jedním průchodem DB místo dvou
+        if (start.hour >= 18 && lastDay.isAfter(day)) prepare(listOf(day, day.plusDays(1)))
         while (!day.isAfter(lastDay) && out.size < count) {
             val n = net(day)
             val midnight = day.atStartOfDay()

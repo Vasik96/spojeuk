@@ -134,6 +134,16 @@ class TransitRepository(context: Context? = null) {
         }
     }
 
+    /**
+     * Při startu procesu (Application.onCreate): jízdní řád se začne načítat hned, ne až po vykreslení první obrazovky
+     * (appka po startu často rovnou opakuje poslední hledání). Při prvním spuštění se nic nedělá, data teprve stahuje
+     * obrazovka stahování.
+     */
+    fun warmUpTimetable() {
+        if (store.isFirstRun() || store.hasPending()) return
+        preloadTimetable()
+    }
+
     /** Celý jízdní řád (statisíce spojů) se dočte na pozadí; zastávky už mezitím fungují. */
     private fun preloadTimetable() {
         scope.launch {
@@ -284,12 +294,18 @@ class TransitRepository(context: Context? = null) {
      * jízdního řádu: stavba projde všechny spoje a trvá sekundy, dřív ji zaplatilo až první "Najít spojení".
      */
     private fun prewarmPlanner() {
+        val b = store.current ?: return
+        // pěší přestupy mezi zastávkami (~0,7 s) a síť spojů (~1,5 s) souběžně, obojí potřebuje první hledání
         scope.launch(Dispatchers.Default) {
-            val b = store.current ?: return@launch
+            val t0 = System.nanoTime()
+            runCatching { b.timetable.foot }.onFailure { Log.w(TAG, "příprava pěších přestupů selhala: ${it.message}") }
+            Log.d("SearchPerf", "pěší přestupy připraveny za ${(System.nanoTime() - t0) / 1_000_000} ms")
+        }
+        scope.launch(Dispatchers.Default) {
             val now = nowPrague()
             runCatching {
-                b.planner.net(now.toLocalDate())
-                if (now.hour >= 18) b.planner.net(now.toLocalDate().plusDays(1))
+                val today = now.toLocalDate()
+                b.planner.prepare(if (now.hour >= 18) listOf(today, today.plusDays(1)) else listOf(today))
             }.onFailure { Log.w(TAG, "příprava plánovače selhala: ${it.message}") }
         }
     }

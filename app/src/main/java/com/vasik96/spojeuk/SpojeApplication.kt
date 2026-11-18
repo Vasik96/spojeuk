@@ -20,6 +20,7 @@ class SpojeApplication : Application() {
         val repo = TransitRepository.get(this)
         // Okamžitě při startu aplikace inicializovat repozitář a začít stahovat polohy vozidel
         repo.prewarmVehiclesAsync()
+        repo.warmUpTimetable()
         registerNetworkCallback(repo)
     }
 

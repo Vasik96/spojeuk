@@ -1,19 +1,14 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Záloha appky (Android 12+). Stažená data (jízdní řád ~120 MB, tvary tras) se NEzálohují: appka si je stáhne
+   aktuální, a obnova ze zálohy by po přeinstalaci vrátila zastaralý jízdní řád (stalo se: DB z jiného dne a oblasti).
+   Nastavení a historie hledání (shared preferences) se zálohují.
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="file" path="spojeuk/" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="file" path="spojeuk/" />
     </device-transfer>
-    -->
 </data-extraction-rules>
