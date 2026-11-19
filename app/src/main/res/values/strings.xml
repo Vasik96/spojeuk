@@ -282,6 +282,14 @@
     <string name="vd_trip_id">ID spoje: %1$s</string>
     <string name="vd_metro_no_set">Metro nehlásí číslo soupravy, vůz se sleduje podle spoje.</string>
     <string name="map_pick_vehicle">Které vozidlo?</string>
+    <string name="vehicle_kind_bus">Bus</string>
+    <string name="vehicle_kind_trolleybus">Bus</string>
+    <string name="vehicle_kind_tram">Tramvaj</string>
+    <string name="vehicle_kind_metro">Metro</string>
+    <string name="vehicle_kind_train">Vlak</string>
+    <string name="vehicle_kind_ferry">Přívoz</string>
+    <string name="vehicle_kind_funicular">Lanovka</string>
+    <string name="vehicle_towards">směr %1$s</string>
     <string name="mode_tram">Tramvaje</string>
     <string name="mode_metro">Metro</string>
     <string name="map_filter_title">Co zobrazit na mapě</string>

@@ -52,6 +52,12 @@ internal fun ageLabel(s: Long): String = when {
 
 internal fun stopLabel(name: String): String = splitStopName(name).first.ifBlank { name }
 
+/**
+ * Název zastávky u vozidla (detail, výběr z více vozidel): autobus / MHD jen zastávka bez obce ("Divadlo"),
+ * vlak celý název, protože jezdí na delší vzdálenosti ("Ústí nad Labem hlavní nádraží", "Praha, Hlavní nádraží").
+ */
+internal fun vehicleStopName(name: String, train: Boolean): String = if (train) name.trim() else stopLabel(name)
+
 internal fun myLocLabel(name: String) = tr(R.string.my_location_with_stop, stopLabel(name))
 
 internal fun formatLastUpdate(ms: Long): String {

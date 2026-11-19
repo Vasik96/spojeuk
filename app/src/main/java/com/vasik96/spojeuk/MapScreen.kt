@@ -62,6 +62,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.filled.DirectionsBus
+import androidx.compose.material.icons.filled.DirectionsBoat
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Train
 import androidx.compose.material3.FilterChip
@@ -708,20 +711,35 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
-                                Text(
-                                    v.line,
-                                    color = if (vs.darkText) Color.Black else Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .background(Color(vehicleColor(vs)), RoundedCornerShape(50))
-                                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                                )
-                                Text(
-                                    v.destination.ifBlank { cleanAgencyName(v.agency) },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                // stejně jako na webu: ikona druhu v barvě vozidla, „Autobus 9“, „směr Divadlo“
+                                val (kindRes, kindIcon) = vehicleKind(v)
+                                Box(
+                                    Modifier.size(40.dp).background(Color(vehicleColor(vs)), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(kindIcon, null, tint = if (vs.darkText) Color.Black else Color.White, modifier = Modifier.size(22.dp))
+                                }
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        "${stringResource(kindRes)} ${v.line}",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    // cíl ze zdroje; DPMÚL ho neposílá, pak konečná ze spoje v jízdním řádu (jako v detailu)
+                                    val dest by produceState(v.destination.takeIf { it.isNotBlank() }, v.uid) {
+                                        if (value == null) value = runCatching { api.vehicleTripInfo(v).finalStop }.getOrNull()
+                                    }
+                                    Text(
+                                        dest?.takeIf { it.isNotBlank() }?.let { stringResource(R.string.vehicle_towards, vehicleStopName(prettyName(it), v.train)) }
+                                            ?: cleanAgencyName(v.agency),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -1855,6 +1873,18 @@ private fun sourceLabelText(label: String, normal: Color, bad: Color) = buildAnn
         withStyle(SpanStyle(color = if (stale) bad else normal)) { append(part) }
     }
 }
+
+/** Druh vozidla pro výběr z více vozidel: název (jednotné číslo) a ikona. Trolejbus podle `mode` ze serveru. */
+private fun vehicleKind(v: Vehicle): Pair<Int, ImageVector> =
+    if (v.mode == "trolleybus") R.string.vehicle_kind_trolleybus to Icons.Default.DirectionsBus
+    else when (vehicleStyle(v)) {
+        VehicleStyle.TRAIN -> R.string.vehicle_kind_train to Icons.Default.Train
+        VehicleStyle.TRAM -> R.string.vehicle_kind_tram to Icons.Default.Tram
+        VehicleStyle.METRO, VehicleStyle.METRO_A, VehicleStyle.METRO_B, VehicleStyle.METRO_C -> R.string.vehicle_kind_metro to Icons.Default.Subway
+        VehicleStyle.FERRY -> R.string.vehicle_kind_ferry to Icons.Default.DirectionsBoat
+        VehicleStyle.FUNICULAR -> R.string.vehicle_kind_funicular to Icons.Default.Tram
+        else -> R.string.vehicle_kind_bus to Icons.Default.DirectionsBus
+    }
 
 private fun categoryIcon(c: MapCategory) = when (c) {
     MapCategory.BUS -> Icons.Default.DirectionsBus

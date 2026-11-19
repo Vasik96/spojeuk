@@ -261,6 +261,14 @@
     <string name="vd_trip_id">Trip ID: %1$s</string>
     <string name="vd_metro_no_set">The metro does not report train set numbers, the vehicle is tracked by its trip.</string>
     <string name="map_pick_vehicle">Which vehicle?</string>
+    <string name="vehicle_kind_bus">Bus</string>
+    <string name="vehicle_kind_trolleybus">Bus</string>
+    <string name="vehicle_kind_tram">Tram</string>
+    <string name="vehicle_kind_metro">Metro</string>
+    <string name="vehicle_kind_train">Train</string>
+    <string name="vehicle_kind_ferry">Ferry</string>
+    <string name="vehicle_kind_funicular">Funicular</string>
+    <string name="vehicle_towards">towards %1$s</string>
     <string name="mode_tram">Trams</string>
     <string name="mode_metro">Metro</string>
     <string name="map_filter_title">Show on map</string>

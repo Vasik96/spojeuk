@@ -258,7 +258,7 @@ internal fun VehicleDetailBottomSheet(
             ) {
                 tripInfo?.nextStop?.let {
                     Text(
-                        stringResource(R.string.vd_next_stop, it),
+                        stringResource(R.string.vd_next_stop, vehicleStopName(it, vehicle.train)),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium
                     )
@@ -266,7 +266,7 @@ internal fun VehicleDetailBottomSheet(
 
                 tripInfo?.finalStop?.let {
                     Text(
-                        stringResource(R.string.vd_final_stop, it),
+                        stringResource(R.string.vd_final_stop, vehicleStopName(it, vehicle.train)),
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
