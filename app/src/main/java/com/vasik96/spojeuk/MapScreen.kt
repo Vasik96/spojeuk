@@ -2,6 +2,9 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.runtime.Stable
+import androidx.compose.animation.core.Animatable
 import androidx.compose.material3.Checkbox
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.FilterList
@@ -437,6 +440,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
     Box(modifier = modifier.fillMaxSize()) {
         if (appState.mapProvider == MapProvider.GOOGLE) {
+            val shownRoute = rememberShownRoute(appState, showFullRoute)
             GoogleMap(
                 // Okamžitý výběr vozidla při zvednutí prstu. Nativní OnMarkerClickListener čeká ~300 ms, jestli nejde
                 // o dvojklik (zoom), proto se bottom sheet otevíral se zpožděním. Událost se jen sleduje (Initial pass,
@@ -490,17 +494,15 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 if (!isMapReady) return@GoogleMap
                 val primaryColor = MaterialTheme.colorScheme.primary
 
-                val walkList = remember(appState.journeyWalks, appState.walkRoute) {
-                    if (appState.journeyWalks.isNotEmpty()) appState.journeyWalks
-                    else listOfNotNull(appState.journeyWalk ?: appState.walkRoute)
-                }
+                // trasa se plynule objeví / zmizí (shownRoute drží zrušenou trasu, dokud nezmizí)
+                val routeAlpha = shownRoute.alpha.value
                 val walkPattern = remember { listOf(Dot(), Gap(14f)) }
-                for (walk in walkList) {
-                    if (walk.points.size >= 2 && appState.tripRoute.isNotEmpty()) {
+                for (walk in shownRoute.walks) {
+                    if (walk.points.size >= 2 && shownRoute.route.isNotEmpty()) {
                         val walkPoints = remember(walk) { walk.points.map { LatLng(it.first, it.second) } }
                         Polyline(
                             points = walkPoints,
-                            color = MaterialTheme.colorScheme.tertiary,
+                            color = MaterialTheme.colorScheme.tertiary.copy(alpha = routeAlpha),
                             width = 14f,
                             zIndex = 0.2f,
                             pattern = walkPattern,
@@ -511,17 +513,17 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     }
                 }
 
-                if (appState.tripRoute.isNotEmpty()) {
-                    val full = appState.fullRoute
+                if (shownRoute.route.isNotEmpty()) {
+                    val full = shownRoute.full
                     val segments = if (showFullRoute && full.size >= 2) listOf(full)
-                    else if (appState.tripRouteSegments.isNotEmpty()) appState.tripRouteSegments
-                    else listOf(appState.tripRoute)
+                    else if (shownRoute.segments.isNotEmpty()) shownRoute.segments
+                    else listOf(shownRoute.route)
 
                     for (line in segments) {
                         if (line.size >= 2) {
                             Polyline(
                                 points = line,
-                                color = primaryColor,
+                                color = primaryColor.copy(alpha = routeAlpha),
                                 width = 12f,
                                 zIndex = 0f,
                                 startCap = RoundCap(),
@@ -545,6 +547,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     appState = appState,
                     showFullRoute = showFullRoute,
                     active = active,
+                    shown = shownRoute,
                 )
             }
         } else {
@@ -865,6 +868,7 @@ private fun GoogleVehicleOverlay(
     appState: SpojeAppState,
     showFullRoute: Boolean,
     active: Boolean,
+    shown: ShownRoute,
 ) {
     val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
     val context = LocalContext.current
@@ -874,10 +878,14 @@ private fun GoogleVehicleOverlay(
         derivedStateOf { arrowSpacingForZoom(cameraPositionState.position.zoom) }
     }
 
-    val route = appState.tripRoute
-    val full = appState.fullRoute
+    // trasa, která je vidět (i zrušená, dokud plynule nezmizí), a průhlednost jejích markerů
+    val route = shown.route
+    val full = shown.full
     val useFull = showFullRoute && full.size >= 2
-    val stopDots = appState.stopDots(showFullRoute)
+    val stopDots = shown.stopDots
+    LaunchedEffect(layer, shown) {
+        snapshotFlow { shown.alpha.value }.collect { layer.setRouteAlpha(it) }
+    }
 
     val arrows by produceState(emptyList<RouteArrow>(), route, arrowSpacing) {
         value = if (route.size < 2) emptyList()
@@ -1442,6 +1450,12 @@ private fun MapLibreScreenContent(
         if (!style.isFullyLoaded) return@LaunchedEffect
 
         ensureVehicleLayer(style) // vrstva vozidel musí existovat dřív než trasy a být nad nimi
+        val hadRoute = style.getLayer("route-line") != null
+        // zrušená trasa nejdřív plynule zmizí, teprve pak se vrstvy odeberou
+        if (tripRoute.size < 2 && hadRoute) {
+            setRouteOpacity(style, 0f, ROUTE_FADE_OUT_MS.toLong())
+            delay(ROUTE_FADE_OUT_MS.toLong() + 40)
+        }
         removeRouteLayers(style)
 
         if (tripRoute.size >= 2) {
@@ -1581,6 +1595,12 @@ private fun MapLibreScreenContent(
                     PropertyFactory.iconIgnorePlacement(true)
                 )
             )
+            // nová trasa se plynule objeví (výměna trasy za jinou bez animace, ať nebliká)
+            if (!hadRoute) {
+                setRouteOpacity(style, 0f, 0)
+                delay(32)   // jeden snímek s průhledností 0, jinak by přechod neměl odkud začít
+                setRouteOpacity(style, 1f, ROUTE_FADE_IN_MS.toLong())
+            }
         }
     }
 
@@ -1834,6 +1854,19 @@ private fun routeArrowBitmap(color: Int): Bitmap {
     return bitmap
 }
 
+private val ROUTE_LAYER_IDS = listOf("route-line", "walk-dots", "route-arrows", "route-stops", "route-ends")
+
+/** Průhlednost vrstev trasy MapLibre s přechodem [ms] (plynulé objevení / zmizení). */
+private fun setRouteOpacity(style: Style, a: Float, ms: Long) {
+    val t = TransitionOptions(ms, 0)
+    for (id in ROUTE_LAYER_IDS) {
+        when (val l = style.getLayer(id)) {
+            is LineLayer -> { l.lineOpacityTransition = t; l.setProperties(PropertyFactory.lineOpacity(a)) }
+            is SymbolLayer -> { l.iconOpacityTransition = t; l.setProperties(PropertyFactory.iconOpacity(a)) }
+        }
+    }
+}
+
 private fun removeRouteLayers(style: Style) {
     listOf("route-ends", "route-stops", "route-arrows", "walk-dots", "route-line").forEach { style.removeLayer(it) }
     listOf("ends-src", "stops-src", "arrows-src", "walk-src", "route-src").forEach { style.removeSource(it) }
@@ -1873,6 +1906,47 @@ private fun sourceLabelText(label: String, normal: Color, bad: Color) = buildAnn
         withStyle(SpanStyle(color = if (stale) bad else normal)) { append(part) }
     }
 }
+
+/** Trasa, která je právě na Google mapě vidět, a její průhlednost (plynulé objevení / zmizení). */
+@Stable
+internal class ShownRoute {
+    var route by mutableStateOf<List<LatLng>>(emptyList())
+    var segments by mutableStateOf<List<List<LatLng>>>(emptyList())
+    var full by mutableStateOf<List<LatLng>>(emptyList())
+    var walks by mutableStateOf<List<WalkRoute>>(emptyList())
+    var stopDots by mutableStateOf<List<LatLng>>(emptyList())
+    val alpha = Animatable(0f)
+}
+
+/**
+ * Nová trasa se plynule objeví (průhlednost 0 → 1), zrušená se ještě drží a plynule zmizí. Výměna jedné trasy
+ * za jinou (přesnější tvar po načtení, jiný spoj) se neanimuje, aby trasa neblikla.
+ */
+@Composable
+private fun rememberShownRoute(appState: SpojeAppState, showFullRoute: Boolean): ShownRoute {
+    val s = remember { ShownRoute() }
+    val route = appState.tripRoute
+    val segments = appState.tripRouteSegments
+    val full = appState.fullRoute
+    val walks = if (appState.journeyWalks.isNotEmpty()) appState.journeyWalks
+    else listOfNotNull(appState.journeyWalk ?: appState.walkRoute)
+    val stopDots = appState.stopDots(showFullRoute)
+    LaunchedEffect(route, segments, full, walks, stopDots) {
+        if (route.isNotEmpty()) {
+            val appearing = s.route.isEmpty()
+            s.route = route; s.segments = segments; s.full = full; s.walks = walks; s.stopDots = stopDots
+            if (appearing) s.alpha.snapTo(0f)
+            if (s.alpha.targetValue < 1f || appearing) s.alpha.animateTo(1f, tween(ROUTE_FADE_IN_MS, easing = LinearOutSlowInEasing))
+        } else if (s.route.isNotEmpty()) {
+            s.alpha.animateTo(0f, tween(ROUTE_FADE_OUT_MS, easing = FastOutLinearInEasing))
+            s.route = emptyList(); s.segments = emptyList(); s.full = emptyList(); s.walks = emptyList(); s.stopDots = emptyList()
+        }
+    }
+    return s
+}
+
+private const val ROUTE_FADE_IN_MS = 350
+private const val ROUTE_FADE_OUT_MS = 260
 
 /** Druh vozidla pro výběr z více vozidel: název (jednotné číslo) a ikona. Trolejbus podle `mode` ze serveru. */
 internal fun vehicleKind(v: Vehicle): Pair<Int, ImageVector> =

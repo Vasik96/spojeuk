@@ -102,6 +102,15 @@ internal class GoogleVehicleLayer(private val context: Context) {
         clearRoute()
     }
 
+    /** Průhlednost markerů trasy (šipky, zastávky, začátek / konec) pro plynulé objevení a zmizení trasy. */
+    private var routeAlpha = 1f
+
+    fun setRouteAlpha(a: Float) {
+        if (a == routeAlpha) return
+        routeAlpha = a
+        for (m in routeMarkers) runCatching { m.alpha = a }
+    }
+
     private fun clearRoute() {
         for (m in routeMarkers) runCatching { m.remove() }
         routeMarkers.clear()
@@ -239,7 +248,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
         if (route.size < 2) return
 
         fun add(o: MarkerOptions) {
-            map.addMarker(o)?.let { routeMarkers.add(it) }
+            map.addMarker(o.alpha(routeAlpha))?.let { routeMarkers.add(it) }
         }
 
         val start = if (useFull && full.isNotEmpty()) full.first() else route.first()
