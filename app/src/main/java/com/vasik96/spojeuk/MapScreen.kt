@@ -160,6 +160,7 @@ import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.SymbolLayer
+import org.maplibre.android.style.layers.TransitionOptions
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
@@ -875,6 +876,7 @@ private fun GoogleVehicleOverlay(
 
     LaunchedEffect(layer, hub, active) {
         if (!active) return@LaunchedEffect
+        layer.restartAppear()     // po otevření mapy se vozidla plynule objeví
         var lastCam: CameraPosition? = null
         var view: ViewBox? = null
         var baseView: ViewBox? = null
@@ -981,6 +983,10 @@ private val USE_TEXTURE_MODE = android.os.Build.MANUFACTURER.lowercase() in setO
 
 // max. frekvence předávání pozic vozidel do MapLibre (~30 Hz), animace A -> B je počítaná z času
 private const val VEHICLE_UPDATE_INTERVAL_MS = 33L
+private const val VEHICLE_UPDATE_INTERVAL_MID_MS = 66L      // štítky, 300–800 vozidel v záběru
+private const val VEHICLE_UPDATE_INTERVAL_MANY_MS = 100L    // štítky, víc než 800 vozidel (Praha)
+private const val GESTURE_QUIET_MS = 200L
+private const val LOCATION_ANIMATION_FPS = 10              // animace modrého bodu (kompas) v MapLibre                  // tak dlouho po pohybu kamery se vozidla neposílají
 // oddáleno (tečky): pohyb o pixel trvá dlouho, stačí řídké aktualizace
 private const val DOT_UPDATE_INTERVAL_MS = 250L
 private const val DOT_UPDATE_INTERVAL_FAR_MS = 500L
@@ -1001,36 +1007,61 @@ private class VehicleDraw(val key: String, val v: Vehicle, val iconPhase: Int) {
 
 private const val VEH_DOT_LAYER = "vehicles-dots"
 private const val VEH_HL_LAYER = "vehicles-hl"
+private const val VEH_OLD_LAYER = "vehicles-old"   // štítky vozidel se starou polohou (ztlumené)
+private const val OLD_ALPHA = 0.65f
 
 private fun vehicleSymbolProps() = arrayOf(
     PropertyFactory.iconImage(Expression.get("img")),
     PropertyFactory.iconAllowOverlap(true),
     PropertyFactory.iconIgnorePlacement(true),
-    PropertyFactory.iconOpacity(Expression.coalesce(Expression.get("opacity"), Expression.literal(1.0f))),
+    // průhlednost jen jako konstanta vrstvy (applyLayerAlpha): změna výrazu závislého na datech (get "opacity")
+    // nutí MapLibre znovu postavit celý zdroj => při prolínání v Praze sekání v každém snímku
+    PropertyFactory.iconOpacity(0f),   // zobrazí až smyčka vozidel (applyLayerAlpha), ať nic neproblikne
     // vyšší hodnota = kreslí se výš (zvýrazněné vozidlo nahoře)
-    PropertyFactory.symbolSortKey(Expression.get("sort"))
+    PropertyFactory.symbolSortKey(Expression.get("sort")),
 )
 
 /**
- * Tři vrstvy nad jedním zdrojem; přepínání mezi tečkami a štítky řeší GPU podle zoomu (minzoom / maxzoom),
- * žádný kód v Kotlinu to nesleduje:
+ * Průhlednost řídí smyčka vozidel po snímcích, výchozí přechod stylu (300 ms) by se s ní pral: každá změna by
+ * spustila novou animaci od aktuální hodnoty => zpožděné, nerovnoměrné prolínání a problikávání.
+ */
+private val NO_TRANSITION = TransitionOptions(0, 0, false)
+
+private fun SymbolLayer.noOpacityTransition() = also { it.iconOpacityTransition = NO_TRANSITION }
+
+/**
+ * Vrstvy nad jedním zdrojem; průhlednost (prolínání tečky ↔ štítky a objevení) nastavuje smyčka vozidel
+ * přes [applyLayerAlpha] jako konstantu vrstvy, vrstva s nulovou průhledností je skrytá:
  *  - [VEH_LAYER]: štítky s číslem linky od [DOT_ZOOM_ML] výš,
+ *  - [VEH_OLD_LAYER]: totéž pro vozidla se starou polohou (ztlumená konstantou vrstvy),
  *  - [VEH_DOT_LAYER]: malé tečky pod [DOT_ZOOM_ML],
  *  - [VEH_HL_LAYER]: zvýrazněné vozidlo je vždy štítek (a nahoře).
  */
 private fun ensureVehicleLayer(style: Style) {
     if (style.getSource(VEH_SRC) == null) {
         style.addSource(GeoJsonSource(VEH_SRC, FeatureCollection.fromFeatures(emptyList<Feature>())))
+        // bez animací umísťování symbolů: každá nová dávka poloh vozidel (GeoJSON) by štítky znovu „prolínala“
+        // (300 ms) a mapa by se kvůli tomu překreslovala pořád dokola (render vlákno MapLibre ~80 % v Praze)
+        style.transition = TransitionOptions(0, 0, false)
     }
     val notHl = Expression.neq(Expression.get("hl"), Expression.literal(1))
+    val old = Expression.has("opacity")
     if (style.getLayer(VEH_LAYER) == null) {
         style.addLayer(
-            SymbolLayer(VEH_LAYER, VEH_SRC).withProperties(*vehicleSymbolProps()).withFilter(notHl)
-                .also { it.setMinZoom(DOT_ZOOM_ML) }
+            SymbolLayer(VEH_LAYER, VEH_SRC).withProperties(*vehicleSymbolProps())
+                .withFilter(Expression.all(notHl, Expression.not(old))).noOpacityTransition()
+        )
+    }
+    if (style.getLayer(VEH_OLD_LAYER) == null) {
+        style.addLayerAbove(
+            SymbolLayer(VEH_OLD_LAYER, VEH_SRC).withProperties(*vehicleSymbolProps())
+                .withFilter(Expression.all(notHl, old)).noOpacityTransition(),
+            VEH_LAYER
         )
     }
     if (style.getLayer(VEH_DOT_LAYER) == null) {
-        style.addLayer(
+        // tečky POD štítky (při prolínání nesmí prosvítat přes štítek)
+        style.addLayerBelow(
             CircleLayer(VEH_DOT_LAYER, VEH_SRC).withProperties(
                 PropertyFactory.circleRadius(
                     Expression.interpolate(
@@ -1042,32 +1073,57 @@ private fun ensureVehicleLayer(style: Style) {
                 PropertyFactory.circleColor(
                     Expression.match(
                         Expression.get("k"), Expression.color(VehicleStyle.BUS.color),
-                        *VehicleStyle.entries.map { Expression.stop(it.name, Expression.color(it.color)) }.toTypedArray()
+                        *VehicleStyle.entries.flatMap {
+                            // stará poloha: "<styl>~", ztlumená barvou (průhlednost vrstvy je konstanta, viz výše)
+                            val dim = (it.color and 0xFFFFFF) or ((OLD_ALPHA * 255).toInt() shl 24)
+                            listOf(Expression.stop(it.name, Expression.color(it.color)), Expression.stop(it.name + "~", Expression.color(dim)))
+                        }.toTypedArray()
                     )
                 ),
-                PropertyFactory.circleOpacity(Expression.coalesce(Expression.get("opacity"), Expression.literal(1.0f))),
+                PropertyFactory.circleOpacity(0f),
                 // tramvaj / metro se zpožděním: červený okraj tečky
                 PropertyFactory.circleStrokeColor(
                     Expression.match(Expression.get("late"), Expression.color(0xFFFFFFFF.toInt()),
                         Expression.stop(1, Expression.color(LATE_COLOR)))
                 ),
                 PropertyFactory.circleStrokeWidth(1f),
-                PropertyFactory.circleStrokeOpacity(0.8f)
-            ).withFilter(notHl).also { it.setMaxZoom(DOT_ZOOM_ML) }
+                PropertyFactory.circleStrokeOpacity(0f),
+            ).withFilter(notHl).also {
+                it.circleOpacityTransition = NO_TRANSITION
+                it.circleStrokeOpacityTransition = NO_TRANSITION
+            },
+            VEH_LAYER
         )
     }
     if (style.getLayer(VEH_HL_LAYER) == null) {
         style.addLayer(
             SymbolLayer(VEH_HL_LAYER, VEH_SRC).withProperties(*vehicleSymbolProps())
-                .withFilter(Expression.eq(Expression.get("hl"), Expression.literal(1)))
+                .withFilter(Expression.eq(Expression.get("hl"), Expression.literal(1))).noOpacityTransition()
         )
+    }
+}
+
+/**
+ * Průhlednost vrstvy vozidel (konstanta vrstvy, levná změna). Vrstvy se neskrývají přes visibility: to je layout
+ * vlastnost a každé zobrazení by znovu rozmístilo všechny štítky (zásek na začátku každého přechodu). Skrytou
+ * vrstvu štítků nic nestojí, protože vozidla v režimu teček štítek (img) nemají.
+ */
+private fun applyLayerAlpha(style: Style, id: String, a: Float) {
+    val layer = style.getLayer(id) ?: return
+    when (id) {
+        VEH_DOT_LAYER -> layer.setProperties(
+            PropertyFactory.circleOpacity(a),
+            PropertyFactory.circleStrokeOpacity(0.8f * a),
+        )
+        VEH_OLD_LAYER -> layer.setProperties(PropertyFactory.iconOpacity(OLD_ALPHA * a))
+        else -> layer.setProperties(PropertyFactory.iconOpacity(a))
     }
 }
 
 // vrstvy trasy vždy POD vrstvou vozidel
 private fun addBelowMarkers(style: Style, layer: Layer) {
     ensureVehicleLayer(style)
-    style.addLayerBelow(layer, VEH_LAYER)
+    style.addLayerBelow(layer, VEH_DOT_LAYER)
 }
 
 @SuppressLint("MissingPermission")
@@ -1156,6 +1212,7 @@ private fun MapLibreScreenContent(
     val dirty = remember { AtomicBoolean(true) }
     // kamera se pohnula => přepočítat, která vozidla jsou ve viditelné oblasti
     val cameraDirty = remember { AtomicBoolean(true) }
+    val cameraMovedAt = remember { java.util.concurrent.atomic.AtomicLong(0L) }   // poslední pohyb kamery (gesto)
     // obrázky přidané do aktuálního stylu (při změně stylu se začíná od nuly)
     val addedImages = remember(styleVersion) { mutableSetOf<String>() }
 
@@ -1177,10 +1234,14 @@ private fun MapLibreScreenContent(
                     m.uiSettings.isLogoEnabled = false
                     m.uiSettings.isCompassEnabled = false
 
-                    m.addOnCameraMoveListener { cameraDirty.set(true) }
+                    m.addOnCameraMoveListener {
+                        cameraDirty.set(true)
+                        cameraMovedAt.set(SystemClock.elapsedRealtime())
+                    }
                     // stav kamery se ukládá až když se mapa zastaví, ne při každém framu pohybu
                     m.addOnCameraIdleListener {
                         cameraDirty.set(true)
+                        cameraMovedAt.set(0L)   // gesto skončilo => vozidla hned dohnat
                         val cp = m.cameraPosition
                         cp.target?.let {
                             appState.mapCenter = LatLng(it.latitude, it.longitude)
@@ -1325,11 +1386,20 @@ private fun MapLibreScreenContent(
                                 .setPriority(LocationEngineRequest.PRIORITY_HIGH_ACCURACY)
                                 .build()
                         )
+                        .locationComponentOptions(
+                            org.maplibre.android.location.LocationComponentOptions.builder(context)
+                                .accuracyAnimationEnabled(false)
+                                .build()
+                        )
                         .build()
                 )
                 isLocationComponentEnabled = true
                 cameraMode = CameraMode.NONE
                 renderMode = RenderMode.COMPASS
+                // Kompas posílá směr pořád a animace modrého bodu jinak běží plnou frekvencí displeje (~100 Hz)
+                // => MapLibre překresloval celou mapu (v Praze tisíce štítků) i bez dotyku, render vlákno ~80 %
+                // a zoom se sekal. Pár snímků za vteřinu na otáčení šipky stačí.
+                setMaxAnimationFps(LOCATION_ANIMATION_FPS)
             }
         }
     }
@@ -1509,6 +1579,24 @@ private fun MapLibreScreenContent(
         var needImages = true        // štítky se budou kreslit (nebo jsou těsně před tím)
         var interval = VEHICLE_UPDATE_INTERVAL_MS
         var pending = false          // některému vozidlu ještě chybí obrázek štítku
+        val fade = VehicleFade()     // objevení po otevření mapy a prolínání tečky ↔ štítky
+        var modeKnown = false
+        var alphaStyle: Style? = null
+        var lastDotA = -1f; var lastLabelA = -1f; var lastHlA = -1f
+        var deferred = false         // aktualizace odložená kvůli gestu
+        // Po přepnutí na štítky musí MapLibre nové štítky nejdřív rozmístit (v Praze přes tisíc, pracovní vlákna);
+        // prolínání do té doby počká, jinak by proběhlo dřív, než jsou štítky vidět (zpožděné / přeskočené snímky).
+        // 0 = nic, 1 = čeká se na zpracování dat zdroje, 2 = na první plně vykreslený snímek (štítky rozmístěné)
+        val labelsLoading = java.util.concurrent.atomic.AtomicInteger(0)
+        val sourceListener = MapLibreMapView.OnSourceChangedListener { id ->
+            if (id == VEH_SRC) labelsLoading.compareAndSet(1, 2)
+        }
+        val frameListener = MapLibreMapView.OnDidFinishRenderingFrameListener { fully, _, _ ->
+            if (fully) labelsLoading.compareAndSet(2, 0)
+        }
+        mapView.addOnSourceChangedListener(sourceListener)
+        mapView.addOnDidFinishRenderingFrameListener(frameListener)
+        var lastCount = 0            // počet vozidel v posledním GeoJSON (řídí interval)
 
         fun currentView(): ViewBox? = runCatching {
             val w = mapView.width.toFloat()
@@ -1525,13 +1613,31 @@ private fun MapLibreScreenContent(
                 ViewBox(
                     corners.minOf { it.latitude }, corners.minOf { it.longitude },
                     corners.maxOf { it.latitude }, corners.maxOf { it.longitude }
-                ).expanded(0.4)
+                ).expanded(0.15)   // menší okraj = méně štítků k rozmístění (při 0,4 to byla 3,2× plocha záběru)
             }
         }.getOrNull()
 
+        try {
         while (true) {
             withFrameNanos { }
             val now = SystemClock.elapsedRealtime()
+
+            // průhlednost vrstev každý snímek (jen při změně), i mimo interval aktualizace poloh
+            fade.tick(now, pending || labelsLoading.get() != 0)
+            m.style?.takeIf { it.isFullyLoaded && it.getLayer(VEH_LAYER) != null }?.let { st ->
+                val ap = fade.appearAlpha()
+                val da = ap * fade.dotAlpha()
+                val la = ap * fade.labelAlpha()
+                if (st !== alphaStyle) { lastDotA = Float.NaN; lastLabelA = Float.NaN; lastHlA = Float.NaN }
+                if (da != lastDotA) applyLayerAlpha(st, VEH_DOT_LAYER, da)
+                if (la != lastLabelA) {
+                    applyLayerAlpha(st, VEH_LAYER, la)
+                    applyLayerAlpha(st, VEH_OLD_LAYER, la)
+                }
+                if (ap != lastHlA) applyLayerAlpha(st, VEH_HL_LAYER, ap)
+                alphaStyle = st; lastDotA = da; lastLabelA = la; lastHlA = ap
+            }
+
             if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
             if (now - lastPush < interval) continue
 
@@ -1547,7 +1653,14 @@ private fun MapLibreScreenContent(
                     if (nowImages && !needImages) modeFlipped = true
                     dotMode = nowDot
                     needImages = nowImages
+                    if (!modeKnown || !fade.appeared) fade.initDotMode(nowDot)
+                    else if (fade.setDotMode(nowDot)) { modeFlipped = true; labelsLoading.set(0) }
+                    modeKnown = true
                     interval = when {
+                        // štítky: každý GeoJSON = nové rozřezání zdroje a rozmístění všech štítků v MapLibre
+                        // (render + 4 pracovní vlákna); v Praze přes tisíc vozidel => 30 Hz vytížilo GPU vlákno na 90 %
+                        !nowDot && lastCount > 800 -> VEHICLE_UPDATE_INTERVAL_MANY_MS
+                        !nowDot && lastCount > 300 -> VEHICLE_UPDATE_INTERVAL_MID_MS
                         !nowDot -> VEHICLE_UPDATE_INTERVAL_MS
                         z >= 10.0 -> DOT_UPDATE_INTERVAL_MS
                         else -> DOT_UPDATE_INTERVAL_FAR_MS
@@ -1558,7 +1671,14 @@ private fun MapLibreScreenContent(
             hub.ensureRoutes(view, enabled = !dotMode)
             val moved = hub.tick(now, view)
             val metaChanged = dirty.getAndSet(false) || modeFlipped
-            if (!moved && !metaChanged && !camChanged && !pending) continue
+            if (!moved && !metaChanged && !camChanged && !pending && !deferred) continue
+            // během gesta (zoom, posun) jen kamera: běžné posuny vozidel počkají na konec gesta, aby se MapLibre
+            // nepral s překreslováním mapy. Přepnutí tečky ↔ štítky (a chybějící štítky při něm) projde hned.
+            if (now - cameraMovedAt.get() < GESTURE_QUIET_MS && !metaChanged && !(pending && fade.switching())) {
+                deferred = true
+                continue
+            }
+            deferred = false
 
             val style = m.style
             if (style == null || !style.isFullyLoaded) {
@@ -1609,25 +1729,41 @@ private fun MapLibreScreenContent(
                 val p = hub.positionOf(d.key) ?: continue
                 if (view != null && !view.contains(p.latitude, p.longitude)) continue
                 val hl = d.iconPhase != 0
-                val wantsImage = hl || needImages
-                if (wantsImage && d.imgId !in addedImages) { pending = true; continue }
+                // během prolínání mají štítek i vozidla mizející do teček
+                // štítek (img) jen když jsou štítky vidět nebo se prolínají; v pásmu před přepnutím se obrázky
+                // jen chystají (addImage), jinak by se neviditelná vrstva štítků zbytečně rozmísťovala
+                var wantsImage = hl || !fade.dotMode || fade.switching()
+                if (wantsImage && d.imgId !in addedImages) {
+                    pending = true
+                    if (hl) continue
+                    wantsImage = false   // štítek ještě není => aspoň tečka (při prolínání nesmí vozidlo zmizet)
+                }
                 features += Feature.fromGeometry(Point.fromLngLat(p.longitude, p.latitude)).also {
-                    if (d.v.ageSec() >= 60) it.addNumberProperty("opacity", 0.65f)
+                    val stale = d.v.ageSec() >= 60
+                    if (stale) it.addNumberProperty("opacity", OLD_ALPHA)
                     if (wantsImage) {
                         it.addStringProperty("img", d.imgId)
                         it.addNumberProperty("sort", d.sort)
                     }
                     if (hl) it.addNumberProperty("hl", 1)
-                    else if (dotMode) {
-                        it.addStringProperty("k", d.colorKey)
+                    else {
+                        it.addStringProperty("k", if (stale) d.colorKey + "~" else d.colorKey)
                         if (d.late > 0) it.addNumberProperty("late", 1)
                     }
                 }
             }
 
+            // první dávka se štítky po přepnutí: prolínání počká, až je MapLibre zpracuje (viz labelsLoading)
+            if (modeFlipped && !fade.dotMode && fade.switching()) labelsLoading.set(1)
             style.getSourceAs<GeoJsonSource>(VEH_SRC)
                 ?.setGeoJson(FeatureCollection.fromFeatures(features))
+            if (features.isNotEmpty()) fade.startAppear()
+            lastCount = features.size
             lastPush = now
+        }
+        } finally {
+            mapView.removeOnSourceChangedListener(sourceListener)
+            mapView.removeOnDidFinishRenderingFrameListener(frameListener)
         }
     }
 }

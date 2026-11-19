@@ -8,17 +8,37 @@ import java.time.LocalDateTime
 // Hledání spojení (algoritmus RAPTOR). Konstanty MIN_TRANSFER a NEXT_DAY_CUTOFF jsou v Config.kt.
 
 /**
- * Spoje se stejným pořadím zastávek, seřazené podle odjezdu. Časy jsou po sloupcích ([arrCols] / [cols][zastávka][spoj]),
- * ne po spojích: síť dne má statisíce jízd a pole pro každou jízdu zvlášť stála desítky MB a zatěžovala GC.
+ * Spoje se stejným pořadím zastávek, seřazené podle odjezdu. Časy všech vzorů sítě leží ve dvou plochých polích
+ * (po sloupcích: zastávka × spoj od [base]), spoje vzoru v [tidsAll] od [tidBase].
+ *
+ * Dřív dvě malá pole na každou zastávku každého vzoru: ~milion malých objektů, které GC při každém úklidu
+ * přesouval (komprese ~200 ms) => zásek UI hned po startu, když hlavní vlákno muselo čekat na GC.
  */
 class Pattern(
     val stops: IntArray,
-    val tids: IntArray,
-    val arrCols: Array<IntArray>,
-    val cols: Array<IntArray>
+    /** Počet jízd vzoru. */
+    val m: Int,
+    private val tidsAll: IntArray,
+    private val tidBase: Int,
+    private val arrAll: IntArray,
+    private val depAll: IntArray,
+    private val base: Int,
 ) {
-    fun dep(trip: Int, stop: Int): Int = cols[stop][trip]
-    fun arr(trip: Int, stop: Int): Int = arrCols[stop][trip]
+    fun tid(trip: Int): Int = tidsAll[tidBase + trip]
+    fun dep(trip: Int, stop: Int): Int = depAll[base + stop * m + trip]
+    fun arr(trip: Int, stop: Int): Int = arrAll[base + stop * m + trip]
+
+    /** První jízda s odjezdem ze zastávky [stop] v čase >= [t] (odjezdy jsou na každé zastávce seřazené); [m] = žádná. */
+    fun firstDepAtOrAfter(stop: Int, t: Int): Int {
+        val off = base + stop * m
+        var low = 0
+        var high = m
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            if (depAll[off + mid] < t) low = mid + 1 else high = mid
+        }
+        return low
+    }
 }
 
 sealed class ParentRef {
@@ -32,7 +52,7 @@ class Net private constructor(
     val day: LocalDate,
     val patterns: List<Pattern>,
     /** Zastávka → [vzor, pozice, vzor, pozice, …] (prokládané, bez zabalených Pair). */
-    val stopPats: Map<Int, IntArray>,
+    val stopPats: IntCsr,
 ) {
     companion object {
         /**
@@ -41,96 +61,110 @@ class Net private constructor(
          */
         fun build(tt: Timetable, days: List<LocalDate>): Map<LocalDate, Net> {
             val cache = tt.netCache
-            val maxTid = minOf(cache.maxTid, tt.trips.keys.maxOrNull() ?: 0)
+            val trips = tt.trips
+            val maxTid = minOf(cache.maxTid, trips.maxId)
             return days.associateWith { day ->
-                // spoj -> posuny (-1 den = přesah z včerejška, 0, +1 den = ráno zítřka)
-                val active = arrayOfNulls<IntArray>(maxTid + 1)
+                // spoj -> bity posunů (bit 0 = přesah z včerejška −1 den, bit 1 = dnes, bit 2 = ráno zítřka +1 den);
+                // jedno pole bajtů místo malého pole pro každý spoj (statisíce objektů navíc pro GC)
+                val active = ByteArray(maxTid + 1)
                 val svcsYest = tt.activeSvcs(day.minusDays(1))
                 val svcsToday = tt.activeSvcs(day)
                 val svcsTmrw = tt.activeSvcs(day.plusDays(1))
-                for ((tid, t) in tt.trips) {
-                    if (tid > maxTid) continue
-                    val a = t.svc in svcsYest && t.t1 >= 86400
-                    val b = t.svc in svcsToday
-                    val c = t.svc in svcsTmrw && t.t0 <= NEXT_DAY_CUTOFF
-                    if (!a && !b && !c) continue
-                    var n = 0
-                    val offs = IntArray((if (a) 1 else 0) + (if (b) 1 else 0) + (if (c) 1 else 0))
-                    if (a) offs[n++] = -86400
-                    if (b) offs[n++] = 0
-                    if (c) offs[n] = 86400
-                    active[tid] = offs
+                for (tid in 0..maxTid) {
+                    if (!trips.has(tid)) continue
+                    val svc = trips.svc[tid]
+                    val a = svc in svcsYest && trips.t1[tid] >= 86400
+                    val b = svc in svcsToday
+                    val c = svc in svcsTmrw && trips.t0[tid] <= NEXT_DAY_CUTOFF
+                    active[tid] = ((if (a) 1 else 0) or (if (b) 2 else 0) or (if (c) 4 else 0)).toByte()
                 }
                 assemble(tt, day, cache, active)
             }
         }
 
-        private fun assemble(tt: Timetable, day: LocalDate, cache: NetCache, active: Array<IntArray?>): Net {
+        /** Posun jízdy podle bitu v masce aktivních spojů (viz [build]). */
+        private fun dayShift(bit: Int): Int = (bit - 1) * 86400
+
+        private fun assemble(tt: Timetable, day: LocalDate, cache: NetCache, active: ByteArray): Net {
             val nPat = cache.nPat
             val count = IntArray(nPat)
             for (tid in active.indices) {
-                val o = active[tid] ?: continue
+                val o = active[tid].toInt()
+                if (o == 0) continue
                 val p = cache.patOf(tid)
-                if (p >= 0) count[p] += o.size
+                if (p >= 0) count[p] += Integer.bitCount(o)
             }
             // jízdy vzoru jako long: odjezd z 1. zastávky v horních 32 bitech (řazení), spoj a index posunu v dolních
             val keys = arrayOfNulls<LongArray>(nPat)
             val fill = IntArray(nPat)
             for (p in 0 until nPat) if (count[p] > 0) keys[p] = LongArray(count[p])
             for (tid in active.indices) {
-                val o = active[tid] ?: continue
+                val o = active[tid].toInt()
+                if (o == 0) continue
                 val p = cache.patOf(tid)
                 if (p < 0) continue
                 val dep0 = cache[cache.depBase(tid, cache.patLen(p))]
                 val k = keys[p]!!
-                for (oi in o.indices) k[fill[p]++] = ((dep0 + o[oi]).toLong() shl 32) or ((tid.toLong() shl 2) or oi.toLong())
+                for (bit in 0..2) {
+                    if (o and (1 shl bit) == 0) continue
+                    k[fill[p]++] = ((dep0 + dayShift(bit)).toLong() shl 32) or ((tid.toLong() shl 2) or bit.toLong())
+                }
             }
 
+            // velikost plochých polí: jízdy celkem a (zastávky × jízdy) celkem
+            var totalTrips = 0
+            var totalCells = 0L
+            for (p in 0 until nPat) {
+                val c = count[p]
+                if (c == 0) continue
+                totalTrips += c
+                totalCells += c.toLong() * cache.patLen(p)
+            }
+            val tidsAll = IntArray(totalTrips)
+            val arrAll = IntArray(totalCells.toInt())
+            val depAll = IntArray(totalCells.toInt())
+            var tidBase = 0
+            var base = 0
+
             val patsList = ArrayList<Pattern>()
-            val stopPatsMap = HashMap<Int, IntList>()
             for (p in 0 until nPat) {
                 val k = keys[p] ?: continue
                 k.sort()
                 val stops = cache.patStops(p)
                 val n = stops.size
                 val m = k.size
-                val tids = IntArray(m)
-                val arrCols = Array(n) { IntArray(m) }
-                val depCols = Array(n) { IntArray(m) }
                 for (j in 0 until m) {
                     val low = k[j] and 0xFFFFFFFFL
                     val tid = (low shr 2).toInt()
-                    val off = active[tid]!![(low and 3L).toInt()]
-                    tids[j] = tid
+                    val off = dayShift((low and 3L).toInt())
+                    tidsAll[tidBase + j] = tid
                     val ab = cache.arrBase(tid)
                     val db = cache.depBase(tid, n)
                     for (i in 0 until n) {
-                        arrCols[i][j] = cache[ab + i] + off
-                        depCols[i][j] = cache[db + i] + off
+                        arrAll[base + i * m + j] = cache[ab + i] + off
+                        depAll[base + i * m + j] = cache[db + i] + off
                     }
                 }
                 val pi = patsList.size
-                patsList.add(Pattern(stops, tids, arrCols, depCols))
-                for ((pos, st) in stops.withIndex()) {
-                    val l = stopPatsMap.getOrPut(st) { IntList() }
-                    l.add(pi); l.add(pos)
+                patsList.add(Pattern(stops, m, tidsAll, tidBase, arrAll, depAll, base))
+                tidBase += m
+                base += n * m
+            }
+            // zastávka → (vzor, pozice) dvěma průchody, bez seznamů pro každou zastávku
+            var maxStop = 0
+            for (pat in patsList) for (st in pat.stops) if (st > maxStop) maxStop = st
+            val sp = IntCsr.Builder(maxStop)
+            for (pat in patsList) for (st in pat.stops) if (st >= 0) sp.count(st, 2)
+            sp.alloc()
+            for ((pi, pat) in patsList.withIndex()) {
+                val stops = pat.stops
+                for (pos in stops.indices) {
+                    val st = stops[pos]
+                    if (st >= 0) { sp.put(st, pi); sp.put(st, pos) }
                 }
             }
-            val stopPats = HashMap<Int, IntArray>(stopPatsMap.size * 2)
-            for ((k, v) in stopPatsMap) stopPats[k] = v.toArray()
-            return Net(tt, day, patsList, stopPats)
+            return Net(tt, day, patsList, sp.build())
         }
-    }
-
-    private fun binarySearchLeft(arr: IntArray, target: Int): Int {
-        var low = 0
-        var high = arr.size
-        while (low < high) {
-            val mid = (low + high) ushr 1
-            if (arr[mid] < target) low = mid + 1
-            else high = mid
-        }
-        return low
     }
 
     fun raptor(srcs: List<Int>, dsts: Set<Int>, t0Sec: Int, kmax: Int = 4, modeFilter: ModeFilter = ModeFilter.ALL): List<Journey> {
@@ -146,9 +180,9 @@ class Net private constructor(
             best[s] = t0Sec
             marked.add(s)
         }
+        val fs = foot.data
         for (s in srcs) {
-            val fs = foot[s] ?: continue
-            for (q in 0 until fs.size step 2) {
+            for (q in foot.from(s) until foot.to(s) step 2) {
                 val s2 = fs[q]; val d = fs[q + 1]
                 if (t0Sec + d < (best[s2] ?: INF)) {
                     arrs[0][s2] = t0Sec + d
@@ -165,8 +199,8 @@ class Net private constructor(
         for (k in 1..kmax) {
             val queue = HashMap<Int, Int>()
             for (s in marked) {
-                val sp = stopPats[s] ?: continue
-                for (q in 0 until sp.size step 2) {
+                val sp = stopPats.data
+                for (q in stopPats.from(s) until stopPats.to(s) step 2) {
                     val pi = sp[q]; val pos = sp[q + 1]
                     val currentMin = queue[pi] ?: INF
                     if (pos < currentMin) queue[pi] = pos
@@ -189,7 +223,7 @@ class Net private constructor(
                 for (i in start until stops.size) {
                     val s = stops[i]
                     if (trip >= 0) {
-                        val a = pattern.arrCols[i][trip]
+                        val a = pattern.arr(trip, i)
                         if (a < (best[s] ?: INF) && a < target) {
                             best[s] = a
                             curArrs[s] = a
@@ -199,17 +233,17 @@ class Net private constructor(
                     }
                     val p = prevArrs[s]
                     if (p != null) {
-                        val col = pattern.cols[i]
-                        var j = binarySearchLeft(col, p + mt)
+                        val m = pattern.m
+                        var j = pattern.firstDepAtOrAfter(i, p + mt)
                         if (modeFilter != ModeFilter.ALL) {
-                            while (j < col.size) {
-                                val tid = pattern.tids[j]
-                                val isTrain = tt.trips[tid]?.isTrain == true
+                            while (j < m) {
+                                val tid = pattern.tid(j)
+                                val isTrain = tt.trips.isTrain(tid)
                                 if (modeFilter.accepts(isTrain)) break
                                 j++
                             }
                         }
-                        if (j < col.size && (trip < 0 || j < trip || (j == trip && p < boardPrev))) {
+                        if (j < m && (trip < 0 || j < trip || (j == trip && p < boardPrev))) {
                             trip = j
                             board = i
                             boardPrev = p
@@ -220,8 +254,7 @@ class Net private constructor(
 
             for (s in newMarked.toList()) {
                 val curS = curArrs[s] ?: continue
-                val fs = foot[s] ?: continue
-                for (q in 0 until fs.size step 2) {
+                for (q in foot.from(s) until foot.to(s) step 2) {
                     val s2 = fs[q]; val d = fs[q + 1]
                     val a = curS + d
                     if (a < (best[s2] ?: INF) && a < target) {
@@ -261,7 +294,6 @@ class Net private constructor(
                 is ParentRef.Ride -> {
                     val pattern = patterns[p.patternIdx]
                     val stops = pattern.stops
-                    val tids = pattern.tids
                     val arr = IntArray(stops.size) { i -> pattern.arr(p.tripIdx, i) }
                     val dep = IntArray(stops.size) { i -> pattern.dep(p.tripIdx, i) }
                     val seq = (p.boardIdx..p.alightIdx).map { i -> Triple(stops[i], arr[i], dep[i]) }
@@ -273,7 +305,7 @@ class Net private constructor(
                             toStop = stops[p.alightIdx],
                             dep = dep[p.boardIdx],
                             arr = arr[p.alightIdx],
-                            tid = tids[p.tripIdx],
+                            tid = pattern.tid(p.tripIdx),
                             stops = seq,
                             t0 = dep[0],
                             t1 = arr.last()
@@ -461,7 +493,7 @@ class Planner(val tt: Timetable) {
         } else {
             pruned.filter { j ->
                 j.rawLegs.all { leg ->
-                    leg.kind != "ride" || modeFilter.accepts(tt.trips[leg.tid]?.isTrain == true)
+                    leg.kind != "ride" || modeFilter.accepts(tt.trips.isTrain(leg.tid))
                 }
             }
         }

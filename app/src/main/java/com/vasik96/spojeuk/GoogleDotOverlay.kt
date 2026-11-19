@@ -3,9 +3,15 @@ package com.vasik96.spojeuk
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Paint
+import android.os.SystemClock
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.nativeCanvas
@@ -33,9 +39,21 @@ internal fun GoogleDotOverlay(
 ) {
     val context = LocalContext.current
     val painter = remember(context) { DotPainter(context) }
+    // prolínání: překreslení každý snímek jen po dobu animace
+    val frame = remember { mutableIntStateOf(0) }
+    LaunchedEffect(layer) {
+        snapshotFlow { layer.fadeKick.intValue }.collectLatest {
+            while (true) {
+                withFrameNanos { }
+                frame.intValue++
+                if (!layer.fade.animating()) break
+            }
+        }
+    }
     Spacer(
         modifier.drawBehind {
             layer.version.intValue                     // odběr změn vozidel
+            frame.intValue                             // odběr snímků animace
             val cam = cameraPositionState.position     // odběr pohybu kamery (jen kreslení, žádná rekompozice)
             painter.draw(
                 drawContext.canvas.nativeCanvas, layer,
@@ -81,7 +99,6 @@ private class DotPainter(private val context: Context) {
         val wx = layer.wx
         val wy = layer.wy
         val colors = layer.color
-        val lates = layer.late
         val labels = layer.label
         val hl = layer.hl
 
@@ -97,18 +114,85 @@ private class DotPainter(private val context: Context) {
         val r = MAX_HALF_DP * density   // nejširší štítek / 2
         val minX = -r; val maxX = w + r; val minY = -r; val maxY = h + r
 
-        atlas.beginFrame()
-        for (b in batches) b.reset()
+        val fade = layer.fade
+        fade.tick(SystemClock.elapsedRealtime(), layer.labelsPending)
+        val appear = fade.appearAlpha()
+        if (appear <= 0f) return
 
+        atlas.beginFrame()
+        if (!fade.switching()) {
+            // běžný snímek: jeden průchod; v režimu teček se (doznívající) štítky ignorují
+            pass(canvas, if (fade.dotMode) PASS_DOTS else PASS_ALL, appear, layer, cwx, cwy, world, c, s, cx, cy, minX, maxX, minY, maxY)
+        } else {
+            // přechod tečky ↔ štítky: vozidla bez štítku zůstávají tečkou, ostatní se prolínají
+            pass(canvas, PASS_DOTS_UNLABELED, appear, layer, cwx, cwy, world, c, s, cx, cy, minX, maxX, minY, maxY)
+            pass(canvas, PASS_DOTS_LABELED, appear * fade.dotAlpha(), layer, cwx, cwy, world, c, s, cx, cy, minX, maxX, minY, maxY)
+            pass(canvas, PASS_LABELS, appear * fade.labelAlpha(), layer, cwx, cwy, world, c, s, cx, cy, minX, maxX, minY, maxY)
+        }
+
+        val hlLayer = appear < 0.996f && hl in 0 until n
+        if (hlLayer) canvas.saveLayerAlpha(null, (appear * 255f).toInt())
+        // zvýrazněné vozidlo navrch (pulzující štítek, nebo větší tečka)
+        if (hl in 0 until n) {
+            val dx = (wx[hl] - cwx) * world
+            val dy = (wy[hl] - cwy) * world
+            val x = (dx * c + dy * s + cx).toFloat()
+            val y = (-dx * s + dy * c + cy).toFloat()
+            val bmp = labels[hl]
+            if (bmp != null) {
+                canvas.drawBitmap(bmp, x - bmp.width / 2f, y - bmp.height / 2f, bmpPaint)
+            } else {
+                val rr = HL_DP / 2 * density
+                hlPaint.color = RING_COLOR
+                canvas.drawCircle(x, y, rr, hlPaint)
+                hlPaint.color = colors[hl]
+                canvas.drawCircle(x, y, rr - RING_DP * density, hlPaint)
+            }
+        }
+        if (hlLayer) canvas.restore()
+    }
+
+    /**
+     * Jeden průchod vozidel (bez zvýrazněného) jako sprite batch. Průhledné štítky přes vrstvu (saveLayerAlpha),
+     * aby se přes sebe neprosvítaly; tečky jen alfou paintu (malé, skoro se nepřekrývají, offscreen vrstva přes
+     * celou obrazovku je zbytečná práce navíc). Obojí jen během animace.
+     */
+    private fun pass(
+        canvas: android.graphics.Canvas, mode: Int, alpha: Float, layer: GoogleVehicleLayer,
+        cwx: Double, cwy: Double, world: Double, c: Double, s: Double, cx: Double, cy: Double,
+        minX: Float, maxX: Float, minY: Float, maxY: Float,
+    ) {
+        if (alpha <= 0.004f) return
+        val n = layer.count
+        val wx = layer.wx
+        val wy = layer.wy
+        val colors = layer.color
+        val lates = layer.late
+        val labels = layer.label
+        val hl = layer.hl
+        for (b in batches) b.reset()
+        val a255 = (alpha * 255f).toInt().coerceIn(0, 255)
+        val translucent = a255 < 254
+        val saved = translucent && (mode == PASS_LABELS || mode == PASS_ALL)
+        val paintAlpha = if (translucent && !saved) a255 else 255
+        if (saved) canvas.saveLayerAlpha(null, a255)
+        bmpPaint.alpha = paintAlpha
         for (i in 0 until n) {
             if (i == hl) continue
+            val lb = labels[i]
+            val bmp = when (mode) {
+                PASS_ALL -> lb ?: dotFor(colors[i], lates[i])
+                PASS_DOTS -> dotFor(colors[i], lates[i])
+                PASS_DOTS_UNLABELED -> if (lb == null) dotFor(colors[i], lates[i]) else continue
+                PASS_DOTS_LABELED -> if (lb != null) dotFor(colors[i], lates[i]) else continue
+                else -> lb ?: continue
+            }
             val dx = (wx[i] - cwx) * world
             val dy = (wy[i] - cwy) * world
             // otočení mapy (bearing): bod na východě je při bearing 90° nahoře
             val x = (dx * c + dy * s + cx).toFloat()
             val y = (-dx * s + dy * c + cy).toFloat()
             if (x < minX || x > maxX || y < minY || y > maxY) continue
-            val bmp = labels[i] ?: dotFor(colors[i], lates[i])
             // celé pixely => bitmapa 1:1, ostrá
             val left = Math.round(x - bmp.width / 2f).toFloat()
             val top = Math.round(y - bmp.height / 2f).toFloat()
@@ -118,25 +202,14 @@ private class DotPainter(private val context: Context) {
         }
         for (p in batches.indices) {
             val b = batches[p]
-            if (b.quads > 0) b.draw(canvas, atlas.paint(p))
-        }
-
-        // zvýrazněné vozidlo navrch (pulzující štítek, nebo větší tečka)
-        if (hl in 0 until n) {
-            val dx = (wx[hl] - cwx) * world
-            val dy = (wy[hl] - cwy) * world
-            val x = (dx * c + dy * s + cx).toFloat()
-            val y = (-dx * s + dy * c + cy).toFloat()
-            labels[hl]?.let { bmp ->
-                canvas.drawBitmap(bmp, x - bmp.width / 2f, y - bmp.height / 2f, bmpPaint)
-                return
+            if (b.quads > 0) {
+                val paint = atlas.paint(p)
+                paint.alpha = paintAlpha
+                b.draw(canvas, paint)
             }
-            val rr = HL_DP / 2 * density
-            hlPaint.color = RING_COLOR
-            canvas.drawCircle(x, y, rr, hlPaint)
-            hlPaint.color = colors[hl]
-            canvas.drawCircle(x, y, rr - RING_DP * density, hlPaint)
         }
+        bmpPaint.alpha = 255
+        if (saved) canvas.restore()
     }
 
     /** Čtyřúhelníky jedné stránky atlasu (pozice, souřadnice v atlasu, indexy trojúhelníků). */
@@ -191,6 +264,11 @@ private class DotPainter(private val context: Context) {
     }
 
     private companion object {
+        const val PASS_ALL = 0
+        const val PASS_DOTS = 1
+        const val PASS_DOTS_UNLABELED = 2
+        const val PASS_DOTS_LABELED = 3
+        const val PASS_LABELS = 4
         const val MAX_HALF_DP = 48f      // polovina nejširšího štítku (zvýrazněný až 84 dp) + rezerva
         const val HL_DP = 13f
         const val RING_DP = 1.2f

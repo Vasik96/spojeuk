@@ -71,9 +71,11 @@ object TrainLines {
     fun populateFromTimetable(tt: Timetable) {
         val newMap = HashMap(map)
         var added = 0
-        for (trip in tt.trips.values) {
-            val num = normKey(trip.num)
-            val line = trip.line.trim()
+        val trips = tt.trips
+        for (id in 0..trips.maxId) {
+            val rawNum = trips.num[id] ?: continue
+            val num = normKey(rawNum)
+            val line = trips.line[id]!!.trim()
             if (num.isNotEmpty() && line.isNotEmpty() && line != "?" && !newMap.containsKey(num)) {
                 newMap[num] = line
                 added++

@@ -12,7 +12,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseInOutCubic
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
@@ -1397,14 +1400,24 @@ private fun StopPickerSheet(
 
     var query by remember { mutableStateOf("") }
     var options by remember { mutableStateOf<List<Stop>>(emptyList()) }
+    // dotaz, ke kterému patří zobrazené [options] (hlavička, „moje poloha“ se mění až s výsledky, ne s psaním)
+    var shownQuery by remember { mutableStateOf("") }
+    val listAlpha = remember { Animatable(0f) }
 
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(query, indexedStops, originLat, originLng) {
         delay(60.milliseconds)
-        options = withContext(Dispatchers.Default) {
+        val found = withContext(Dispatchers.Default) {
             getStopMatches(query, indexedStops, originLat, originLng)
         }
+        // rychlé prolnutí: starý seznam krátce zeslábne, nový se plynule objeví (žádné skokové přeskládání)
+        if (found != options || query.isBlank() != shownQuery.isBlank()) {
+            if (listAlpha.value > 0.35f) listAlpha.animateTo(0.35f, tween(55, easing = LinearEasing))
+            options = found
+            shownQuery = query
+        }
+        listAlpha.animateTo(1f, tween(150, easing = LinearOutSlowInEasing))
     }
 
     LaunchedEffect(Unit) {
@@ -1493,10 +1506,11 @@ private fun StopPickerSheet(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .nestedScroll(scrollHidesKeyboard),
+                    .nestedScroll(scrollHidesKeyboard)
+                    .graphicsLayer { alpha = listAlpha.value },
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                if (query.isBlank()) {
+                if (shownQuery.isBlank()) {
                     item(key = "myloc") {
                         DropdownMenuItem(
                             leadingIcon = {
@@ -1546,7 +1560,7 @@ private fun StopPickerSheet(
                                 )
                             }
                         },
-                        trailingIcon = if (query.isBlank()) {
+                        trailingIcon = if (shownQuery.isBlank()) {
                             {
                                 IconButton(
                                     onClick = { onRemoveUsed(stop) },
@@ -1571,7 +1585,7 @@ private fun StopPickerSheet(
                     )
                 }
 
-                if (options.isEmpty() && query.isNotBlank()) {
+                if (options.isEmpty() && shownQuery.isNotBlank()) {
                     item(key = "empty") {
                         Text(
                             stringResource(R.string.search_nothing_found),

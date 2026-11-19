@@ -56,6 +56,13 @@ internal class GoogleVehicleLayer(private val context: Context) {
     var isDotMode = true
         private set
 
+    /** Prolínání (objevení, tečky ↔ štítky); [fadeKick] se zvýší při startu animace => overlay kreslí každý snímek. */
+    val fade = VehicleFade()
+    val fadeKick = mutableIntStateOf(0)
+    /** Některé štítky v záběru se ještě kreslí na pozadí (přechod na štítky na ně počká). */
+    var labelsPending = false
+        private set
+
     /**
      * Štítky od [DOT_ZOOM_GOOGLE] (s hysterezí proti blikání). Pojistka: při extrémním počtu vozidel v záběru
      * zůstanou tečky (tisíce štítků přes sebe jsou nečitelné a zbytečně drahé na kreslení).
@@ -64,7 +71,16 @@ internal class GoogleVehicleLayer(private val context: Context) {
         val zoomOk = if (isDotMode) zoom >= DOT_ZOOM_GOOGLE + DOT_HYSTERESIS else zoom >= DOT_ZOOM_GOOGLE
         val countOk = if (isDotMode) visibleCount <= LABEL_ENTER_MAX else visibleCount <= LABEL_LEAVE_MAX
         isDotMode = !(zoomOk && countOk)
+        // dokud nejsou vozidla vidět, režim se nastaví bez animace
+        if (!fade.appeared) fade.initDotMode(isDotMode)
+        else if (fade.setDotMode(isDotMode)) fadeKick.intValue++
         return isDotMode
+    }
+
+    /** Nové otevření mapy: vozidla se znovu plynule objeví. */
+    fun restartAppear() {
+        fade.resetAppear()
+        version.intValue++
     }
 
     fun attach(map: GoogleMap) {
@@ -120,7 +136,8 @@ internal class GoogleVehicleLayer(private val context: Context) {
         view: ViewBox?,
         prewarm: Boolean,
     ): Boolean {
-        val dot = isDotMode
+        // během mizení štítků (přepnutí na tečky) se štítky pořád chystají, overlay je prolíná
+        val dot = isDotMode && !fade.switching()
         var pending = false
 
         /** Bitmapa štítku, pokud je hotová; jinak se objedná kreslení na pozadí. */
@@ -167,6 +184,8 @@ internal class GoogleVehicleLayer(private val context: Context) {
         for (i in n until count) { vehicles[i] = null; label[i] = null }
         count = n
         hl = h
+        if (n > 0 && fade.startAppear()) fadeKick.intValue++
+        labelsPending = pending
         version.intValue++
         return pending
     }

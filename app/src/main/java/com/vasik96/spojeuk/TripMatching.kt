@@ -140,7 +140,7 @@ class TripLocator(private val tt: Timetable) : TripProgress {
     private fun buildPolyline(tid: Int): Polyline? {
         val pts = ArrayList<Stop>()
         for (sid in tt.tripStops(tid)) {
-            val s = tt.stops[sid] ?: continue
+            val s = tt.stop(sid) ?: continue
             if (s.hasCoords) pts.add(s)
         }
         if (pts.size < 2) return null
@@ -169,9 +169,12 @@ class TripLocator(private val tt: Timetable) : TripProgress {
             val day = now.toLocalDate().minusDays(daysBack)
             val rel = secondsSinceMidnight(day, now) - v.delay * 60.0
             val active = tt.activeSvcs(day)
+            val trips = tt.trips
             for (tid in tt.tripsOfLine(v.line, agencyKeywords)) {
-                val trip = tt.trips[tid] ?: continue
-                if (trip.svc !in active || rel < trip.t0 - 900 || rel > trip.t1 + 900) continue
+                // filtr přes sloupce: DbTrip (nový objekt) až pro spoje, které v tu dobu jedou; linka má tisíce
+                // spojů a párují se stovky vozů => jinak stovky MB odpadu a GC zasekávající UI
+                if (!trips.has(tid) || trips.svc[tid] !in active || rel < trips.t0[tid] - 900 || rel > trips.t1[tid] + 900) continue
+                val trip = trips[tid] ?: continue
                 val score = scoreTrip(v, tid, trip, rel, wantedHead, maxDist) ?: continue
                 if (score < bestScore) { best = tid; bestScore = score }
             }
@@ -184,18 +187,18 @@ class TripLocator(private val tt: Timetable) : TripProgress {
         // Vzdálenost k ÚSEKU mezi dvěma po sobě jdoucími zastávkami a čas interpolovaný po něm (ne jen k zastávkám):
         // vůz uprostřed dlouhého úseku (AE Dejvická → Letiště, příměstské linky) je od zastávek daleko, ale na trase.
         var score = Double.MAX_VALUE
-        var legHeading: Double? = null
+        var legHeading = Double.NaN   // NaN = žádný úsek (bez zabaleného Double?)
         val k = cos(Math.toRadians(v.lat)) * Geo.M_PER_DEG_LNG
         val px = v.lng * k
         val py = v.lat * Geo.M_PER_DEG_LAT
         var prev = -1
         for (j in times.stops.indices) {
-            val b = tt.stops[times.stops[j]] ?: continue
+            val b = tt.stop(times.stops[j]) ?: continue
             if (!b.hasCoords) continue
             val i = prev
             prev = j
             if (i < 0) continue
-            val a = tt.stops[times.stops[i]]!!
+            val a = tt.stop(times.stops[i])!!
             val ax = a.lng * k; val ay = a.lat * Geo.M_PER_DEG_LAT
             val dx = b.lng * k - ax; val dy = b.lat * Geo.M_PER_DEG_LAT - ay
             val len2 = dx * dx + dy * dy
@@ -209,10 +212,10 @@ class TripLocator(private val tt: Timetable) : TripProgress {
         if (score == Double.MAX_VALUE) return null
 
         val vehicleHeading = v.heading
-        if (vehicleHeading != null && legHeading != null) {
+        if (vehicleHeading != null && !legHeading.isNaN()) {
             if (Geo.angleDiff(vehicleHeading, legHeading) > 90) return null
         }
-        val tripHead = foldText(trip.head)
+        val tripHead = tt.foldedHead(trip.head)
         if (wantedHead.isNotBlank() && tripHead.isNotBlank()) {
             if (wantedHead in tripHead || tripHead in wantedHead) {
                 score -= 250
@@ -239,11 +242,12 @@ class TripLocator(private val tt: Timetable) : TripProgress {
         val active = tt.activeSvcs(today)
         var best: Int? = null
         var bestDist = Double.MAX_VALUE
-        for ((tid, t) in tt.trips) {
-            if (t.line != line || t.svc !in active) continue
-            if (rel < t.t0 - 600 || rel > t.t1 + 600) continue
+        val trips = tt.trips
+        for (tid in 0..trips.maxId) {
+            if (trips.line[tid] != line || trips.svc[tid] !in active) continue
+            if (rel < trips.t0[tid] - 600 || rel > trips.t1[tid] + 600) continue
             for (sid in tt.tripStops(tid)) {
-                val s = tt.stops[sid] ?: continue
+                val s = tt.stop(sid) ?: continue
                 if (!s.hasCoords) continue
                 val d = Geo.distanceM(lat, lng, s.lat, s.lng)
                 if (d < bestDist) { bestDist = d; best = tid }

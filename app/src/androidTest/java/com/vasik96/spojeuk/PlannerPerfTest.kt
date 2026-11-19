@@ -66,11 +66,11 @@ class PlannerPerfTest {
 
         val today = nowPrague().toLocalDate()
         run {
-            val maxTid = tt.trips.keys.max()
+            val maxTid = tt.trips.maxId
             fun scan(lo: Int, hi: Int, join: Boolean): Long {
                 var b = 0L
                 android.database.sqlite.SQLiteDatabase.openDatabase(db.path, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use { d ->
-                    val svcs = tt.activeSvcs(today).joinToString(",")
+                    val active = tt.activeSvcs(today); val svcs = tt.svcs.keys.filter { it in active }.joinToString(",")
                     val sql = if (join) "SELECT tt.trip, tt.stops, tt.arr, tt.dep FROM trip_times tt JOIN trip t ON t.id = tt.trip WHERE tt.trip BETWEEN $lo AND $hi AND t.svc IN ($svcs)"
                     else "SELECT trip, stops, arr, dep FROM trip_times WHERE trip BETWEEN $lo AND $hi"
                     d.rawQuery(sql, null).use { c -> while (c.moveToNext()) { b += c.getBlob(1).size + c.getBlob(2).size + c.getBlob(3).size } }
