@@ -10,6 +10,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 import java.io.File
 import java.time.LocalDateTime
 import kotlin.coroutines.cancellation.CancellationException
@@ -439,6 +441,10 @@ class TransitRepository(context: Context? = null) {
     // ───────────────────────── trasy a detail spoje ─────────────────────────
 
     suspend fun tripGeometry(v: Vehicle): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
+        pmdpTrip(v)?.let { t ->
+            val stops = t.stops.filter { it.hasCoords() }.map { it.lat to it.lng }
+            return@withContext t.route.takeIf { it.size >= 2 } ?: stops
+        }
         val tt = store.ensure().timetable
         val tid = v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
@@ -468,6 +474,7 @@ class TransitRepository(context: Context? = null) {
     }
 
     suspend fun tripStopLocations(v: Vehicle): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
+        pmdpTrip(v)?.let { t -> return@withContext t.stops.filter { it.hasCoords() }.map { it.lat to it.lng } }
         val tt = store.ensure().timetable
         val tid = v.tid.takeIf { it != 0 }
             ?: tt.findTripId(v.cis, v.trip)
@@ -539,8 +546,65 @@ class TransitRepository(context: Context? = null) {
         return tt.stops[leg.fromStop]?.takeIf { it.hasCoords }?.let { it.lat to it.lng }
     }
 
+    // ───────── Plzeň (PMDP): spoj přímo od dopravce ─────────
+    // Spoje PMDP jsou v celostátním jízdním řádu pod jinými čísly, takže zastávky, časy a tvar trasy dodává
+    // feed server (/api/trip/pmdp, z mapy PMDP) podle čísla spoje ve [Vehicle.trip]. Stejně to dělá web.
+
+    private class RemoteStop(val name: String, val lat: Double, val lng: Double, val arr: Int)
+    private class RemoteTrip(val stops: List<RemoteStop>, val route: List<Pair<Double, Double>>)
+
+    /** číslo spoje → (kdy, spoj nebo null = server ho nezná) */
+    private val remoteTrips = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, RemoteTrip?>>()
+
+    private fun pmdpTrip(v: Vehicle): RemoteTrip? {
+        if (v.source != SourceIds.PMDP || v.trip.isBlank()) return null
+        val now = System.currentTimeMillis()
+        val cached = remoteTrips[v.trip]
+        if (cached != null && now - cached.first < (if (cached.second != null) 600_000L else 60_000L)) return cached.second
+        val trip = try {
+            val req = Request.Builder().url("$SERVER_IP/api/trip/pmdp?conn=${java.net.URLEncoder.encode(v.trip, "UTF-8")}").build()
+            http.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) null else parseRemoteTrip(r.body?.string().orEmpty())
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Trasa PMDP ${v.trip}: ${e.message}")
+            return cached?.second // výpadek sítě: poslední známá, nic se nezapamatuje
+        }
+        if (remoteTrips.size > 300) remoteTrips.clear()
+        remoteTrips[v.trip] = now to trip
+        return trip
+    }
+
+    private fun parseRemoteTrip(body: String): RemoteTrip? {
+        val t = JSONObject(body).optJSONObject("trip") ?: return null
+        val st = t.optJSONArray("stops") ?: return null
+        val stops = (0 until st.length()).mapNotNull { i ->
+            val a = st.optJSONArray(i) ?: return@mapNotNull null
+            RemoteStop(prettyName(a.optString(0)), a.optDouble(1), a.optDouble(2), a.optInt(3, -1))
+        }
+        val rt = t.optJSONArray("route")
+        val route = if (rt == null) emptyList() else (0 until rt.length()).mapNotNull { i ->
+            rt.optJSONArray(i)?.let { it.optDouble(0) to it.optDouble(1) }
+        }
+        return if (stops.isEmpty()) null else RemoteTrip(stops, route)
+    }
+
+    private fun RemoteStop.hasCoords() = lat != 0.0 || lng != 0.0
+
+    private fun remoteTripInfo(v: Vehicle, t: RemoteTrip): VehicleTripInfo {
+        // plánovaný čas "teď" = skutečný čas minus zpoždění; spoj přes půlnoc má časy za 86400
+        var rel = nowPrague().toLocalTime().toSecondOfDay() - v.delay * 60
+        val first = t.stops.first().arr
+        if (first >= 0 && rel < first - 3600 && rel + 86400 <= t.stops.last().arr + 3600) rel += 86400
+        val next = t.stops.drop(1).firstOrNull { it.arr > rel }
+        return VehicleTripInfo(t.stops.last().name.takeIf { it.isNotBlank() }, next?.name)
+    }
+
     suspend fun vehicleTripInfo(v: Vehicle): VehicleTripInfo = withContext(Dispatchers.IO) {
         val none = VehicleTripInfo(null, null)
+        pmdpTrip(v)?.let { return@withContext remoteTripInfo(v, it) }
         val tt = store.ensure().timetable
         // příští / konečná zastávka jen ze spoje, který opravdu jede (ne ranní oběh stojící soupravy)
         val tid = v.tid.takeIf { it != 0 } ?: tt.findTripId(v.cis, v.trip)

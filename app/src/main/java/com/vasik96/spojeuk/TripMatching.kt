@@ -90,7 +90,8 @@ object TripEnricher {
         }
         val trip = tt.trips[m.tid] ?: return v
         var out = v.copy(tid = m.tid, tripMatch = if (m.exact) TripMatch.EXACT else TripMatch.HEURISTIC)
-        if (!m.exact) out = out.copy(cis = trip.cis.ifBlank { v.cis }, trip = trip.num.ifBlank { v.trip })
+        // PMDP: trip je číslo spoje dopravce, podle něj se stahuje trasa (TransitRepository.pmdpTrip); nepřepisovat
+        if (!m.exact && v.source != SourceIds.PMDP) out = out.copy(cis = trip.cis.ifBlank { v.cis }, trip = trip.num.ifBlank { v.trip })
         if (adoptsTimetableLine(v) && trip.line.isNotBlank() && trip.line != "?") out = out.copy(line = trip.line)
 
         if (v.agency.isBlank() && trip.agency.isNotBlank()) {

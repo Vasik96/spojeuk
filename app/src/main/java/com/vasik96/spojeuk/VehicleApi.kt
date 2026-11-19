@@ -29,6 +29,7 @@ object SourceIds {
     const val DPMD = "dpmd"
     const val TRAIN = "train" // Správa železnic
     const val PID = "pid" // Pražská integrovaná doprava
+    const val PMDP = "pmdp" // Plzeň; trip = číslo spoje PMDP (ConnectionId), trasa přes /api/trip/pmdp
 }
 
 /** Jeden zdroj ve stavu, jak ho hlásí server v `/api/vehicles` → `sources`. */
