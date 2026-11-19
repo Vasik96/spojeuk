@@ -307,6 +307,8 @@ class TransitRepository(context: Context? = null) {
                 val today = now.toLocalDate()
                 b.planner.prepare(if (now.hour >= 18) listOf(today, today.plusDays(1)) else listOf(today))
             }.onFailure { Log.w(TAG, "příprava plánovače selhala: ${it.message}") }
+            val rt = Runtime.getRuntime()
+            Log.d("SearchPerf", "halda po přípravě: ${(rt.totalMemory() - rt.freeMemory()) / 1048576} MB z ${rt.maxMemory() / 1048576} MB")
         }
     }
 
@@ -462,7 +464,7 @@ class TransitRepository(context: Context? = null) {
             ?: tt.findTripId(v.cis, v.trip)
             ?: tripFallback(tt, v)
             ?: return@withContext "spoj z jízdního řádu nenalezen"
-        "spoj $tid, ${geometry.describe(tt, tid)}\ngid: ${tt.trips[tid]?.gid}"
+        "spoj $tid, ${geometry.describe(tt, tid)}\ngid: ${tt.gidOf(tid)}"
     }
 
     suspend fun tripStopLocations(v: Vehicle): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {

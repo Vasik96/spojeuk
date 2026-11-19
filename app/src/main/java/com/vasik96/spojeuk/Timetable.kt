@@ -11,13 +11,14 @@ import java.util.concurrent.ConcurrentHashMap
 object FootGraph {
     private fun cellKey(y: Int, x: Int): Long = (y.toLong() shl 32) or (x.toLong() and 0xFFFFFFFFL)
 
-    fun build(stops: Map<Int, Stop>): Map<Int, List<Pair<Int, Int>>> {
+    /** Zastávka → [soused, čas chůze s, soused, čas, …] (prokládané IntArray, bez zabalených Pair<Int, Int>). */
+    fun build(stops: Map<Int, Stop>): Map<Int, IntArray> {
         val cells = HashMap<Long, MutableList<Int>>()
         for ((sid, stop) in stops) {
             if (!stop.hasCoords) continue
             cells.getOrPut(cellKey((stop.lat / 0.003).toInt(), (stop.lng / 0.0045).toInt())) { ArrayList(4) }.add(sid)
         }
-        val foot = HashMap<Int, MutableList<Pair<Int, Int>>>()
+        val foot = HashMap<Int, IntList>()
         for ((cell, ids) in cells) {
             val cy = (cell shr 32).toInt()
             val cx = cell.toInt()
@@ -30,14 +31,29 @@ object FootGraph {
                         val sb = stops[b] ?: continue
                         val d = Geo.distanceM(sa.lat, sa.lng, sb.lat, sb.lng)
                         if (d <= FOOT_MAX_M) {
-                            foot.getOrPut(a) { mutableListOf() }.add(b to maxOf(60, (d / WALK_MS).toInt()))
+                            val l = foot.getOrPut(a) { IntList() }
+                            l.add(b); l.add(maxOf(60, (d / WALK_MS).toInt()))
                         }
                     }
                 }
             }
         }
-        return foot
+        val out = HashMap<Int, IntArray>(foot.size * 2)
+        for ((k, v) in foot) out[k] = v.toArray()
+        return out
     }
+}
+
+/** Rostoucí pole intů bez zabalování (pro velké indexy plánovače). */
+class IntList(cap: Int = 4) {
+    private var a = IntArray(cap)
+    var size = 0
+        private set
+    fun add(x: Int) {
+        if (size == a.size) a = a.copyOf(maxOf(4, size * 2))
+        a[size++] = x
+    }
+    fun toArray(): IntArray = a.copyOf(size)
 }
 
 /**
@@ -57,8 +73,22 @@ class Timetable(val dbFile: File) {
     var hasGid = false
         private set
 
-    private val tripsByKey = HashMap<String, MutableList<Int>>()          // "cis:num" → spoje
-    private val tripsByTrain = HashMap<String, MutableList<Int>>()        // číslo vlaku → spoje
+    // indexy jako IntArray (ne List<Int>): statisíce záznamů, zabalená čísla a seznamy stály desítky MB
+    private val tripsByKey = HashMap<String, IntArray>()          // "cis:num" → spoje
+    private val tripsByTrain = HashMap<String, IntArray>()        // číslo vlaku → spoje
+    private val gidCache = ConcurrentHashMap<Int, String>()
+
+    /** GTFS trip_id spoje (klíč do shapes.sqlite), čte se z DB až když je potřeba; "" když DB sloupec nemá. */
+    fun gidOf(tid: Int): String {
+        if (!hasGid) return ""
+        gidCache[tid]?.let { return it }
+        val g = readDb().rawQuery("SELECT gid FROM trip WHERE id=?", arrayOf(tid.toString())).use { c ->
+            if (c.moveToFirst()) c.getString(0) ?: "" else ""
+        }
+        if (gidCache.size > 5_000) gidCache.clear()
+        gidCache[tid] = g
+        return g
+    }
     private val activeCache = ConcurrentHashMap<LocalDate, Set<Int>>()
     private val timesCache = ConcurrentHashMap<Int, TripTimes>()
     private val lineIndexes = ConcurrentHashMap<List<String>, Map<String, List<Int>>>()
@@ -78,8 +108,10 @@ class Timetable(val dbFile: File) {
         sharedDb = null
     }
 
-    val foot: Map<Int, List<Pair<Int, Int>>> by lazy { FootGraph.build(stops) }
+    val foot: Map<Int, IntArray> by lazy { FootGraph.build(stops) }
     val locator: TripLocator by lazy { TripLocator(this) }
+    /** Časy jízd pro stavbu sítě plánovače, namapované ze souboru (viz [NetCache]); první použití ho může vytvořit. */
+    val netCache: NetCache by lazy { NetCache.open(dbFile) }
 
     init {
         load()
@@ -135,7 +167,8 @@ class Timetable(val dbFile: File) {
      * ve stejném pořadí jako dřív (podle id).
      */
     private fun loadTrips() {
-        val gidCol = if (hasGid) ", gid" else ""
+        // místo celého gid jen příznak vlaku (řetězce gid se nenačítají, viz DbTrip.isTrain)
+        val gidCol = if (hasGid) ", gid LIKE 'czptt:%'" else ""
         val maxId = readDb().rawQuery("SELECT max(id) FROM trip", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
         val parts = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
         val step = maxId / parts + 1
@@ -143,24 +176,23 @@ class Timetable(val dbFile: File) {
         fun readPart(lo: Int, hi: Int): HashMap<Int, DbTrip> {
             val out = HashMap<Int, DbTrip>(step * 2)
             // linky, dopravci, cíle a čísla ČIS se opakují u statisíců spojů; sdílená instance šetří paměť i GC
-            val pool = HashMap<String, String>(8192)
-            fun intern(x: String?): String? = if (x == null) null else pool.getOrPut(x) { x }
+            val pool = CursorStringPool()
             val db = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
             try {
                 db.forEachRow("SELECT id, line, agency, cis, num, head, svc, wheel, t0, t1$gidCol FROM trip WHERE id BETWEEN $lo AND $hi") { c ->
                     val id = c.getInt(0)
                     out[id] = DbTrip(
                         id = id,
-                        line = intern(c.getString(1)) ?: "?",
-                        agency = intern(c.getString(2)) ?: "",
-                        cis = intern(c.getString(3)) ?: "",
-                        num = intern(c.getString(4)) ?: "",
-                        head = intern(c.getString(5)) ?: "",
+                        line = pool.get(c, 1) ?: "?",
+                        agency = pool.get(c, 2) ?: "",
+                        cis = pool.get(c, 3) ?: "",
+                        num = pool.get(c, 4) ?: "",
+                        head = pool.get(c, 5) ?: "",
                         svc = c.getInt(6),
                         wheel = c.getInt(7),
                         t0 = c.getInt(8),
                         t1 = c.getInt(9),
-                        gid = if (hasGid) c.getString(10) ?: "" else "",
+                        isTrain = hasGid && c.getInt(10) == 1,
                     )
                 }
             } finally {
@@ -179,11 +211,15 @@ class Timetable(val dbFile: File) {
             }
         }
         for (r in results) trips.putAll(r)
+        val byKey = HashMap<String, MutableList<Int>>()
+        val byTrain = HashMap<String, MutableList<Int>>()
         for (id in trips.keys.sorted()) {
             val trip = trips.getValue(id)
-            if (trip.cis.isNotBlank()) tripsByKey.getOrPut("${trip.cis}:${trip.num}") { mutableListOf() }.add(id)
-            if (trip.isTrain && trip.num.isNotBlank()) tripsByTrain.getOrPut(trip.num) { mutableListOf() }.add(id)
+            if (trip.cis.isNotBlank()) byKey.getOrPut("${trip.cis}:${trip.num}") { ArrayList(2) }.add(id)
+            if (trip.isTrain && trip.num.isNotBlank()) byTrain.getOrPut(trip.num) { ArrayList(2) }.add(id)
         }
+        for ((k, v) in byKey) tripsByKey[k] = v.toIntArray()
+        for ((k, v) in byTrain) tripsByTrain[k] = v.toIntArray()
     }
 
     // ───────── druhy dopravy na zastávkách ─────────
@@ -315,7 +351,7 @@ class Timetable(val dbFile: File) {
     fun trainLine(trainNumber: String): String? {
         val n = trainNumber.trim().trimStart('0')
         if (n.isEmpty()) return null
-        return tripsByTrain[n]?.firstNotNullOfOrNull { trips[it]?.line?.takeIf { l -> l.isNotBlank() && l != "?" } }
+        return tripsByTrain[n]?.asList()?.firstNotNullOfOrNull { trips[it]?.line?.takeIf { l -> l.isNotBlank() && l != "?" } }
     }
 
     /**
@@ -333,7 +369,7 @@ class Timetable(val dbFile: File) {
         return out
     }
 
-    private fun nearestInTime(candidates: List<Int>): Int? {
+    private fun nearestInTime(candidates: IntArray): Int? {
         val now = nowPrague()
         var best: Int? = null
         var bestGap = Int.MAX_VALUE

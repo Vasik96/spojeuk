@@ -1,6 +1,5 @@
 package com.vasik96.spojeuk
 
-import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import java.time.Duration
 import java.time.LocalDate
@@ -8,20 +7,19 @@ import java.time.LocalDateTime
 
 // Hledání spojení (algoritmus RAPTOR). Konstanty MIN_TRANSFER a NEXT_DAY_CUTOFF jsou v Config.kt.
 
-class TripInstance(
-    val de0: Int,
-    val tid: Int,
-    val arr: IntArray,
-    val dep: IntArray
-)
-
+/**
+ * Spoje se stejným pořadím zastávek, seřazené podle odjezdu. Časy jsou po sloupcích ([arrCols] / [cols][zastávka][spoj]),
+ * ne po spojích: síť dne má statisíce jízd a pole pro každou jízdu zvlášť stála desítky MB a zatěžovala GC.
+ */
 class Pattern(
     val stops: IntArray,
     val tids: IntArray,
-    val arr: Array<IntArray>,
-    val dep: Array<IntArray>,
+    val arrCols: Array<IntArray>,
     val cols: Array<IntArray>
-)
+) {
+    fun dep(trip: Int, stop: Int): Int = cols[stop][trip]
+    fun arr(trip: Int, stop: Int): Int = arrCols[stop][trip]
+}
 
 sealed class ParentRef {
     data class Walk(val fromStop: Int, val duration: Int) : ParentRef()
@@ -33,31 +31,25 @@ class Net private constructor(
     val tt: Timetable,
     val day: LocalDate,
     val patterns: List<Pattern>,
-    val stopPats: Map<Int, List<Pair<Int, Int>>>,
+    /** Zastávka → [vzor, pozice, vzor, pozice, …] (prokládané, bez zabalených Pair). */
+    val stopPats: Map<Int, IntArray>,
 ) {
-    /** Klíč vzoru = pořadí zastávek jako surové bajty z DB (bez převodu na List<Int>, který stál přes sekundu). */
-    private class StopsKey(val bytes: ByteArray) {
-        private val h = bytes.contentHashCode()
-        override fun hashCode() = h
-        override fun equals(other: Any?) = other is StopsKey && other.h == h && other.bytes.contentEquals(bytes)
-    }
-
     companion object {
-        /** Souběžná čtení DB při stavbě sítě (telefony mají 6–8 jader, čtení z SQLite je vázané na CPU). */
-        private val READ_THREADS = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
-
         /**
-         * Postaví sítě pro víc dní JEDNÍM průchodem databází (večer hledání potřebuje dnešek i zítřek; dřív se jízdní
-         * řád četl pro každý den zvlášť, ~2,5 s na den), souběžně v několika vláknech.
+         * Postaví sítě pro víc dní z namapované mezipaměti jízd ([NetCache]): alokují se jen výsledná pole, takže
+         * stavba neprovokuje GC, který by zastavil UI.
          */
         fun build(tt: Timetable, days: List<LocalDate>): Map<LocalDate, Net> {
-            // pro každý den: spoj -> posuny (-1 den = přesah z včerejška, 0, +1 den = ráno zítřka)
-            val actives = days.map { day ->
-                val active = HashMap<Int, IntArray>()
+            val cache = tt.netCache
+            val maxTid = minOf(cache.maxTid, tt.trips.keys.maxOrNull() ?: 0)
+            return days.associateWith { day ->
+                // spoj -> posuny (-1 den = přesah z včerejška, 0, +1 den = ráno zítřka)
+                val active = arrayOfNulls<IntArray>(maxTid + 1)
                 val svcsYest = tt.activeSvcs(day.minusDays(1))
                 val svcsToday = tt.activeSvcs(day)
                 val svcsTmrw = tt.activeSvcs(day.plusDays(1))
                 for ((tid, t) in tt.trips) {
+                    if (tid > maxTid) continue
                     val a = t.svc in svcsYest && t.t1 >= 86400
                     val b = t.svc in svcsToday
                     val c = t.svc in svcsTmrw && t.t0 <= NEXT_DAY_CUTOFF
@@ -69,89 +61,64 @@ class Net private constructor(
                     if (c) offs[n] = 86400
                     active[tid] = offs
                 }
-                active
+                assemble(tt, day, cache, active)
             }
-
-            // Čtení dat jízd (desítky MB blobů) je hlavní cena: běží souběžně v několika spojeních nad rozsahy ID spojů
-            // (trip je INTEGER PRIMARY KEY, rozsah je levný), každé vlákno si plní vlastní mapy, nakonec se spojí.
-            val maxTid = tt.trips.keys.maxOrNull() ?: 0
-            val parts = READ_THREADS.coerceAtMost(maxOf(1, maxTid / 1000))
-            fun readPart(lo: Int, hi: Int): List<HashMap<StopsKey, MutableList<TripInstance>>> {
-                val groups = days.map { HashMap<StopsKey, MutableList<TripInstance>>() }
-                val db = SQLiteDatabase.openDatabase(tt.dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
-                try {
-                    // bez JOIN filtru podle služeb (měřeno: souběžné čtení s ním bylo pomalejší); neaktivní spoje se
-                    // přeskočí níž ještě před převodem jejich dat
-                    val sql = "SELECT trip, stops, arr, dep FROM trip_times WHERE trip BETWEEN $lo AND $hi"
-                    db.rawQuery(sql, null).use { cursor ->
-                        while (cursor.moveToNext()) {
-                            val tid = cursor.getInt(0)
-                            var key: StopsKey? = null
-                            var arr: IntArray? = null
-                            var dep: IntArray? = null
-                            for (di in days.indices) {
-                                val offsets = actives[di][tid] ?: continue
-                                if (key == null) {
-                                    key = StopsKey(cursor.getBlob(1))
-                                    arr = bytesToIntArray(cursor.getBlob(2))
-                                    dep = bytesToIntArray(cursor.getBlob(3))
-                                }
-                                val g = groups[di].getOrPut(key) { ArrayList() }
-                                for (off in offsets) {
-                                    val a = if (off == 0) arr!! else IntArray(arr!!.size) { arr[it] + off }
-                                    val d = if (off == 0) dep!! else IntArray(dep!!.size) { dep[it] + off }
-                                    g.add(TripInstance(d[0], tid, a, d))
-                                }
-                            }
-                        }
-                    }
-                } finally {
-                    db.close()
-                }
-                return groups
-            }
-
-            val step = maxTid / parts + 1
-            val results = if (parts <= 1) listOf(readPart(0, maxTid)) else {
-                val pool = java.util.concurrent.Executors.newFixedThreadPool(parts)
-                try {
-                    (0 until parts).map { i -> pool.submit<List<HashMap<StopsKey, MutableList<TripInstance>>>> { readPart(i * step, minOf(maxTid, (i + 1) * step - 1)) } }
-                        .map { f ->
-                            try { f.get() } catch (e: java.util.concurrent.ExecutionException) { throw e.cause ?: e }
-                        }
-                } finally {
-                    pool.shutdown()
-                }
-            }
-            val groups = days.indices.map { di ->
-                val merged = HashMap<StopsKey, MutableList<TripInstance>>()
-                for (r in results) for ((k, v) in r[di]) {
-                    val g = merged[k]
-                    if (g == null) merged[k] = v else g.addAll(v)
-                }
-                merged
-            }
-
-            return days.indices.associate { di -> days[di] to assemble(tt, days[di], groups[di]) }
         }
 
-        private fun assemble(tt: Timetable, day: LocalDate, groups: Map<StopsKey, MutableList<TripInstance>>): Net {
-            val patsList = ArrayList<Pattern>(groups.size)
-            val stopPatsMap = HashMap<Int, MutableList<Pair<Int, Int>>>()
-            for ((key, instances) in groups) {
-                instances.sortBy { it.de0 }
+        private fun assemble(tt: Timetable, day: LocalDate, cache: NetCache, active: Array<IntArray?>): Net {
+            val nPat = cache.nPat
+            val count = IntArray(nPat)
+            for (tid in active.indices) {
+                val o = active[tid] ?: continue
+                val p = cache.patOf(tid)
+                if (p >= 0) count[p] += o.size
+            }
+            // jízdy vzoru jako long: odjezd z 1. zastávky v horních 32 bitech (řazení), spoj a index posunu v dolních
+            val keys = arrayOfNulls<LongArray>(nPat)
+            val fill = IntArray(nPat)
+            for (p in 0 until nPat) if (count[p] > 0) keys[p] = LongArray(count[p])
+            for (tid in active.indices) {
+                val o = active[tid] ?: continue
+                val p = cache.patOf(tid)
+                if (p < 0) continue
+                val dep0 = cache[cache.depBase(tid, cache.patLen(p))]
+                val k = keys[p]!!
+                for (oi in o.indices) k[fill[p]++] = ((dep0 + o[oi]).toLong() shl 32) or ((tid.toLong() shl 2) or oi.toLong())
+            }
+
+            val patsList = ArrayList<Pattern>()
+            val stopPatsMap = HashMap<Int, IntList>()
+            for (p in 0 until nPat) {
+                val k = keys[p] ?: continue
+                k.sort()
+                val stops = cache.patStops(p)
+                val n = stops.size
+                val m = k.size
+                val tids = IntArray(m)
+                val arrCols = Array(n) { IntArray(m) }
+                val depCols = Array(n) { IntArray(m) }
+                for (j in 0 until m) {
+                    val low = k[j] and 0xFFFFFFFFL
+                    val tid = (low shr 2).toInt()
+                    val off = active[tid]!![(low and 3L).toInt()]
+                    tids[j] = tid
+                    val ab = cache.arrBase(tid)
+                    val db = cache.depBase(tid, n)
+                    for (i in 0 until n) {
+                        arrCols[i][j] = cache[ab + i] + off
+                        depCols[i][j] = cache[db + i] + off
+                    }
+                }
                 val pi = patsList.size
-                val stops = bytesToIntArray(key.bytes)
-                val tids = IntArray(instances.size) { instances[it].tid }
-                val arrs = Array(instances.size) { instances[it].arr }
-                val deps = Array(instances.size) { instances[it].dep }
-                val cols = Array(stops.size) { i -> IntArray(instances.size) { j -> deps[j][i] } }
-                patsList.add(Pattern(stops, tids, arrs, deps, cols))
+                patsList.add(Pattern(stops, tids, arrCols, depCols))
                 for ((pos, st) in stops.withIndex()) {
-                    stopPatsMap.getOrPut(st) { mutableListOf() }.add(pi to pos)
+                    val l = stopPatsMap.getOrPut(st) { IntList() }
+                    l.add(pi); l.add(pos)
                 }
             }
-            return Net(tt, day, patsList, stopPatsMap)
+            val stopPats = HashMap<Int, IntArray>(stopPatsMap.size * 2)
+            for ((k, v) in stopPatsMap) stopPats[k] = v.toArray()
+            return Net(tt, day, patsList, stopPats)
         }
     }
 
@@ -180,7 +147,9 @@ class Net private constructor(
             marked.add(s)
         }
         for (s in srcs) {
-            for ((s2, d) in foot[s] ?: emptyList()) {
+            val fs = foot[s] ?: continue
+            for (q in 0 until fs.size step 2) {
+                val s2 = fs[q]; val d = fs[q + 1]
                 if (t0Sec + d < (best[s2] ?: INF)) {
                     arrs[0][s2] = t0Sec + d
                     best[s2] = t0Sec + d
@@ -196,7 +165,9 @@ class Net private constructor(
         for (k in 1..kmax) {
             val queue = HashMap<Int, Int>()
             for (s in marked) {
-                for ((pi, pos) in stopPats[s] ?: emptyList()) {
+                val sp = stopPats[s] ?: continue
+                for (q in 0 until sp.size step 2) {
+                    val pi = sp[q]; val pos = sp[q + 1]
                     val currentMin = queue[pi] ?: INF
                     if (pos < currentMin) queue[pi] = pos
                 }
@@ -218,7 +189,7 @@ class Net private constructor(
                 for (i in start until stops.size) {
                     val s = stops[i]
                     if (trip >= 0) {
-                        val a = pattern.arr[trip][i]
+                        val a = pattern.arrCols[i][trip]
                         if (a < (best[s] ?: INF) && a < target) {
                             best[s] = a
                             curArrs[s] = a
@@ -249,7 +220,9 @@ class Net private constructor(
 
             for (s in newMarked.toList()) {
                 val curS = curArrs[s] ?: continue
-                for ((s2, d) in foot[s] ?: emptyList()) {
+                val fs = foot[s] ?: continue
+                for (q in 0 until fs.size step 2) {
+                    val s2 = fs[q]; val d = fs[q + 1]
                     val a = curS + d
                     if (a < (best[s2] ?: INF) && a < target) {
                         best[s2] = a
@@ -289,8 +262,8 @@ class Net private constructor(
                     val pattern = patterns[p.patternIdx]
                     val stops = pattern.stops
                     val tids = pattern.tids
-                    val arr = pattern.arr[p.tripIdx]
-                    val dep = pattern.dep[p.tripIdx]
+                    val arr = IntArray(stops.size) { i -> pattern.arr(p.tripIdx, i) }
+                    val dep = IntArray(stops.size) { i -> pattern.dep(p.tripIdx, i) }
                     val seq = (p.boardIdx..p.alightIdx).map { i -> Triple(stops[i], arr[i], dep[i]) }
 
                     legs.add(

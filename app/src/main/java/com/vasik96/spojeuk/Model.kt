@@ -41,11 +41,13 @@ data class DbTrip(
     val wheel: Int,
     val t0: Int,
     val t1: Int,
-    val gid: String = "", // GTFS trip_id, klíč do shapes.sqlite
-) {
-    /** Vlak z CZPTT (trip_id začíná "czptt:"); num je u něj číslo vlaku, cis prázdné. */
-    val isTrain: Boolean get() = gid.startsWith("czptt:")
-}
+    /**
+     * Vlak z CZPTT (trip_id začíná "czptt:"); num je u něj číslo vlaku, cis prázdné. Samotné GTFS trip_id (gid) se
+     * v paměti nedrží (statisíce dlouhých řetězců, desítky MB, kvůli nim běžel GC až na hranici haldy a zasekával UI):
+     * pro tvary tras se čte z DB přes [Timetable.gidOf].
+     */
+    val isTrain: Boolean = false,
+)
 
 data class SvcInfo(val id: Int, val dow: String, val d0: String, val d1: String)
 data class SvcDateInfo(val svc: Int, val date: String, val type: Int)

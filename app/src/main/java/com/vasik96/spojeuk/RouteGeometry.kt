@@ -15,21 +15,23 @@ class RouteGeometry(
     /** Tvar spoje z odpovídající databáze (vlaky mají vlastní). */
     private fun shapeOf(tt: Timetable, tid: Int): LatLngList? {
         val trip = tt.trips[tid] ?: return null
-        if (trip.isTrain) return trainShapes.points(trip.gid)
-        if (trip.gid.startsWith(PID_GTFS_PREFIX)) return pidShapes.points(trip.gid)
+        val gid = tt.gidOf(tid)
+        if (trip.isTrain) return trainShapes.points(gid)
+        if (gid.startsWith(PID_GTFS_PREFIX)) return pidShapes.points(gid)
         // přesný gid, a když v shapes.sqlite není (zastaralé jdf:trip:…), nejlépe sedící tvar téže linky podle zastávek
-        return shapes.pointsFor(trip.gid, stopCoords(tt, tid))
+        return shapes.pointsFor(gid, stopCoords(tt, tid))
     }
 
     /** Pro ladění: odkud se trasa spoje bere (přesný tvar, nebo OSRM a proč). */
     fun describe(tt: Timetable, tid: Int): String {
         val trip = tt.trips[tid] ?: return "spoj nenalezen"
-        if (trip.gid.isBlank()) return "spoj nemá gid (DB hasGid=${tt.hasGid}), použije se OSRM"
-        if (trip.isTrain) return trainShapes.explain(trip.gid)
-        if (trip.gid.startsWith(PID_GTFS_PREFIX)) return pidShapes.explain(trip.gid)
-        val exact = shapes.explain(trip.gid)
-        if (shapes.points(trip.gid) != null) return exact
-        val fuzzy = shapes.pointsFor(trip.gid, stopCoords(tt, tid))
+        val gid = tt.gidOf(tid)
+        if (gid.isBlank()) return "spoj nemá gid (DB hasGid=${tt.hasGid}), použije se OSRM"
+        if (trip.isTrain) return trainShapes.explain(gid)
+        if (gid.startsWith(PID_GTFS_PREFIX)) return pidShapes.explain(gid)
+        val exact = shapes.explain(gid)
+        if (shapes.points(gid) != null) return exact
+        val fuzzy = shapes.pointsFor(gid, stopCoords(tt, tid))
         return if (fuzzy != null) "tvar nalezen podle zastávek téže linky (${fuzzy.size} bodů); přesný gid v DB chybí\n$exact"
         else exact
     }

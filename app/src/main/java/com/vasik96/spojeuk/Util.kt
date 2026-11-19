@@ -123,3 +123,51 @@ suspend fun awaitMainThreadIdle() = kotlinx.coroutines.suspendCancellableCorouti
     queue.addIdleHandler(handler)
     cont.invokeOnCancellation { queue.removeIdleHandler(handler) }
 }
+/**
+ * Sdílené instance opakujících se textů z DB (linky, dopravci, cíle u statisíců spojů), čtené bez alokace:
+ * Cursor.getString by pro každý řádek vytvořil nový String jen kvůli porovnání (~1,5 milionu dočasných řetězců při
+ * načtení JŘ, GC kvůli nim zastavoval UI). Text se zkopíruje do znovupoužívaného bufferu a hledá se v tabulce.
+ */
+class CursorStringPool {
+    private val buf = android.database.CharArrayBuffer(64)
+    private var table = arrayOfNulls<String>(16384)
+    private var count = 0
+
+    fun get(c: android.database.Cursor, col: Int): String? {
+        if (c.isNull(col)) return null
+        c.copyStringToBuffer(col, buf)
+        val data = buf.data
+        val len = buf.sizeCopied
+        var h = 0
+        for (i in 0 until len) h = 31 * h + data[i].code
+        var idx = (h xor (h ushr 16)) and (table.size - 1)
+        while (true) {
+            val s = table[idx]
+            if (s == null) {
+                val n = String(data, 0, len)
+                table[idx] = n
+                if (++count * 2 > table.size) grow()
+                return n
+            }
+            if (s.length == len && s.hashCode() == h && matches(s, data, len)) return s
+            idx = (idx + 1) and (table.size - 1)
+        }
+    }
+
+    private fun matches(s: String, data: CharArray, len: Int): Boolean {
+        for (i in 0 until len) if (s[i] != data[i]) return false
+        return true
+    }
+
+    private fun grow() {
+        val old = table
+        table = arrayOfNulls(old.size * 2)
+        for (s in old) {
+            if (s == null) continue
+            val h = s.hashCode()
+            var idx = (h xor (h ushr 16)) and (table.size - 1)
+            while (table[idx] != null) idx = (idx + 1) and (table.size - 1)
+            table[idx] = s
+        }
+    }
+}
