@@ -73,8 +73,8 @@ class TransitRepository(context: Context? = null) {
     fun vehicleSourceOptions(): List<VehicleSourceOption> =
         hub.sourceOptions()
 
-    fun setEnabledVehicleSources(ids: Set<String>?) {
-        hub.setEnabledSources(ids)
+    fun setDisabledVehicleSources(ids: Set<String>) {
+        hub.setDisabledSources(ids)
     }
     private fun onTimetableLoaded(tt: Timetable) {
         Log.i(TAG, "DB: hasGid=${tt.hasGid} trips=${tt.meta["trips"]} tag=${tt.meta["tag"]}")

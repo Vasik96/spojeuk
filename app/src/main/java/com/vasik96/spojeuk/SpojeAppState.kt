@@ -347,21 +347,27 @@ class SpojeAppState(
         settingsPrefs.edit().putBoolean("show_only_map_filters", showOnly).apply()
     }
 
-    var enabledVehicleSources: Set<String>? by mutableStateOf(
-        settingsPrefs.getStringSet("enabled_vehicle_sources", null)?.toSet()
-    )
+    /**
+     * Vypnuté zdroje poloh. Ukládají se vypnuté, ne zapnuté: zdroj, který server nově přidá, je tak rovnou zapnutý.
+     * Dřívější uložení zapnutých ("enabled_vehicle_sources", jen pět tehdejších zdrojů) se jednou převede.
+     */
+    var disabledVehicleSources: Set<String> by mutableStateOf(loadDisabledSources())
         private set
 
-    fun updateEnabledVehicleSources(ids: Set<String>?) {
-        enabledVehicleSources = ids
-
+    private fun loadDisabledSources(): Set<String> {
+        settingsPrefs.getStringSet("disabled_vehicle_sources", null)?.let { return it.toSet() }
+        val oldEnabled = settingsPrefs.getStringSet("enabled_vehicle_sources", null)?.toSet() ?: return emptySet()
+        val disabled = setOf("dpmul", "duk", "dpmd", "train", "pid") - oldEnabled
         settingsPrefs.edit {
-            if (ids == null) {
-                remove("enabled_vehicle_sources")
-            } else {
-                putStringSet("enabled_vehicle_sources", ids.toSet())
-            }
+            remove("enabled_vehicle_sources")
+            putStringSet("disabled_vehicle_sources", disabled)
         }
+        return disabled
+    }
+
+    fun updateDisabledVehicleSources(ids: Set<String>) {
+        disabledVehicleSources = ids.toSet()
+        settingsPrefs.edit { putStringSet("disabled_vehicle_sources", ids.toSet()) }
     }
 
 

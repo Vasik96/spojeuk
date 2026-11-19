@@ -101,14 +101,14 @@ internal fun SpojeApp() {
     }
 
     LaunchedEffect(api, appState) {
-        api.setEnabledVehicleSources(appState.enabledVehicleSources)
+        api.setDisabledVehicleSources(appState.disabledVehicleSources)
     }
 
     // spojení na routovací servery rovnou při startu (první hledání nejbližší zastávky pak není pomalé)
     LaunchedEffect(Unit) { runCatching { api.warmUpRouting() } }
 
     // živé polohy rovnou při startu, ať jsou na mapě hned při jejím otevření
-    LaunchedEffect(api, appState.enabledVehicleSources) {
+    LaunchedEffect(api, appState.disabledVehicleSources) {
         api.prewarmVehicles()
         val curr = api.currentVehicles()
         appState.updateVehicles(curr)

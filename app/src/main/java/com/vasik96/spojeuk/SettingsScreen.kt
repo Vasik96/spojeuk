@@ -87,6 +87,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.produceState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
@@ -630,11 +631,21 @@ private fun VehicleSourcesSettingsCard(
     appState: SpojeAppState,
     api: TransitRepository
 ) {
-    val sources = remember(api) {
-        api.vehicleSourceOptions()
+    // seznam zdrojů je ze serveru: nový zdroj se tu objeví sám s další odpovědí
+    val sources by produceState(api.vehicleSourceOptions(), api) {
+        api.vehicleUpdates.collect {
+            val now = api.vehicleSourceOptions()
+            if (now != value) value = now
+        }
     }
 
-    val enabledIds = appState.enabledVehicleSources
+    val disabledIds = appState.disabledVehicleSources
+
+    fun toggle(id: String, on: Boolean) {
+        val updated = if (on) disabledIds - id else disabledIds + id
+        appState.updateDisabledVehicleSources(updated)
+        api.setDisabledVehicleSources(updated)
+    }
 
     OutlinedCard(
         modifier = Modifier.fillMaxWidth()
@@ -670,24 +681,13 @@ private fun VehicleSourcesSettingsCard(
             HorizontalDivider()
 
             sources.forEach { source ->
-                val checked = enabledIds == null || source.id in enabledIds
+                val checked = source.id !in disabledIds
 
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
-                        .clickable {
-                            val current = enabledIds ?: sources.map { it.id }.toSet()
-
-                            val updated = if (checked) {
-                                current - source.id
-                            } else {
-                                current + source.id
-                            }
-
-                            appState.updateEnabledVehicleSources(updated)
-                            api.setEnabledVehicleSources(updated)
-                        }
+                        .clickable { toggle(source.id, !checked) }
                         .padding(vertical = 8.dp, horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -697,22 +697,18 @@ private fun VehicleSourcesSettingsCard(
                             source.name,
                             style = MaterialTheme.typography.bodyLarge
                         )
+                        if (source.desc.isNotBlank()) {
+                            Text(
+                                source.desc,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
 
                     Switch(
                         checked = checked,
-                        onCheckedChange = { newChecked ->
-                            val current = enabledIds ?: sources.map { it.id }.toSet()
-
-                            val updated = if (newChecked) {
-                                current + source.id
-                            } else {
-                                current - source.id
-                            }
-
-                            appState.updateEnabledVehicleSources(updated)
-                            api.setEnabledVehicleSources(updated)
-                        },
+                        onCheckedChange = { toggle(source.id, it) },
                         thumbContent = {
                             Icon(
                                 imageVector = if (checked) {
@@ -735,8 +731,8 @@ private fun VehicleSourcesSettingsCard(
 
             TextButton(
                 onClick = {
-                    appState.updateEnabledVehicleSources(null)
-                    api.setEnabledVehicleSources(null)
+                    appState.updateDisabledVehicleSources(emptySet())
+                    api.setDisabledVehicleSources(emptySet())
                 },
                 modifier = Modifier.align(Alignment.End)
             ) {

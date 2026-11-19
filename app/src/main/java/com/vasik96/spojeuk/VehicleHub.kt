@@ -44,7 +44,8 @@ data class Fleet(
 
 data class VehicleSourceOption(
     val id: String,
-    val name: String
+    val name: String,
+    val desc: String = "",
 )
 
 /** Směr jízdy z posunu polohy, pro vozy, které azimut nedávají (nebo dávají 0). */
@@ -125,12 +126,14 @@ class VehicleHub(
     /** Tok upozorňující na aktualizaci vozidel (z cache nebo po dokončení dotazu). */
     val updates: SharedFlow<Unit> = _updates.asSharedFlow()
 
+    /** Vypnuté zdroje; ukládají se vypnuté (ne zapnuté), aby nový zdroj ze serveru byl rovnou zapnutý. */
     @Volatile
-    private var enabledSourceIds: Set<String>? = null
+    private var disabledSourceIds: Set<String> = emptySet()
 
     @Synchronized
-    fun setEnabledSources(ids: Set<String>?) {
-        enabledSourceIds = ids?.toSet()
+    fun setDisabledSources(ids: Set<String>) {
+        if (ids == disabledSourceIds) return
+        disabledSourceIds = ids.toSet()
         lastSuccessMs = 0L
         // výběr se projeví hned z poslední odpovědi, bez čekání na síť
         val snap = snapshot
@@ -152,10 +155,20 @@ class VehicleHub(
         scope.launch(Dispatchers.Default) { snapshot?.let { runCatching { rebuild(it, System.currentTimeMillis()) } } }
     }
 
-    fun sourceOptions(): List<VehicleSourceOption> =
-        SOURCE_NAMES.map { (id, name) -> VehicleSourceOption(id = id, name = name) }
+    /**
+     * Zdroje do nastavení: tak, jak je hlásí server (nový zdroj se objeví sám, bez úpravy appky), seřazené
+     * podle názvu. Než přijde první odpověď, aspoň známé zdroje ([SOURCE_NAMES]).
+     */
+    fun sourceOptions(): List<VehicleSourceOption> {
+        val fromServer = snapshot?.sources.orEmpty()
+        if (fromServer.isEmpty()) return SOURCE_NAMES.map { (id, name) -> VehicleSourceOption(id = id, name = name) }
+        return fromServer
+            .distinctBy { it.id }
+            .map { VehicleSourceOption(id = it.id, name = it.name.ifBlank { SOURCE_NAMES[it.id] ?: it.id }, desc = it.desc) }
+            .sortedBy { it.name.lowercase() }
+    }
 
-    fun sourceName(id: String): String = SOURCE_NAMES[id] ?: snapshot?.sources?.firstOrNull { it.id == id }?.name ?: id
+    fun sourceName(id: String): String = snapshot?.sources?.firstOrNull { it.id == id }?.name?.takeIf { it.isNotBlank() } ?: SOURCE_NAMES[id] ?: id
 
     /**
      * Zeptá se serveru a vrátí sloučený stav. S [maxAgeMs] > 0 vrátí poslední stav, pokud je dost čerstvý.
@@ -213,9 +226,9 @@ class VehicleHub(
     }
 
     private fun build(snap: ApiSnapshot, now: Long): Fleet {
-        val enabled = enabledSourceIds
-        val active = snap.sources.filter { enabled == null || it.id in enabled }
-        if (enabled != null && active.isEmpty()) return Fleet.EMPTY
+        val disabled = disabledSourceIds
+        val active = snap.sources.filter { it.id !in disabled }
+        if (disabled.isNotEmpty() && active.isEmpty()) return Fleet.EMPTY
 
         // server nedostupný: poslední polohy se drží jen krátce (KEEP_MS), pak se zahodí.
         // Považovat zdroje za zastaralé až po úspěšném prvním stažení nebo po selhání opakovaných pokusů při startu.
@@ -225,8 +238,8 @@ class VehicleHub(
         val vehicles = if (dropped) emptyList() else {
             val all = enrichedVehicles(snap, timetable())
             val filtered = all.filter { v -> v.ageSec(now) <= (if (v.train) 900 else 600) }
-            if (enabled == null) filtered
-            else filtered.filter { v -> v.sources.ifEmpty { listOf(v.source) }.any { it in enabled } }
+            if (disabled.isEmpty()) filtered
+            else filtered.filter { v -> v.sources.ifEmpty { listOf(v.source) }.any { it !in disabled } }
         }
         val reports = active.map { report(it, snap, serverStale, dropped) }
         return Fleet(vehicles, reports, SourceLabel.build(reports), warningCount(reports))
@@ -242,7 +255,7 @@ class VehicleHub(
         }
         return SourceReport(
             id = s.id,
-            name = SOURCE_NAMES[s.id] ?: s.name,
+            name = s.name.ifBlank { SOURCE_NAMES[s.id] ?: s.id },
             priority = s.priority,
             segments = segments,
             health = health,
@@ -318,7 +331,7 @@ class VehicleHub(
         /** Jak dlouho se po výpadku serveru drží poslední polohy v paměti (krátký škytnutí sítě); pak se mapa vyprázdní. */
         const val KEEP_MS = 30_000L
 
-        /** Zdroje, které server zná (pořadí = pořadí v nastavení). */
+        /** Názvy známých zdrojů, jen než přijde první odpověď serveru (seznam zdrojů je ze serveru). */
         val SOURCE_NAMES = linkedMapOf(
             SourceIds.DPMUL to "DPMÚL",
             SourceIds.DUK to "DÚK",

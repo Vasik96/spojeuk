@@ -38,6 +38,8 @@ data class ApiSource(
     val name: String,
     val priority: Int,
     val health: Health,
+    /** Krátký popis oblasti pro nastavení ("MHD Plzeň: …"); starší server ho neposílá. */
+    val desc: String = "",
     /** Kolik vozů zdroj dodal před slučováním. */
     val vehicles: Int,
 )
@@ -295,6 +297,7 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
                             else -> Health.DOWN
                         },
                         vehicles = o.optInt("vehicles", 0),
+                        desc = o.optStringClean("desc", ""),
                     )
                 )
             }
