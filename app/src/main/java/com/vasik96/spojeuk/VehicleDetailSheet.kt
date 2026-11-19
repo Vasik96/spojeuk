@@ -121,17 +121,24 @@ internal fun VehicleDetailBottomSheet(
             Text(stringResource(R.string.vd_trip_info), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                // barva podle druhu jako na mapě (tramvaj fialová, metro v barvě linky A / B / C); bus zůstává zelený
+                // i se zpožděním (zpoždění ukazuje řádek níž), vlak modrý
+                val vs = vehicleStyle(vehicle)
+                val badgeStyle = when (vs) {
+                    VehicleStyle.BUS, VehicleStyle.BUS_LATE -> VehicleStyle.BUS
+                    else -> vs
+                }
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = if (vehicle.train) Color(0xFF0277BD) else Color(0xFF2E7D32),
-                    contentColor = Color.White
+                    color = Color(badgeStyle.color),
+                    contentColor = if (badgeStyle.darkText) Color.Black else Color.White
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(if (vehicle.train) Icons.Default.Train else Icons.Default.DirectionsBus, null, Modifier.size(20.dp))
+                        Icon(vehicleKind(vehicle).second, null, Modifier.size(20.dp))
                         Text(vehicle.line, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
                     }
                 }

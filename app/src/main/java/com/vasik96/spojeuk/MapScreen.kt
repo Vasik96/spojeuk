@@ -1875,7 +1875,7 @@ private fun sourceLabelText(label: String, normal: Color, bad: Color) = buildAnn
 }
 
 /** Druh vozidla pro výběr z více vozidel: název (jednotné číslo) a ikona. Trolejbus podle `mode` ze serveru. */
-private fun vehicleKind(v: Vehicle): Pair<Int, ImageVector> =
+internal fun vehicleKind(v: Vehicle): Pair<Int, ImageVector> =
     if (v.mode == "trolleybus") R.string.vehicle_kind_trolleybus to Icons.Default.DirectionsBus
     else when (vehicleStyle(v)) {
         VehicleStyle.TRAIN -> R.string.vehicle_kind_train to Icons.Default.Train
@@ -1886,38 +1886,42 @@ private fun vehicleKind(v: Vehicle): Pair<Int, ImageVector> =
         else -> R.string.vehicle_kind_bus to Icons.Default.DirectionsBus
     }
 
-private fun categoryIcon(c: MapCategory) = when (c) {
+internal fun categoryIcon(c: MapCategory) = when (c) {
     MapCategory.BUS -> Icons.Default.DirectionsBus
     MapCategory.TRAM -> Icons.Default.Tram
     MapCategory.METRO -> Icons.Default.Subway
     MapCategory.TRAIN -> Icons.Default.Train
 }
 
-/** Výběr druhů dopravy na mapě (změna platí hned). */
+/** Výběr druhů dopravy: na mapě i v hledání spojení (změna platí hned). */
 @Composable
-private fun CategoryFilterDialog(
+internal fun CategoryFilterDialog(
     selected: Set<MapCategory>,
     onChange: (Set<MapCategory>) -> Unit,
     onDismiss: () -> Unit,
+    title: String = stringResource(R.string.map_filter_title),
+    /** false (hledání spojení): poslední zaškrtnutý druh nejde odebrat */
+    allowEmpty: Boolean = true,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Default.FilterList, null) },
-        title = { Text(stringResource(R.string.map_filter_title)) },
+        title = { Text(title) },
         text = {
             Column {
                 for (c in MapCategory.entries) {
                     val on = c in selected
+                    val locked = on && !allowEmpty && selected.size == 1
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .clickable { onChange(if (on) selected - c else selected + c) }
+                            .clickable(enabled = !locked) { onChange(if (on) selected - c else selected + c) }
                             .padding(vertical = 6.dp, horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Checkbox(checked = on, onCheckedChange = null)
+                        Checkbox(checked = on, onCheckedChange = null, enabled = !locked)
                         Icon(categoryIcon(c), null, tint = Color(c.style.color))
                         Column(Modifier.weight(1f)) {
                             Text(stringResource(c.labelRes), style = MaterialTheme.typography.bodyLarge)

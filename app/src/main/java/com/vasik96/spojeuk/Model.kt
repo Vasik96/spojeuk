@@ -5,17 +5,17 @@ import java.time.LocalDateTime
 
 // ───────────────────────── jízdní řády ─────────────────────────
 
-enum class ModeFilter(@androidx.annotation.StringRes private val labelRes: Int) {
-    ALL(R.string.mode_all),
-    BUS(R.string.mode_bus),
-    TRAIN(R.string.mode_train);
+/**
+ * Druhy dopravy pro hledání spojení: stejné kategorie a stejný dialog jako filtr mapy (bus vč. trolejbusů,
+ * tramvaj, metro, vlak). Prázdný výběr se bere jako „vše“ (jinak by hledání nikdy nic nenašlo).
+ */
+data class ModeFilter(val cats: Set<MapCategory>) {
+    val isAll: Boolean get() = cats.isEmpty() || cats.size == MapCategory.entries.size
 
-    val label: String get() = tr(labelRes)
+    fun accepts(c: MapCategory): Boolean = isAll || c in cats
 
-    fun accepts(isTrain: Boolean): Boolean = when (this) {
-        ALL -> true
-        BUS -> !isTrain
-        TRAIN -> isTrain
+    companion object {
+        val ALL = ModeFilter(MapCategory.entries.toSet())
     }
 }
 

@@ -2,6 +2,10 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.graphics.Color
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.pluralStringResource
 import android.Manifest
@@ -923,31 +927,54 @@ internal fun SearchScreen(
                     }
                 )
 
+                // druhy dopravy: jedno tlačítko se shrnutím a výběr v dialogu, stejně jako filtr mapy
+                val cats = appState.searchCategories
+                val allCats = cats.size == MapCategory.entries.size
+                var catsAtOpen by remember { mutableStateOf<Set<MapCategory>?>(null) }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    ModeFilter.entries.forEach { mode ->
-                        FilterChip(
-                            selected = appState.modeFilter == mode,
-                            onClick = {
-                                if (appState.modeFilter != mode) {
-                                    appState.modeFilter = mode
-                                    if (appState.from != null && appState.to != null && appState.searched) {
-                                        runSearch()
-                                    }
-                                }
-                            },
-                            label = { Text(mode.label) },
-                            leadingIcon = when (mode) {
-                                ModeFilter.BUS -> ({ Icon(Icons.Default.DirectionsBus, null, Modifier.size(18.dp)) })
-                                ModeFilter.TRAIN -> ({ Icon(Icons.Default.Train, null, Modifier.size(18.dp)) })
-                                ModeFilter.ALL -> null
-                            }
-                        )
+                    FilterChip(
+                        selected = !allCats,
+                        onClick = { catsAtOpen = cats },
+                        label = {
+                            Text(
+                                when {
+                                    allCats -> stringResource(R.string.map_filter_all)
+                                    cats.isEmpty() -> stringResource(R.string.map_filter_none)
+                                    else -> MapCategory.entries.filter { it in cats }.joinToString(", ") { tr(it.labelRes) }
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        leadingIcon = { Icon(Icons.Default.FilterList, null, Modifier.size(18.dp)) },
+                        trailingIcon = { Icon(Icons.Default.ArrowDropDown, null, Modifier.size(18.dp)) }
+                    )
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        for (c in MapCategory.entries) if (c in cats) {
+                            Icon(categoryIcon(c), null, tint = Color(c.style.color), modifier = Modifier.size(18.dp))
+                        }
                     }
+                }
+                catsAtOpen?.let { before ->
+                    CategoryFilterDialog(
+                        selected = cats,
+                        onChange = { appState.updateSearchCategories(it) },
+                        onDismiss = {
+                            catsAtOpen = null
+                            // změněný výběr: hledat znovu (jako dřív při přepnutí čipu)
+                            if (appState.searchCategories != before && appState.from != null && appState.to != null && appState.searched) runSearch()
+                        },
+                        title = stringResource(R.string.search_filter_title),
+                        allowEmpty = false,   // hledat „ničím“ nedává smysl
+                    )
                 }
 
                 Row(
@@ -1136,6 +1163,16 @@ internal fun SearchScreen(
                                     Text(stringResource(R.string.search_load_more_retry))
                                 }
                                 appState.loadingMore -> Wavy(32.dp)
+                                // omezené druhy dopravy (třeba tramvaj a metro v Ústí): spoj neexistuje, ne „už dnes nejede“
+                                appState.journeys.isEmpty() && !appState.hasMore && !appState.searchLoading && !appState.modeFilter.isAll ->
+                                    Text(
+                                        stringResource(
+                                            R.string.search_none_for_modes,
+                                            MapCategory.entries.filter { it in appState.searchCategories }.joinToString(", ") { tr(it.labelRes) }
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textAlign = TextAlign.Center
+                                    )
                                 appState.journeys.isEmpty() && !appState.hasMore && !appState.searchLoading ->
                                     Text(stringResource(R.string.search_none_until_end_of_day), color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 !appState.hasMore ->

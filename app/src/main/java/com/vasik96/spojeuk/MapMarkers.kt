@@ -90,7 +90,7 @@ internal fun vehicleStyle(v: Vehicle): VehicleStyle {
 }
 
 /** Druh dopravy pro filtr mapy. Trolejbusy (a přívozy, lanovka) patří k autobusům. */
-internal enum class MapCategory(@androidx.annotation.StringRes val labelRes: Int, val style: VehicleStyle) {
+enum class MapCategory(@androidx.annotation.StringRes internal val labelRes: Int, internal val style: VehicleStyle) {
     BUS(R.string.mode_bus, VehicleStyle.BUS),
     TRAM(R.string.mode_tram, VehicleStyle.TRAM),
     METRO(R.string.mode_metro, VehicleStyle.METRO_A),

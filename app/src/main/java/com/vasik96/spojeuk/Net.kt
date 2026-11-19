@@ -235,11 +235,10 @@ class Net private constructor(
                     if (p != null) {
                         val m = pattern.m
                         var j = pattern.firstDepAtOrAfter(i, p + mt)
-                        if (modeFilter != ModeFilter.ALL) {
+                        if (!modeFilter.isAll) {
                             while (j < m) {
                                 val tid = pattern.tid(j)
-                                val isTrain = tt.trips.isTrain(tid)
-                                if (modeFilter.accepts(isTrain)) break
+                                if (modeFilter.accepts(tt.trips.category(tid))) break
                                 j++
                             }
                         }
@@ -488,12 +487,12 @@ class Planner(val tt: Timetable) {
             day = day.plusDays(1)
         }
         val pruned = prune(out.values.toList())
-        return if (modeFilter == ModeFilter.ALL) {
+        return if (modeFilter.isAll) {
             pruned
         } else {
             pruned.filter { j ->
                 j.rawLegs.all { leg ->
-                    leg.kind != "ride" || modeFilter.accepts(tt.trips.isTrain(leg.tid))
+                    leg.kind != "ride" || modeFilter.accepts(tt.trips.category(leg.tid))
                 }
             }
         }

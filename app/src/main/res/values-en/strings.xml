@@ -187,6 +187,7 @@
     <string name="search_empty_text">Choose the departure and destination stop.</string>
     <string name="search_load_more_retry">Load more – try again</string>
     <string name="search_none_until_end_of_day">No more trips until the end of the day.</string>
+    <string name="search_none_for_modes">No connection between these stops with the selected modes (%1$s). Try selecting all modes of transport.</string>
     <string name="search_all_for_today">That\'s all for today.</string>
     <string name="search_pick_stop">Choose a stop</string>
     <string name="common_clear">Clear</string>
@@ -261,6 +262,7 @@
     <string name="vd_trip_id">Trip ID: %1$s</string>
     <string name="vd_metro_no_set">The metro does not report train set numbers, the vehicle is tracked by its trip.</string>
     <string name="map_pick_vehicle">Which vehicle?</string>
+    <string name="search_filter_title">Travel by</string>
     <string name="vehicle_kind_bus">Bus</string>
     <string name="vehicle_kind_trolleybus">Bus</string>
     <string name="vehicle_kind_tram">Tram</string>

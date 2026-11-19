@@ -98,7 +98,6 @@ class SpojeAppState(
     var setupDismissed by mutableStateOf(false)
 
     var journeys by mutableStateOf<List<Journey>>(emptyList())
-    var modeFilter by mutableStateOf(ModeFilter.ALL)
     var departAt by mutableStateOf<java.time.LocalDateTime?>(null)   // zvolený čas odjezdu; null = teď
     var searchLoading by mutableStateOf(false)
     var loadingMore by mutableStateOf(false)
@@ -322,6 +321,22 @@ class SpojeAppState(
         mapCategories = set
         settingsPrefs.edit { putStringSet("map_categories", set.map { it.name }.toSet()) }
     }
+
+    /** Druhy dopravy pro hledání spojení (stejný dialog jako filtr mapy); pamatuje se. */
+    internal var searchCategories by mutableStateOf(
+        settingsPrefs.getStringSet("search_categories", null)
+            ?.mapNotNull { n -> MapCategory.entries.firstOrNull { it.name == n } }?.toSet()
+            ?.takeIf { it.isNotEmpty() }   // prázdný výběr hledání nedává smysl
+            ?: MapCategory.entries.toSet()
+    )
+        private set
+
+    internal fun updateSearchCategories(set: Set<MapCategory>) {
+        searchCategories = set
+        settingsPrefs.edit { putStringSet("search_categories", set.map { it.name }.toSet()) }
+    }
+
+    val modeFilter: ModeFilter get() = ModeFilter(searchCategories)
 
     var showOnlyMapFilters by mutableStateOf(
         settingsPrefs.getBoolean("show_only_map_filters", false)

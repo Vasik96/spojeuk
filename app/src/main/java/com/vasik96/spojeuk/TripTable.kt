@@ -38,6 +38,32 @@ class TripTable(val maxId: Int) {
     }
 
     fun isTrain(id: Int): Boolean = has(id) && train[id]
+
+    /**
+     * Druh dopravy spoje pro filtr hledání. Jízdní řád druh (route_type) nemá: vlak podle čísla vlaku, metro = linky
+     * A/B/C Dopravního podniku hl. m. Prahy, tramvaj = jeho číselné linky pod 100 (autobusy DPP mají 100+), jinak bus
+     * (i trolejbusy, jako na mapě). Počítá se jednou pro všechny spoje, hledání se ptá v horké smyčce.
+     */
+    fun category(id: Int): MapCategory = if (has(id)) MapCategory.entries[categories[id].toInt()] else MapCategory.BUS
+
+    private val categories: ByteArray by lazy {
+        ByteArray(n) { id ->
+            val c = when {
+                line[id] == null -> MapCategory.BUS
+                train[id] -> MapCategory.TRAIN
+                agency[id]!!.contains("Prahy") -> {
+                    val l = line[id]!!.trim()
+                    when {
+                        l == "A" || l == "B" || l == "C" -> MapCategory.METRO
+                        (l.toIntOrNull() ?: 999) < 100 -> MapCategory.TRAM
+                        else -> MapCategory.BUS
+                    }
+                }
+                else -> MapCategory.BUS
+            }
+            c.ordinal.toByte()
+        }
+    }
     fun lineOf(id: Int): String? = if (has(id)) line[id] else null
 
     /** Id všech existujících spojů vzestupně. */

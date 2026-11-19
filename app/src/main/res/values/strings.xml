@@ -198,6 +198,7 @@
     <string name="search_empty_text">Vyber výchozí a cílovou zastávku.</string>
     <string name="search_load_more_retry">Načíst další – zkusit znovu</string>
     <string name="search_none_until_end_of_day">Nenašel se žádný spoj do konce dne.</string>
+    <string name="search_none_for_modes">Zvolenými druhy dopravy (%1$s) se mezi těmito zastávkami nedá cestovat. Zkus vybrat všechny druhy dopravy.</string>
     <string name="search_all_for_today">To je vše na dnes.</string>
     <string name="search_pick_stop">Vyber zastávku</string>
     <string name="common_clear">Vymazat</string>
@@ -282,6 +283,7 @@
     <string name="vd_trip_id">ID spoje: %1$s</string>
     <string name="vd_metro_no_set">Metro nehlásí číslo soupravy, vůz se sleduje podle spoje.</string>
     <string name="map_pick_vehicle">Které vozidlo?</string>
+    <string name="search_filter_title">Čím cestovat</string>
     <string name="vehicle_kind_bus">Bus</string>
     <string name="vehicle_kind_trolleybus">Bus</string>
     <string name="vehicle_kind_tram">Tramvaj</string>
