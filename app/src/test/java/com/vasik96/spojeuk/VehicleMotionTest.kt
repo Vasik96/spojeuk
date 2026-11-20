@@ -13,7 +13,7 @@ import org.junit.Test
 class VehicleMotionTest {
 
     private var now = 0L          // elapsedRealtime
-    private var wallNow = 0L      // čas pozorování (wall clock)
+    private var wallNow = 1_795_000_000_000L   // čas pozorování (wall clock); reálný, 0 = „neznámý čas“
 
     /** 2 km rovně na sever, zastávky po cestě. */
     private fun route() = PathMeasure(
@@ -82,6 +82,31 @@ class VehicleMotionTest {
         val min = speeds.min()
         assertTrue("nezastaví u potvrzené predikce (nejnižší rychlost $min m/s)", min > 8.0)
         assertTrue("nejede rychleji, než jede vůz (${speeds.max()} m/s)", speeds.max() < 12.5)
+    }
+
+    @Test
+    fun keepsGoingRightAfterMapOpensWithSlowFeed() {
+        // zdroj s polohou po 15 s (data stará 3 s), vůz jede 8 m/s; hned po otevření mapy (odhad odstupu fixů
+        // teprve od výchozích 6 s) nesmí před každou aktualizací brzdit ke konci příliš krátkého horizontu
+        val m = motion(north(100.0))
+        m.setRoute(route())
+        m.positionAt(now)
+        var pos = 100.0
+        val speeds = ArrayList<Double>()
+        repeat(3) { i ->
+            pos += 120.0
+            var prev = m.positionAt(now).latitude
+            repeat(150) {
+                advance(100)
+                val l = m.positionAt(now).latitude
+                if (i >= 1) speeds += meters(prev, l) * 10.0
+                prev = l
+            }
+            val p = north(pos - 24.0)
+            m.onFix(p.latitude, p.longitude, wallNow - 3_000, predict = true)
+        }
+        val min = speeds.min()
+        assertTrue("nebrzdí před aktualizací (nejnižší rychlost $min m/s)", min > 6.0)
     }
 
     @Test

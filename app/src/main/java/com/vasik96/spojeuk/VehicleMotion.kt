@@ -376,6 +376,7 @@ internal class VehicleMotion(
     private var lastObsMs = obsMs
     private var lastFixRecvMs = elapsed()
     private var intervalMs = 6_000.0         // obvyklý odstup nových fixů (pro plynulou jízdu bez trasy)
+    private var maxIntervalMs = 6_000.0      // delší z nedávných odstupů (horizont predikce)
     private var lastAgeS = 0.0               // stáří posledního fixu při příjmu
     private var lastDir: Pair<Double, Double>? = null
 
@@ -473,7 +474,12 @@ internal class VehicleMotion(
         else (now - lastFixRecvMs) / 1000.0
         val prevFix = lastFix
         val dtRecv = now - lastFixRecvMs
-        if (dtRecv in 1_500L..20_000L) intervalMs = intervalMs * 0.7 + dtRecv * 0.3
+        if (dtRecv in 1_500L..20_000L) {
+            intervalMs = intervalMs * 0.7 + dtRecv * 0.3
+            // pro horizont predikce raději delší z nedávných odstupů: průměr z výchozích 6 s dobíhá ke skutečným
+            // 10 s pomalu a vůz pak před každou aktualizací brzdil ke konci příliš krátkého horizontu
+            maxIntervalMs = maxOf(dtRecv.toDouble(), maxIntervalMs * 0.8 + dtRecv * 0.2)
+        }
         lastFix = np
         lastObsMs = obsMs
         lastFixRecvMs = now
@@ -592,7 +598,9 @@ internal class VehicleMotion(
         // kterou realtime poloha ještě neprojela (vůz u ní zastaví a pokračuje, až data ukážou, že odjel)
         // příští fix přijde zhruba za obvyklý odstup + stáří dat od pozorování sFix; do té doby (a ještě brzdnou
         // dráhu) má být kam jet, jinak vůz před každou aktualizací zbytečně brzdí
-        val horizonS = (intervalMs / 1000.0 + lastAgeS.coerceAtMost(30.0) + vEst / (2.0 * BRAKE_MS2) + 1.0)
+        // brzdná rezerva z vyšší rychlosti: vykreslený vůz může zrovna dohánět (vDisp > vEst) a brzdí déle
+        val vBrakeRef = maxOf(vEst, vDisp)
+        val horizonS = (maxIntervalMs / 1000.0 + lastAgeS.coerceAtMost(30.0) + vBrakeRef / (2.0 * BRAKE_MS2) + 1.0)
             .coerceIn(LEAD_HORIZON_S, MAX_LEAD_HORIZON_S)
         var sLimit = (sFix + vEst * horizonS).coerceAtMost(r.totalMeters)
         r.nextStopAfter(sFix + STOP_PASSED_M)?.let { if (it < sLimit) sLimit = it }
