@@ -59,7 +59,7 @@ internal enum class VehicleStyle(
     BUS(0xFF2E7D32.toInt(), 0xFF1B5E20.toInt(), 0xFF66BB6A.toInt()),
     BUS_LATE(0xFFC62828.toInt(), 0xFF1B5E20.toInt(), 0xFF66BB6A.toInt()),   // trasa zpožděného autobusu je autobusová
     TRAIN(0xFF0277BD.toInt(), 0xFF01579B.toInt(), 0xFF4FC3F7.toInt()),
-    TRAM(0xFF00897B.toInt(), 0xFF00695C.toInt(), 0xFF4DB6AC.toInt()),       // tyrkysová: fialová moc poutala pozornost
+    TRAM(0xFFEF6C00.toInt(), 0xFFC25400.toInt(), 0xFFFFB74D.toInt()),       // oranžová (dřív fialová)
     METRO_A(0xFF00A562.toInt(), 0xFF007A48.toInt(), 0xFF4CD08F.toInt()),
     METRO_B(0xFFF8B322.toInt(), 0xFFC68A00.toInt(), 0xFFFFD36B.toInt(), darkText = true),
     METRO_C(0xFFD6006F.toInt(), 0xFFA10054.toInt(), 0xFFF0609F.toInt()),     // malinová: červená C splývala se zpožděnými autobusy
