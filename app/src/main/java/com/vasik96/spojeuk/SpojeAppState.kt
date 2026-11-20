@@ -279,7 +279,7 @@ class SpojeAppState(
     /** Odjezd ze zastávky na mapě: celá trasa spoje, nalezení vozu (přiblížení / zvýraznění) jako u spojení. */
     fun loadStopDepartureRoute(api: TransitRepository, d: StopDeparture, stop: MapStop, scope: CoroutineScope) {
         routeJob?.cancel()
-        selectedStop = null
+        // panel zastávky zavírá volající s animací (selectedStop = null až po ní)
         selectedVehicle = null
         focusedTripVehicle = null
         tripRoute = emptyList()

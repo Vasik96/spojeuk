@@ -123,7 +123,7 @@ private fun StopDeparturesSheet(
     }
 
     val pickScope = androidx.compose.runtime.rememberCoroutineScope()
-    InlineBottomSheet(onDismiss = onDismiss) {
+    InlineBottomSheet(onDismiss = onDismiss) { closeSheet ->
         Column(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -161,7 +161,8 @@ private fun StopDeparturesSheet(
                     items(list, key = { "${it.tid}:${it.depSec}" }) { d ->
                         DepartureRow(d, now) {
                             // panel se zavře až po kousku animace ripple (jinak zmizí dřív, než je vidět)
-                            pickScope.launch { delay(170); onPick(d) }
+                            // panel sjede dolů s animací (zavření až po kousku ripple), trasa se mezitím načítá
+                            pickScope.launch { delay(170); onPick(d); closeSheet() }
                         }
                     }
                 }
