@@ -95,10 +95,7 @@ class TransitRepository(context: Context? = null) {
 
     private fun stopIndexFor(b: TimetableBundle): StopIndex = synchronized(stopIndexLock) {
         stopIndex?.takeIf { it.first === b.timetable }?.second
-            ?: StopIndex.build(
-                b.timetable, b.planner.net(nowPrague().toLocalDate()),
-                runCatching { b.timetable.computeStopModes().railNames }.getOrDefault(emptySet()),
-            )
+            ?: StopIndex.build(b.timetable, b.timetable.netCache)
                 .also { stopIndex = b.timetable to it }
     }
 

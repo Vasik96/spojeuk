@@ -135,6 +135,17 @@ class StopIndex private constructor(
         private const val PLACE_M = 10.0
         /** O kolik metrů vpravo od osy silnice (středu stanoviště) leží nástupiště. */
         private const val SIDE_M = 9.0
+        /** Jeden bod jízdního řádu má nejvýš tolik nástupišť (strany silnice); víc jen zastávky s víc body. */
+        private const val MAX_DIRS_PER_POINT = 2
+
+        /**
+         * Poloha vlakové ikony tam, kde vlakové záznamy jízdního řádu leží přímo v kolejišti a ikonu by zakrývaly
+         * vlaky (ťuknutí by trefilo vlak): před výpravní budovou. Stejné jako RAIL_POS ve stops.js na webu.
+         */
+        private val RAIL_POS = mapOf(
+            "Ústí nad Labem,Hlavní nádraží" to (50.65951 to 14.04404),
+        )
+
         /** Směry, které od sebe svírají méně než tohle, jsou jeden (šum: směr se bere z předchozí → další zastávky). */
         private const val SAME_DIR_DEG = 35.0
         /** Menšinový směr pod tímto podílem odjezdů… */
@@ -170,6 +181,12 @@ class StopIndex private constructor(
                     .minBy { DirGroups.angleDiff(it.mean, minor.mean) }
                 into.addAll(minor)
                 groups.remove(minor)
+            }
+            // jeden bod jízdního řádu = nejvýš dvě strany silnice: další směr (boční ulice) k úhlově nejbližšímu
+            groups.sortByDescending { it.w }
+            while (groups.size > MAX_DIRS_PER_POINT) {
+                val minor = groups.removeAt(groups.size - 1)
+                groups.minBy { DirGroups.angleDiff(it.mean, minor.mean) }.addAll(minor)
             }
             return groups.sortedByDescending { it.w }
         }
@@ -281,7 +298,7 @@ class StopIndex private constructor(
          * [net] = síť dne (vzory spojů): z nich směry jízdy v zastávkách a které záznamy jsou vlakové.
          * [railNames] = názvy zastávek s vlaky (záloha, kdyby vlakové záznamy ve vzorech nebyly).
          */
-        fun build(tt: Timetable, net: Net, railNames: Set<String>): StopIndex {
+        fun build(tt: Timetable, cache: NetCache): StopIndex {
             // 1. zastávka = stejný název do MERGE_M; uvnitř místa (stanoviště) do PLACE_M
             val clusters = ArrayList<Cluster>()
             val clusterOf = HashMap<Int, Cluster>()
@@ -299,11 +316,22 @@ class StopIndex private constructor(
             }
 
             // 2. směry autobusů na každém místě (vzor × zastávka kromě konečné, váha = počet jízd)
+            // vzory spojů všech dnů (NetCache), váha = počet spojů vzoru: nástupiště nezávisí na dni a zastávka,
+            // odkud nikdy nic neodjíždí, nemá ikonu
+            val patW = IntArray(cache.nPat)
+            val patTrain = BooleanArray(cache.nPat)
+            for (tid in 0..cache.maxTid) {
+                val p = cache.patOf(tid)
+                if (p < 0 || !tt.trips.has(tid)) continue
+                patW[p]++
+                if (tt.trips.isTrain(tid)) patTrain[p] = true
+            }
+            val patStops = arrayOfNulls<IntArray>(cache.nPat)
             fun forEachBusCall(action: (Place, Int, Int, Pair<Double, Double>, Int) -> Unit) {
-                for (pat in net.patterns) {
-                    if (pat.m == 0) continue
-                    val train = tt.trips.isTrain(pat.tid(0))
-                    val st = pat.stops
+                for (p in 0 until cache.nPat) {
+                    if (patW[p] == 0) continue
+                    val train = patTrain[p]
+                    val st = patStops[p] ?: cache.patStops(p).also { patStops[p] = it }
                     for (pos in 0 until st.size - 1) {
                         val s = st[pos]
                         if (train) { clusterOf[s]?.railIds?.add(s); continue }
@@ -311,7 +339,7 @@ class StopIndex private constructor(
                         pl.bus = true
                         val prev = if (pos > 0) st[pos - 1] else s
                         val d = travelDir(tt, s, prev, st[pos + 1]) ?: continue
-                        action(pl, prev, st[pos + 1], d, pat.m)
+                        action(pl, prev, st[pos + 1], d, patW[p])
                     }
                 }
             }
@@ -328,8 +356,7 @@ class StopIndex private constructor(
             val dirStopsOf = HashMap<Int, List<MapStop>>()
             for (cl in clusters) {
                 val pretty = prettyName(cl.name)
-                val hasRail = cl.railIds.isNotEmpty() || cl.name in railNames
-                var any = false
+                val hasRail = cl.railIds.isNotEmpty()
                 // místa s autobusy; občasná zastavení jinde (pod TINY_PLACE_SHARE) k nejbližšímu většímu místu
                 val busPlaces = cl.places.filter { it.w > 0.0 }.sortedByDescending { it.w }.toMutableList()
                 val totalW = busPlaces.sumOf { it.w }
@@ -388,26 +415,17 @@ class StopIndex private constructor(
                         list += MapStop("d${ids[0]}_$g", la, lo, pretty, ids, StopKind.DIR, g, dirs)
                     }
                     if (list.isEmpty()) continue
-                    any = true
                     all += list
                     for (id in ids) dirStopsOf[id] = list
                 }
                 if (hasRail) {
-                    // vlaky: vlakové záznamy (leží jinde než autobusové), jinak záznamy bez autobusů, jinak střed
+                    // vlaky: vlakové záznamy (leží jinde než autobusové); v kolejišti (zakryté vlaky) před budovou
                     val src = cl.stops.filter { it.id.toInt() in cl.railIds }
-                        .ifEmpty { cl.stops.filter { s -> placeOf[s.id.toInt()]?.bus != true } }
-                        .ifEmpty { cl.stops }
-                    all += MapStop(
-                        "r${cl.ids[0]}", src.sumOf { it.lat } / src.size, src.sumOf { it.lng } / src.size,
-                        pretty, cl.ids, StopKind.RAIL,
-                    )
-                    any = true
+                    val (la, lo) = RAIL_POS[cl.name]
+                        ?: (src.sumOf { it.lat } / src.size to src.sumOf { it.lng } / src.size)
+                    all += MapStop("r${cl.ids[0]}", la, lo, pretty, cl.ids, StopKind.RAIL)
                 }
-                if (!any) {
-                    val la = cl.stops.sumOf { it.lat } / cl.stops.size
-                    val lo = cl.stops.sumOf { it.lng } / cl.stops.size
-                    all += MapStop("t${cl.ids[0]}", la, lo, pretty, cl.ids)
-                }
+                // zastávka, odkud nikdy nic neodjíždí (jen výstup, zrušený záznam), se nezobrazuje
             }
             all.sortBy { it.lat }
             return StopIndex(tt, all.toTypedArray(), dirStopsOf)
