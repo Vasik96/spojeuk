@@ -59,24 +59,26 @@ class VehicleMotionTest {
 
     @Test
     fun keepsGoingWhenNewFixConfirmsPrediction() {
-        // jede stálých 10 m/s mezi zastávkami (555 m a 1 111 m), poloha po 6 s; predikce trefuje nové fixy
-        val m = motion(north(600.0))
+        // jede stálých 10 m/s mezi zastávkami (555 m a 1 111 m), poloha po 10 s a 3 s stará (jako DÚK);
+        // predikce trefuje nové fixy
+        val m = motion(north(560.0))
         m.setRoute(route())
         m.positionAt(now)
-        var pos = 600.0
+        var pos = 560.0
         val speeds = ArrayList<Double>()
-        repeat(7) { i ->
-            pos += 60.0
+        repeat(5) { i ->
+            pos += 100.0
             var prev = m.positionAt(now).latitude
-            repeat(60) {                       // 6 s jízdy, pak nový fix tam, kde vůz opravdu je
+            repeat(100) {                      // 10 s jízdy, pak nový fix: kde vůz byl před 3 s
                 advance(100)
                 val l = m.positionAt(now).latitude
-                if (i >= 3) speeds += meters(prev, l) * 10.0   // m/s, po rozjezdu
+                if (i >= 2) speeds += meters(prev, l) * 10.0   // m/s, po rozjezdu
                 prev = l
             }
-            fix(m, north(pos))
+            val p = north(pos - 30.0)
+            m.onFix(p.latitude, p.longitude, wallNow - 3_000, predict = true)
         }
-        // dřív vůz před každou aktualizací brzdil k pevnému horizontu 6 s a u fixu, který predikce trefila, stál
+        // dřív vůz před každou aktualizací brzdil k pevnému horizontu 6 s (a k pohyblivému cíli) a skoro stál
         val min = speeds.min()
         assertTrue("nezastaví u potvrzené predikce (nejnižší rychlost $min m/s)", min > 8.0)
         assertTrue("nejede rychleji, než jede vůz (${speeds.max()} m/s)", speeds.max() < 12.5)
