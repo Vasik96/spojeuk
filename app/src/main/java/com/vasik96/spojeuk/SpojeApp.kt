@@ -389,6 +389,7 @@ internal fun SpojeApp() {
                 // bottom sheet vozidla nad celým UI (i nad spodní lištou), ale bez Dialog okna => naběhne hned
                 if (appState.selectedTab == 1) {
                     SelectedVehicleSheet(api, appState)
+                    SelectedStopSheet(api, appState)
                 }
 
                 AnimatedVisibility(

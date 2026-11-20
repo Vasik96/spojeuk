@@ -418,6 +418,17 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         }
     }
 
+    // ── zastávky (index se postaví, jakmile je načtený jízdní řád) ──
+    val stopIndex by produceState<StopIndex?>(null, api) {
+        while (value == null) {
+            value = runCatching { api.mapStops() }.getOrNull()
+            if (value == null) delay(3_000)
+        }
+    }
+
+    val stopIcons = rememberStopIcons()
+    androidx.compose.runtime.SideEffect { googleLayer.stopIcons = stopIcons }
+
     // ── pohyb všech vozidel na jednom místě ──
     val hub = remember(routes, scope) { MotionHub(routes, scope) }
     DisposableEffect(hub) { onDispose { hub.clear() } }
@@ -469,6 +480,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         val hits = googleLayer.hitTest(ll.latitude, ll.longitude, degPerDp)
                         if (hits.size == 1) appState.selectVehicle(hits[0])
                         else if (hits.size > 1) appState.vehicleChoices = hits
+                        else if (cameraPositionState.position.zoom >= STOP_MIN_ZOOM_GOOGLE) {
+                            googleLayer.hitTestStop(ll.latitude, ll.longitude, degPerDp)?.let { appState.selectStop(it) }
+                        }
                     }
                 },
                 cameraPositionState = cameraPositionState,
@@ -548,6 +562,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     showFullRoute = showFullRoute,
                     active = active,
                     shown = shownRoute,
+                    stopIndex = stopIndex,
                 )
             }
         } else {
@@ -570,7 +585,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 hasLocationPermission = hasLocationPermission,
                 tertiaryColor = MaterialTheme.colorScheme.tertiary,
                 arrowColor = MaterialTheme.colorScheme.onBackground,
-                hub = hub
+                hub = hub,
+                stopIndex = stopIndex,
+                stopIcons = stopIcons,
             )
         }
 
@@ -869,6 +886,7 @@ private fun GoogleVehicleOverlay(
     showFullRoute: Boolean,
     active: Boolean,
     shown: ShownRoute,
+    stopIndex: StopIndex?,
 ) {
     val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
     val context = LocalContext.current
@@ -899,6 +917,7 @@ private fun GoogleVehicleOverlay(
     val latestVehicles by rememberUpdatedState(activeVehicles)
     val latestTarget by rememberUpdatedState(targetUid)
     val latestPhase by rememberUpdatedState(phase)
+    val latestStops by rememberUpdatedState(stopIndex)
 
     LaunchedEffect(layer, hub, active) {
         if (!active) return@LaunchedEffect
@@ -910,16 +929,19 @@ private fun GoogleVehicleOverlay(
         var lastTarget: String? = null
         var lastPhase = -1
         var pending = false
+        var lastTickFt = 0L
+        var lastStopIdx: StopIndex? = null
 
         while (true) {
+            // Polohy se počítají k času snímku (ne k náhodnému probuzení po delay), v pravidelném rytmu celých
+            // snímků; overlay mezi nimi dopočítává polohu z rychlosti v každém snímku => plynulý pohyb.
+            val ft = withFrameNanos { it }
             // čeká se na štítky kreslené na pozadí => hned další snímek, jinak běžný interval
-            if (pending) withFrameNanos { }
-            else delay(
-                // oddálené tečky se hýbou o zlomky pixelu, stačí řidčeji
-                if (layer.isDotMode && cameraPositionState.position.zoom < DOT_SMOOTH_ZOOM) GOOGLE_DOT_INTERVAL_MS
-                else GOOGLE_VEHICLE_INTERVAL_MS
-            )
-            val now = SystemClock.elapsedRealtime()
+            val interval = if (layer.isDotMode && cameraPositionState.position.zoom < DOT_SMOOTH_ZOOM) GOOGLE_DOT_INTERVAL_MS
+            else GOOGLE_VEHICLE_INTERVAL_MS   // oddálené tečky se hýbou o zlomky pixelu, stačí řidčeji
+            if (!pending && ft - lastTickFt < interval * 1_000_000L - FRAME_SLACK_NS) continue
+            lastTickFt = ft
+            val now = frameElapsedMs(ft)
             if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
 
             val cam = cameraPositionState.position
@@ -932,6 +954,16 @@ private fun GoogleVehicleOverlay(
                     baseView = base
                     view = base.expanded(0.15)
                 }
+            }
+
+            // zastávky v záběru (jen přiblížená mapa); pod hranicí zoomu plynule zmizí (seznam zůstane, ať je co prolínat)
+            val sIdx = latestStops
+            if (camChanged || sIdx !== lastStopIdx) {
+                lastStopIdx = sIdx
+                val bv = baseView
+                val show = sIdx != null && bv != null && cam.zoom >= STOP_MIN_ZOOM_GOOGLE
+                if (show) layer.setStops(sIdx.inView(bv.expanded(0.1)))
+                layer.setStopsVisible(show, now)
             }
 
             val vehicles = latestVehicles
@@ -954,7 +986,11 @@ private fun GoogleVehicleOverlay(
             hub.ensureRoutes(view, enabled = !layer.isDotMode)
             val moved = hub.tick(now, view)
             // samotný pohyb kamery snímek nemění (overlay si kameru čte sám), jen u štítků přibývají nové v záběru
-            if (!moved && !metaChanged && !modeChanged && !pending && !(camChanged && !layer.isDotMode)) continue
+            // (stojící vozidla: jednou ještě poslat nulové rychlosti, jinak by je overlay dál dopočítával)
+            if (!moved && !metaChanged && !modeChanged && !pending && !(camChanged && !layer.isDotMode) &&
+                !layer.moving.value
+            ) continue
+            layer.stampNanos = ft
 
             // štítky se chystají už kousek před přepnutím z teček, ať se při přepnutí jen vymění
             val prewarm = layer.isDotMode && cam.zoom >= DOT_ZOOM_GOOGLE - LABEL_PREWARM_ZOOM
@@ -1016,6 +1052,22 @@ private const val LOCATION_ANIMATION_FPS = 10              // animace modrého b
 // oddáleno (tečky): pohyb o pixel trvá dlouho, stačí řídké aktualizace
 private const val DOT_UPDATE_INTERVAL_MS = 250L
 private const val DOT_UPDATE_INTERVAL_FAR_MS = 500L
+/** Tolerance při čekání na další snímek poloh (polovina snímku při 120 Hz). */
+private const val FRAME_SLACK_NS = 4_000_000L
+
+/** Čas snímku (System.nanoTime z withFrameNanos) v časové ose SystemClock.elapsedRealtime (ms), jak ji čte pohyb vozidel. */
+private fun frameElapsedMs(frameNanos: Long): Long =
+    (frameNanos + (SystemClock.elapsedRealtimeNanos() - System.nanoTime())) / 1_000_000L
+
+/** Prolnutí zastávek při objevení / zmizení (ms). */
+internal const val STOP_FADE_MS = 250L
+
+private const val STOPS_SRC = "map-stops-src"
+private const val STOPS_LAYER = "map-stops"
+private const val STOP_IMG_BUS = "map-stop-bus"
+private const val STOP_IMG_RAIL = "map-stop-rail"
+
+
 private const val GOOGLE_VEHICLE_INTERVAL_MS = 33L     // Google: pohyb vozidel v overlayi (~30 Hz, jako MapLibre)
 private const val GOOGLE_DOT_INTERVAL_MS = 250L         // oddálené tečky (pod DOT_SMOOTH_ZOOM) se hýbou o zlomky pixelu
 private const val DOT_SMOOTH_ZOOM = 10.5f
@@ -1171,6 +1223,8 @@ private fun MapLibreScreenContent(
     tertiaryColor: Color,
     arrowColor: Color,
     hub: MotionHub,
+    stopIndex: StopIndex?,
+    stopIcons: StopIcons,
     onMapDisposed: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -1239,6 +1293,9 @@ private fun MapLibreScreenContent(
     // kamera se pohnula => přepočítat, která vozidla jsou ve viditelné oblasti
     val cameraDirty = remember { AtomicBoolean(true) }
     val cameraMovedAt = remember { java.util.concurrent.atomic.AtomicLong(0L) }   // poslední pohyb kamery (gesto)
+    // zastávky: přepočet výřezu po zastavení kamery; ťuknutí hledá v tom, co je nakreslené
+    val stopsDirty = remember { AtomicBoolean(true) }
+    var shownStops by remember { mutableStateOf<List<MapStop>>(emptyList()) }
     // obrázky přidané do aktuálního stylu (při změně stylu se začíná od nuly)
     val addedImages = remember(styleVersion) { mutableSetOf<String>() }
 
@@ -1267,6 +1324,7 @@ private fun MapLibreScreenContent(
                     // stav kamery se ukládá až když se mapa zastaví, ne při každém framu pohybu
                     m.addOnCameraIdleListener {
                         cameraDirty.set(true)
+                        stopsDirty.set(true)
                         cameraMovedAt.set(0L)   // gesto skončilo => vozidla hned dohnat
                         val cp = m.cameraPosition
                         cp.target?.let {
@@ -1347,7 +1405,16 @@ private fun MapLibreScreenContent(
                             android.view.MotionEvent.ACTION_CANCEL -> tapValid = false
                             android.view.MotionEvent.ACTION_UP -> {
                                 if (tapValid && ev.eventTime - downAt <= android.view.ViewConfiguration.getLongPressTimeout()) {
-                                    pickVehicle(m.projection.fromScreenLocation(android.graphics.PointF(ev.x, ev.y)))
+                                    val ll = m.projection.fromScreenLocation(android.graphics.PointF(ev.x, ev.y))
+                                    if (!pickVehicle(ll) && m.cameraPosition.zoom >= STOP_MIN_ZOOM_GOOGLE - 1.0) {
+                                        // zastávka do ~14 dp od ťuknutí (metry na pixel jen jednou, žádná projekce každé)
+                                        val r = 18.0 * density * m.projection.getMetersPerPixelAtLatitude(ll.latitude)
+                                        shownStops
+                                            .map { it to Geo.distanceM(ll.latitude, ll.longitude, it.lat, it.lng) }
+                                            .filter { it.second <= r }
+                                            .minByOrNull { it.second }
+                                            ?.let { appState.selectStop(it.first) }
+                                    }
                                 }
                                 tapValid = false
                             }
@@ -1368,6 +1435,65 @@ private fun MapLibreScreenContent(
 
     // změna vozidel / zvýraznění => překreslit zdroj
     LaunchedEffect(activeVehicles, phase) { dirty.set(true) }
+
+    // ── ZASTÁVKY: ikony v záběru (jen přiblížená mapa), přepočet po zastavení kamery ──
+    LaunchedEffect(map, styleVersion, stopIndex, stopIcons) {
+        val m = map ?: return@LaunchedEffect
+        val idx = stopIndex ?: return@LaunchedEffect
+        stopsDirty.set(true)
+        var iconsAdded = false
+        var stopsShown: Boolean? = null
+        while (true) {
+            delay(100)
+            val style = m.style
+            if (style == null || !style.isFullyLoaded) continue
+            if (!iconsAdded || style.getImage(STOP_IMG_BUS) == null) {
+                // barvy motivu: při změně se obrázky přepíšou
+                style.addImage(STOP_IMG_BUS, stopIcons.bus)
+                style.addImage(STOP_IMG_RAIL, stopIcons.rail)
+                iconsAdded = true
+            }
+            if (style.getSource(STOPS_SRC) == null) {
+                style.addSource(GeoJsonSource(STOPS_SRC, FeatureCollection.fromFeatures(emptyList<Feature>())))
+                // nad vozidly (vlak u nástupiště nesmí zakrýt zastávku), pod zvýrazněným vozidlem
+                ensureVehicleLayer(style)
+                style.addLayerBelow(
+                    SymbolLayer(STOPS_LAYER, STOPS_SRC).withProperties(
+                        PropertyFactory.iconImage(Expression.get("img")),
+                        PropertyFactory.iconAllowOverlap(true),
+                        PropertyFactory.iconIgnorePlacement(true),
+                        PropertyFactory.iconOpacity(0f),
+                    ).also { it.iconOpacityTransition = TransitionOptions(STOP_FADE_MS, 0, false) },
+                    VEH_HL_LAYER
+                )
+                stopsShown = null
+                stopsDirty.set(true)
+            }
+            // objevení / zmizení při přechodu přes hranici zoomu: prolnutí průhlednosti vrstvy (jako u vozidel)
+            val zoom = m.cameraPosition.zoom
+            val show = zoom >= STOP_MIN_ZOOM_GOOGLE - 1.0
+            if (show != stopsShown) {
+                stopsShown = show
+                (style.getLayer(STOPS_LAYER) as? SymbolLayer)?.setProperties(PropertyFactory.iconOpacity(if (show) 1f else 0f))
+                if (show) stopsDirty.set(true)
+            }
+            // skryté zastávky zůstanou ve zdroji (doznívají), seznam se obnoví až po objevení
+            if (!show || !stopsDirty.getAndSet(false)) continue
+            val b = runCatching { m.projection.visibleRegion.latLngBounds }.getOrNull() ?: continue
+            val list = withContext(Dispatchers.Default) {
+                idx.inView(ViewBox(b.latitudeSouth, b.longitudeWest, b.latitudeNorth, b.longitudeEast).expanded(0.1))
+            }
+            if (list == shownStops && list.isNotEmpty()) continue
+            shownStops = list
+            style.getSourceAs<GeoJsonSource>(STOPS_SRC)?.setGeoJson(
+                FeatureCollection.fromFeatures(list.map { st ->
+                    Feature.fromGeometry(Point.fromLngLat(st.lng, st.lat)).also { f ->
+                        f.addStringProperty("img", if (st.kind == StopKind.RAIL) STOP_IMG_RAIL else STOP_IMG_BUS)
+                    }
+                })
+            )
+        }
+    }
 
     LaunchedEffect(map) {
         val m = map ?: return@LaunchedEffect
@@ -1657,8 +1783,9 @@ private fun MapLibreScreenContent(
 
         try {
         while (true) {
-            withFrameNanos { }
-            val now = SystemClock.elapsedRealtime()
+            val ft = withFrameNanos { it }
+            // čas snímku, ne okamžik probuzení: polohy v GeoJSON odpovídají pravidelným okamžikům
+            val now = frameElapsedMs(ft)
 
             // průhlednost vrstev každý snímek (jen při změně), i mimo interval aktualizace poloh
             fade.tick(now, pending || labelsLoading.get() != 0)
@@ -1677,7 +1804,8 @@ private fun MapLibreScreenContent(
             }
 
             if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
-            if (now - lastPush < interval) continue
+            // tolerance půl snímku: jinak se (33 ms vs. 33,3 ms snímku) občas přeskočí snímek a rytmus poskakuje
+            if (now - lastPush < interval - FRAME_SLACK_NS / 1_000_000L) continue
 
             val camChanged = cameraDirty.getAndSet(false)
             var modeFlipped = false

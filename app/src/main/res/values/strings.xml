@@ -299,4 +299,10 @@
     <string name="map_filter_none">Nic</string>
     <string name="map_filter_select_all">Vybrat vše</string>
     <string name="map_filter_bus_note">včetně trolejbusů</string>
+    <string name="stop_departures">Odjezdy</string>
+    <string name="stop_departures_none">V příštích %1$d hodinách odsud nic nejede</string>
+    <string name="stop_departures_loading">Načítám odjezdy…</string>
+    <string name="stop_departures_note">Podle jízdního řádu, nejbližší %1$d hodiny</string>
+    <string name="stop_in_min">za %1$d min</string>
+    <string name="stop_now">teď</string>
 </resources>

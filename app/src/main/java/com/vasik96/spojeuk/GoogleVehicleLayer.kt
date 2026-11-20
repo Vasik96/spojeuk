@@ -39,6 +39,16 @@ internal class GoogleVehicleLayer(private val context: Context) {
         private set
     var wy = DoubleArray(0)
         private set
+    var vwx = DoubleArray(0)         // rychlost ve světových souřadnicích za ms (dopočet polohy v každém snímku)
+        private set
+    var vwy = DoubleArray(0)
+        private set
+    /** Čas snímku (System.nanoTime), ke kterému platí [wx]/[wy]. */
+    var stampNanos = 0L
+    /** Čas posledního snímku (System.nanoTime), ke kterému overlay kreslí. */
+    var frameNanos = 0L
+    /** Nějaké vozidlo se hýbe => overlay se překresluje každý snímek (s dopočtem polohy). */
+    val moving = androidx.compose.runtime.mutableStateOf(false)
     var color = IntArray(0)          // barva tečky
         private set
     var late = BooleanArray(0)       // tramvaj / metro se zpožděním: červený okraj tečky
@@ -50,6 +60,70 @@ internal class GoogleVehicleLayer(private val context: Context) {
     private var vehicles = arrayOfNulls<Vehicle>(0)
     var hl = -1                      // index zvýrazněného vozidla (kreslí se poslední), -1 = žádné
         private set
+    // ── zastávky v záběru (kreslí je overlay pod vozidly) ──
+    var stops: List<MapStop> = emptyList()
+        private set
+    var stopWx = DoubleArray(0)
+        private set
+    var stopWy = DoubleArray(0)
+        private set
+
+    /** Bitmapy zastávek v barvách motivu (nastaví mapa). */
+    var stopIcons: StopIcons? = null
+        set(v) { if (field !== v) { field = v; version.intValue++ } }
+
+    // ── objevení / zmizení zastávek (prolnutí) ──
+    private var stopsShown = false
+    private var stopFadeFrom = 0f
+    private var stopFadeT0 = 0L
+    /** Zvýší se při startu prolínání => overlay kreslí každý snímek, dokud doznívá. */
+    val stopFadeKick = mutableIntStateOf(0)
+
+    fun setStopsVisible(show: Boolean, now: Long) {
+        if (show == stopsShown) return
+        stopFadeFrom = stopAlpha(now)
+        stopsShown = show
+        stopFadeT0 = now
+        stopFadeKick.intValue++
+    }
+
+    /** Průhlednost zastávek v čase [now] (elapsedRealtime). */
+    fun stopAlpha(now: Long): Float {
+        val f = ((now - stopFadeT0).toFloat() / STOP_FADE_MS).coerceIn(0f, 1f)
+        val target = if (stopsShown) 1f else 0f
+        return stopFadeFrom + (target - stopFadeFrom) * f
+    }
+
+    fun stopsFading(now: Long): Boolean = now - stopFadeT0 < STOP_FADE_MS
+
+    fun setStops(list: List<MapStop>) {
+        if (list == stops) return
+        val wx = DoubleArray(list.size)
+        val wy = DoubleArray(list.size)
+        for ((i, st) in list.withIndex()) {
+            wx[i] = (st.lng + 180.0) / 360.0
+            val sn = sin(Math.toRadians(st.lat)).coerceIn(-0.9999, 0.9999)
+            wy[i] = 0.5 - ln((1 + sn) / (1 - sn)) / (4 * PI)
+        }
+        stopWx = wx; stopWy = wy; stops = list
+        version.intValue++
+    }
+
+    /** Zastávka pod ťuknutím (ikona ~16 dp, s rezervou na prst), nejbližší. */
+    fun hitTestStop(lat: Double, lng: Double, degPerDpLng: Double): MapStop? {
+        val degPerDpLat = degPerDpLng * kotlin.math.cos(Math.toRadians(lat))
+        var best: MapStop? = null
+        var bestD = Double.MAX_VALUE
+        for (st in stops) {
+            val dx = (st.lng - lng) / degPerDpLng
+            val dy = (st.lat - lat) / degPerDpLat
+            if (abs(dx) > 18.0 || abs(dy) > 18.0) continue
+            val d = dx * dx + dy * dy
+            if (d < bestD) { bestD = d; best = st }
+        }
+        return best
+    }
+
     /** Změna snímku => překreslení overlaye (kamera se čte zvlášť). */
     val version = mutableIntStateOf(0)
 
@@ -161,19 +235,26 @@ internal class GoogleVehicleLayer(private val context: Context) {
         val cap = activeVehicles.size
         if (wx.size < cap) {
             val sz = cap + cap / 4 + 16
-            wx = DoubleArray(sz); wy = DoubleArray(sz); color = IntArray(sz); late = BooleanArray(sz); label = arrayOfNulls(sz)
+            wx = DoubleArray(sz); wy = DoubleArray(sz); vwx = DoubleArray(sz); vwy = DoubleArray(sz); color = IntArray(sz); late = BooleanArray(sz); label = arrayOfNulls(sz)
             lat = DoubleArray(sz); lng = DoubleArray(sz); vehicles = arrayOfNulls(sz)
         }
         var n = 0
         var h = -1
+        var anyMoving = false
         for ((key, v) in activeVehicles) {
-            val p = hub.positionOf(key)
+            val e = hub.entryOf(key)
+            val p = e?.pos
             val la = p?.latitude ?: v.lat
             val lo = p?.longitude ?: v.lng
             val isHl = targetUid != null && v.uid == targetUid
             wx[n] = (lo + 180.0) / 360.0
             val sn = sin(Math.toRadians(la)).coerceIn(-0.9999, 0.9999)
             wy[n] = 0.5 - ln((1 + sn) / (1 - sn)) / (4 * PI)
+            // d(wx)/d(lng) = 1/360, d(wy)/d(lat) = -1/(360·cos φ)
+            val vx = (e?.velLng ?: 0.0) / 360.0
+            val vy = -(e?.velLat ?: 0.0) / (360.0 * kotlin.math.cos(Math.toRadians(la)).coerceAtLeast(0.01))
+            vwx[n] = vx; vwy[n] = vy
+            if (vx != 0.0 || vy != 0.0) anyMoving = true
             val style = vehicleStyle(v)
             color[n] = vehicleColor(style, if (isHl) phase else 0)
             val lateMin = lateMinutes(v)
@@ -193,6 +274,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
         for (i in n until count) { vehicles[i] = null; label[i] = null }
         count = n
         hl = h
+        if (moving.value != anyMoving) moving.value = anyMoving
         if (n > 0 && fade.startAppear()) fadeKick.intValue++
         labelsPending = pending
         version.intValue++

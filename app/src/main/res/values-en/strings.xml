@@ -278,4 +278,10 @@
     <string name="map_filter_none">Nothing</string>
     <string name="map_filter_select_all">Select all</string>
     <string name="map_filter_bus_note">including trolleybuses</string>
+    <string name="stop_departures">Departures</string>
+    <string name="stop_departures_none">Nothing departs from here in the next %1$d hours</string>
+    <string name="stop_departures_loading">Loading departures…</string>
+    <string name="stop_departures_note">Scheduled, next %1$d hours</string>
+    <string name="stop_in_min">in %1$d min</string>
+    <string name="stop_now">now</string>
 </resources>

@@ -309,6 +309,9 @@ internal class PathMeasure(
 /** Délka animace bez predikce z bodu A do bodu B (1 s). */
 private const val FAST_ANIM_DURATION_MS = 1_000.0
 
+/** Plynulý rozjezd i dojezd (smoothstep) místo konstantní rychlosti s trhnutím na začátku a konci. */
+private fun ease(f: Double) = f * f * (3 - 2 * f)
+
 /** Skok delší než tohle není jízda (výměna vozu za jiný, chyba zdroje): bez animace. */
 private const val TELEPORT_M = 3_000.0
 
@@ -326,14 +329,31 @@ private const val MAX_PREDICT_DATA_AGE_S = 45.0
 /** Za jak dlouho (s) dorovná vykreslená poloha rozdíl oproti predikci. */
 private const val RESPONSE_S = 3.0
 
-/** Plynulé přenesení vykreslené polohy na novou polohu po trase (vstup na trasu, velká oprava). */
-private const val GLIDE_MS = 1_200.0
+/** Přesun vykreslené polohy na realtime polohu (vstup na trasu, velká oprava dopředu i zpět): vždy přesně 1 s. */
+private const val GLIDE_MS = 1_000.0
 
-/** Realtime poloha tolik za vykreslenou: predikce se mýlila (jiné místo trasy), opraví se i směrem zpět. */
-private const val BEHIND_RESYNC_M = 250.0
+/**
+ * Predikce se rozešla s realtime polohou víc než o tohle (a víc než [RESYNC_S] jízdy): místo dohánění /
+ * čekání (u velkého rozdílu klidně desítky sekund) se vůz za [GLIDE_MS] přenese na správné místo, dopředu i zpět.
+ */
+private const val RESYNC_M = 50.0
+private const val RESYNC_S = 4.0
 
-/** Zastávka, ke které má poslední realtime poloha blíž než tohle, se bere jako projetá / obsloužená. */
-private const val STOP_PASSED_M = 15.0
+/**
+ * Zastávka je projetá, až je poslední realtime poloha víc než tohle ZA ní. Vůz stojící u zastávky (fix kousek
+ * před i za sloupkem) ji drží, dokud data neukážou odjezd; dřív se zastávka do 15 m PŘED fixem brala jako projetá
+ * a predikce z ní odjela hned po příjezdu, a pak zastavila kdesi za ní.
+ */
+private const val STOP_PASSED_M = 20.0
+
+/** Predikce napřed o tolik sekund jízdy jede na ~37 % naměřené rychlosti (plynulé zpomalení, ne zastavení). */
+private const val AHEAD_SOFT_S = 4.0
+
+/**
+ * Stejné souřadnice jako minulý fix s jiným časem pozorování (zdroj / server polohu drží a jen ji znovu orazítkuje)
+ * se za stání vozu berou, až když se nezměnily aspoň tak dlouho; jinak by každá držená kopie vůz zastavila.
+ */
+private const val DUP_FIX_STANDING_MS = 20_000L
 
 /** Pohodlné brzdění k zastávce / konci predikce (m/s²). */
 private const val BRAKE_MS2 = 1.1
@@ -385,6 +405,7 @@ internal class VehicleMotion(
     private var to = shown
     private var t0 = lastFixRecvMs
     private var durMs = 1.0
+    private var eased = false
 
     // po trase
     private var route: PathMeasure? = null
@@ -407,8 +428,8 @@ internal class VehicleMotion(
     private val accel = if (isTrain) 0.8 else 1.5
     private val decel = if (isTrain) 1.2 else 2.5
 
-    private fun planLinear(a: LatLng, b: LatLng, now: Long, ms: Double) {
-        from = a; to = b; t0 = now; durMs = ms.coerceAtLeast(1.0)
+    private fun planLinear(a: LatLng, b: LatLng, now: Long, ms: Double, ease: Boolean = false) {
+        from = a; to = b; t0 = now; durMs = ms.coerceAtLeast(1.0); eased = ease
     }
 
     private fun leaveRoute(now: Long) {
@@ -462,6 +483,11 @@ internal class VehicleMotion(
         // server polohu drží, dokud zdroj nepošle novou: stejné místo a čas pozorování = žádná nová informace
         // (dřív se to bralo jako "vůz stojí" a predikce ho zastavila)
         if (np == lastFix && kotlin.math.abs(obsMs - lastObsMs) < SAME_FIX_MS) return false
+        // stejné místo s novým časem: skoro jistě držená kopie (GPS stojícího vozu se aspoň trochu hýbe);
+        // za stání se bere, až se poloha nezměnila delší dobu
+        if (haversineMeters(np, lastFix) < 0.5 &&
+            elapsed() - lastFixRecvMs < maxOf(DUP_FIX_STANDING_MS, (intervalMs * 2.5).toLong())
+        ) return false
 
         val moveDist = haversineMeters(lastFix, np)
         val moveVec: Pair<Double, Double>? = if (moveDist >= 8.0) {
@@ -495,7 +521,7 @@ internal class VehicleMotion(
         val r = route
         if (!predict) {
             if (onRoute) leaveRoute(now)
-            planLinear(shown, np, now, FAST_ANIM_DURATION_MS)
+            planLinear(shown, np, now, FAST_ANIM_DURATION_MS, ease = true)
             return true
         }
 
@@ -535,8 +561,12 @@ internal class VehicleMotion(
             }
             if (onRoute && !dirOk && mismatches < 2) return true   // jednorázově nesedí směr: ignorovat
             if (onRoute) leaveRoute(now)
-            // plynulá jízda k realtime poloze po celý interval mezi aktualizacemi
-            planLinear(shown, np, now, if (parkedAtTerminus) FAST_ANIM_DURATION_MS else intervalMs.coerceIn(2_500.0, 9_000.0))
+            // plynulá jízda k realtime poloze po celý interval mezi aktualizacemi; velký skok (rychlost, kterou by vůz
+            // nejel) nebo parkování na konečné za 1 s
+            val dur = intervalMs.coerceIn(2_500.0, 9_000.0)
+            val jump = parkedAtTerminus || haversineMeters(shown, np) / (dur / 1000.0) > vMaxAbs
+            if (jump) planLinear(shown, np, now, FAST_ANIM_DURATION_MS, ease = true)
+            else planLinear(shown, np, now, dur)
             return true
         }
         missed = 0
@@ -547,7 +577,7 @@ internal class VehicleMotion(
         if (onRoute && !sFix.isNaN()) {
             val ds = newS - sFix
             val vInst = when {
-                moveDist < 6.0 -> 0.0                                // stojí
+                moveDist < 6.0 && moveDist / dtObsS.coerceAtLeast(1.0) < 1.5 -> 0.0   // stojí
                 ds <= 0.0 -> 0.0
                 else -> (ds / dtObsS.coerceIn(1.0, 60.0)).coerceAtMost(vMaxAbs)
             }
@@ -571,10 +601,12 @@ internal class VehicleMotion(
             return true
         }
 
-        val behind = newS - sDisp
-        if (behind > maxOf(300.0, vEst * 25.0) || -behind > BEHIND_RESYNC_M) {
-            // predikce se rozešla s realitou (výpadek dat / dřívější špatné napojení): přenést plynule na realtime polohu
-            sDisp = newS
+        // kde má vůz být teď: realtime poloha + jízda za dobu od pozorování (ne dál než k neprojeté zastávce)
+        var sNow = (newS + vEst * ageS.coerceAtMost(MAX_LEAD_HORIZON_S)).coerceAtMost(r!!.totalMeters)
+        r.nextStopAfter(newS - STOP_PASSED_M)?.let { if (sNow > it) sNow = maxOf(it, newS) }
+        if (kotlin.math.abs(sNow - sDisp) > maxOf(RESYNC_M, vEst * RESYNC_S)) {
+            // predikce se rozešla s realitou (výpadek dat / dřívější špatné napojení): za 1 s na správné místo
+            sDisp = sNow
             vDisp = vEst
             startGlide(now)
         }
@@ -586,7 +618,7 @@ internal class VehicleMotion(
         val r = route
         if (!onRoute || r == null || sDisp.isNaN()) {
             val f = ((now - t0) / durMs).coerceIn(0.0, 1.0)
-            val pos = lerpLatLng(from, to, f)
+            val pos = lerpLatLng(from, to, if (eased) ease(f) else f)
             shown = pos
             return pos
         }
@@ -603,7 +635,8 @@ internal class VehicleMotion(
         val horizonS = (maxIntervalMs / 1000.0 + lastAgeS.coerceAtMost(30.0) + vBrakeRef / (2.0 * BRAKE_MS2) + 1.0)
             .coerceIn(LEAD_HORIZON_S, MAX_LEAD_HORIZON_S)
         var sLimit = (sFix + vEst * horizonS).coerceAtMost(r.totalMeters)
-        r.nextStopAfter(sFix + STOP_PASSED_M)?.let { if (it < sLimit) sLimit = it }
+        // zastávku, kterou už vykreslený vůz přejel, nedržet (prudké zastavení za ní by vypadalo hůř)
+        r.nextStopAfter(maxOf(sFix - STOP_PASSED_M, sDisp - 1.0))?.let { if (it < sLimit) sLimit = it }
         // cíl predikce: poslední ověřená poloha + naměřená rychlost × čas od ní (pohybuje se rychlostí vEst)
         val leadS = ((now - sFixAtMs) / 1000.0).coerceIn(0.0, horizonS)
         val sTarget = (sFix + vEst * leadS).coerceAtMost(sLimit)
@@ -614,7 +647,12 @@ internal class VehicleMotion(
         // horizontu): v ≤ √(2·a·dráha k hranici); dřív se brzdilo k pohyblivému cíli a vůz po každé aktualizaci,
         // kdy byl blízko cíle, prudce zpomalil.
         val vBrake = sqrt(2.0 * BRAKE_MS2 * (sLimit - sDisp).coerceAtLeast(0.0))
-        val vCmd = minOf((vEst + err / RESPONSE_S).coerceIn(0.0, vMax), vBrake)
+        // Napřed před cílem: plynule zpomalit podle toho, o kolik sekund jízdy je napřed (dřív vEst + err/3 →
+        // už ~3 s napřed = stát, takže vůz po každé aktualizaci, kdy byl kousek před realtime polohou, zastavil).
+        val vFollow = if (err >= 0.0) (vEst + err / RESPONSE_S).coerceIn(0.0, vMax)
+        else if (vEst > 0.1) vEst * kotlin.math.exp(err / (vEst * AHEAD_SOFT_S))
+        else 0.0
+        val vCmd = minOf(vFollow, vBrake)
         vDisp = if (vDisp < vCmd) (vDisp + accel * dt).coerceAtMost(vCmd) else (vDisp - decel * dt).coerceAtLeast(vCmd)
         // jen dopředu a nikdy za hranici predikce
         sDisp = (sDisp + vDisp * dt).coerceAtMost(maxOf(sDisp, sLimit)).coerceIn(0.0, r.totalMeters)
@@ -623,8 +661,7 @@ internal class VehicleMotion(
         var pos = r.pointAt(sDisp)
         if (gliding) {
             val f = ((now - glideT0) / GLIDE_MS).coerceIn(0.0, 1.0)
-            val e = f * f * (3 - 2 * f)
-            pos = lerpLatLng(glideFrom, pos, e)
+            pos = lerpLatLng(glideFrom, pos, ease(f))
             if (f >= 1.0) gliding = false
         }
         shown = pos

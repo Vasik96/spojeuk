@@ -89,6 +89,50 @@ class TransitRepository(context: Context? = null) {
         }
     }
 
+    // ── zastávky na mapě ──
+    private val stopIndexLock = Any()
+    private var stopIndex: Pair<Timetable, StopIndex>? = null
+
+    private fun stopIndexFor(b: TimetableBundle): StopIndex = synchronized(stopIndexLock) {
+        stopIndex?.takeIf { it.first === b.timetable }?.second
+            ?: StopIndex.build(
+                b.timetable, b.planner.net(nowPrague().toLocalDate()),
+                runCatching { b.timetable.computeStopModes().railNames }.getOrDefault(emptySet()),
+            )
+                .also { stopIndex = b.timetable to it }
+    }
+
+    /** Index zastávek pro mapu, jakmile je načtený jízdní řád (jinak null, nic se nečeká). */
+    suspend fun mapStops(): StopIndex? = withContext(Dispatchers.Default) {
+        val b = store.current ?: return@withContext null
+        stopIndexFor(b)
+    }
+
+    /** Odkaz na spoj odjíždějící ze zastávky na mapě (pro nalezení vozu a zvýraznění). */
+    suspend fun stopDepartureRef(d: StopDeparture, stop: MapStop): TripRef = withContext(Dispatchers.Default) {
+        val tt = store.ensure().timetable
+        val t = tt.trips[d.tid]
+        val at = d.day.atStartOfDay(PRAGUE_ZONE).plusSeconds(d.depSec.toLong())
+        TripRef(
+            cis = t?.cis ?: "", trip = t?.num ?: "", line = d.line,
+            boardLat = stop.lat, boardLng = stop.lng, destination = d.headsign,
+            departureTimeMillis = at.toInstant().toEpochMilli(), tid = d.tid,
+        )
+    }
+
+    /** Celá trasa spoje z jízdního řádu: tvar trasy a polohy zastávek (na nástupištích). */
+    suspend fun tripRouteById(tid: Int): Pair<List<Pair<Double, Double>>, List<Pair<Double, Double>>> =
+        withContext(Dispatchers.IO) {
+            val tt = store.ensure().timetable
+            geometry.forTrip(tt, tid) to platformLocations(tt, tt.tripStops(tid))
+        }
+
+    /** Odjezdy ze zastávky na mapě v nejbližších [hours] hodinách (podle jízdního řádu). */
+    suspend fun stopDepartures(stop: MapStop, hours: Int = 3): List<StopDeparture> = withContext(Dispatchers.Default) {
+        val b = store.ensure()
+        stopDepartures(b.planner, stop, nowPrague(), hours)
+    }
+
     /** Starší databáze nemá sloupec gid, takže se jednou na pozadí stáhne nová (s trasami). */
     private fun scheduleShapeUpgrade() {
         if (shapeUpgradeTried) return
@@ -480,8 +524,21 @@ class TransitRepository(context: Context? = null) {
             ?: tt.findTripId(v.cis, v.trip)
             ?: tripFallback(tt, v)
             ?: return@withContext emptyList()
-        val stopIds = tt.tripStops(tid)
-        stopIds.asIterable().mapNotNull { id -> tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng } }
+        platformLocations(tt, tt.tripStops(tid))
+    }
+
+    /**
+     * Polohy zastávek jízdy [stopIds] (v pořadí jízdy) na stejném místě jako nástupiště na mapě (strana silnice
+     * podle směru jízdy); kde nástupiště není, poloha z jízdního řádu.
+     */
+    private fun platformLocations(tt: Timetable, stopIds: IntArray): List<Pair<Double, Double>> {
+        val idx = store.current?.takeIf { it.timetable === tt }?.let { runCatching { stopIndexFor(it) }.getOrNull() }
+        return stopIds.indices.mapNotNull { i ->
+            val id = stopIds[i]
+            idx?.platformFor(id, stopIds.getOrElse(i - 1) { id }, stopIds.getOrElse(i + 1) { id })
+                ?.let { return@mapNotNull it.lat to it.lng }
+            tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng }
+        }
     }
 
     suspend fun resolveTripId(v: Vehicle): Int? = withContext(Dispatchers.IO) {
@@ -516,8 +573,7 @@ class TransitRepository(context: Context? = null) {
     suspend fun firstLegStopLocations(j: Journey): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
         val tt = store.ensure().timetable
         val leg = j.rawLegs.firstOrNull { it.kind == "ride" } ?: return@withContext emptyList()
-        val stopIds = tt.tripStops(leg.tid)
-        stopIds.asIterable().mapNotNull { id -> tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng } }
+        platformLocations(tt, tt.tripStops(leg.tid))
     }
 
     /**
@@ -526,18 +582,22 @@ class TransitRepository(context: Context? = null) {
      */
     suspend fun journeyStopLocations(j: Journey): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
         val tt = store.ensure().timetable
+        // polohy po jízdách (směr jízdy je v rámci jedné jízdy), přestup na stejné zastávce se nezdvojuje
         val ids = ArrayList<Int>()
+        val locs = ArrayList<Pair<Double, Double>?>()
         for (leg in j.rawLegs) {
             if (leg.kind != "ride") continue
-            for (t in leg.stops) {
-                if (ids.lastOrNull() == t.first) continue // přestup na stejné zastávce se nezdvojuje
-                ids.add(t.first)
+            val legIds = leg.stops.map { it.first }.toIntArray()
+            val legLocs = platformLocations(tt, legIds)
+            // platformLocations vynechá zastávky bez souřadnic: párovat jen při shodě počtu
+            for ((i, id) in legIds.withIndex()) {
+                if (ids.lastOrNull() == id) continue
+                ids.add(id)
+                locs.add(if (legLocs.size == legIds.size) legLocs[i] else tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng })
             }
         }
         if (ids.size <= 2) return@withContext emptyList()
-        ids.subList(1, ids.size - 1).mapNotNull { id ->
-            tt.stops[id]?.takeIf { it.hasCoords }?.let { it.lat to it.lng }
-        }
+        locs.subList(1, locs.size - 1).filterNotNull()
     }
 
     fun boardingPoint(j: Journey): Pair<Double, Double>? {

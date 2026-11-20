@@ -41,6 +41,25 @@ internal fun GoogleDotOverlay(
     val painter = remember(context) { DotPainter(context) }
     // prolínání: překreslení každý snímek jen po dobu animace
     val frame = remember { mutableIntStateOf(0) }
+    // vozidla v pohybu: překreslit každý snímek, polohu dopočítá painter z rychlosti k času snímku
+    LaunchedEffect(layer) {
+        snapshotFlow { layer.moving.value }.collectLatest { mv ->
+            while (mv) {
+                layer.frameNanos = withFrameNanos { it }
+                frame.intValue++
+            }
+        }
+    }
+    // prolínání zastávek: překreslení každý snímek, dokud doznívá
+    LaunchedEffect(layer) {
+        snapshotFlow { layer.stopFadeKick.intValue }.collectLatest {
+            while (true) {
+                withFrameNanos { }
+                frame.intValue++
+                if (!layer.stopsFading(SystemClock.elapsedRealtime())) break
+            }
+        }
+    }
     LaunchedEffect(layer) {
         snapshotFlow { layer.fadeKick.intValue }.collectLatest {
             while (true) {
@@ -78,6 +97,7 @@ private class DotPainter(private val context: Context) {
     private var lastColor = 0
     private var lastLate = false
     private var lastBmp: Bitmap? = null
+    private val stopPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
     private fun dotFor(color: Int, late: Boolean): Bitmap {
         if (color == lastColor && late == lastLate) lastBmp?.let { return it }
@@ -95,12 +115,13 @@ private class DotPainter(private val context: Context) {
         w: Float, h: Float, density: Float,
     ) {
         val n = layer.count
-        if (n == 0) return
+        if (n == 0 && layer.stops.isEmpty()) return
         val wx = layer.wx
         val wy = layer.wy
         val colors = layer.color
         val labels = layer.label
         val hl = layer.hl
+        val ext = extrapolationMs(layer)
 
         val world = 256.0 * 2.0.pow(zoom.toDouble()) * density   // šířka světa v px
         val cwx = (lng + 180.0) / 360.0
@@ -114,10 +135,35 @@ private class DotPainter(private val context: Context) {
         val r = MAX_HALF_DP * density   // nejširší štítek / 2
         val minX = -r; val maxX = w + r; val minY = -r; val maxY = h + r
 
+        // zastávky nad vozidly, ale pod zvýrazněným vozidlem (vlak u nástupiště nesmí zakrýt zastávku)
+        val stopA = layer.stopAlpha(SystemClock.elapsedRealtime())
+        val drawStops = {
+            val icons = layer.stopIcons
+            val sts = layer.stops
+            if (sts.isNotEmpty() && icons != null && stopA > 0.004f) {
+                stopPaint.alpha = (stopA * 255f).toInt().coerceIn(0, 255)
+                val sx = layer.stopWx
+                val sy = layer.stopWy
+                val hw = icons.bus.width / 2f
+                val hh = icons.bus.height / 2f
+                for (i in sts.indices) {
+                    val dx = (sx[i] - cwx) * world
+                    val dy = (sy[i] - cwy) * world
+                    val x = (dx * c + dy * s + cx).toFloat()
+                    val y = (-dx * s + dy * c + cy).toFloat()
+                    if (x < -hw || x > w + hw || y < -hh || y > h + hh) continue
+                    canvas.drawBitmap(
+                        if (sts[i].kind == StopKind.RAIL) icons.rail else icons.bus,
+                        Math.round(x - hw).toFloat(), Math.round(y - hh).toFloat(), stopPaint
+                    )
+                }
+            }
+        }
+        if (n == 0) { drawStops(); return }
         val fade = layer.fade
         fade.tick(SystemClock.elapsedRealtime(), layer.labelsPending)
         val appear = fade.appearAlpha()
-        if (appear <= 0f) return
+        if (appear <= 0f) { drawStops(); return }
 
         atlas.beginFrame()
         if (!fade.switching()) {
@@ -130,12 +176,14 @@ private class DotPainter(private val context: Context) {
             pass(canvas, PASS_LABELS, appear * fade.labelAlpha(), layer, cwx, cwy, world, c, s, cx, cy, minX, maxX, minY, maxY)
         }
 
+        drawStops()
+
         val hlLayer = appear < 0.996f && hl in 0 until n
         if (hlLayer) canvas.saveLayerAlpha(null, (appear * 255f).toInt())
         // zvýrazněné vozidlo navrch (pulzující štítek, nebo větší tečka)
         if (hl in 0 until n) {
-            val dx = (wx[hl] - cwx) * world
-            val dy = (wy[hl] - cwy) * world
+            val dx = (wx[hl] + layer.vwx[hl] * ext - cwx) * world
+            val dy = (wy[hl] + layer.vwy[hl] * ext - cwy) * world
             val x = (dx * c + dy * s + cx).toFloat()
             val y = (-dx * s + dy * c + cy).toFloat()
             val bmp = labels[hl]
@@ -166,6 +214,9 @@ private class DotPainter(private val context: Context) {
         val n = layer.count
         val wx = layer.wx
         val wy = layer.wy
+        val vwx = layer.vwx
+        val vwy = layer.vwy
+        val ext = extrapolationMs(layer)
         val colors = layer.color
         val lates = layer.late
         val labels = layer.label
@@ -187,15 +238,17 @@ private class DotPainter(private val context: Context) {
                 PASS_DOTS_LABELED -> if (lb != null) dotFor(colors[i], lates[i]) else continue
                 else -> lb ?: continue
             }
-            val dx = (wx[i] - cwx) * world
-            val dy = (wy[i] - cwy) * world
+            val mv = vwx[i] != 0.0 || vwy[i] != 0.0
+            val dx = (wx[i] + vwx[i] * ext - cwx) * world
+            val dy = (wy[i] + vwy[i] * ext - cwy) * world
             // otočení mapy (bearing): bod na východě je při bearing 90° nahoře
             val x = (dx * c + dy * s + cx).toFloat()
             val y = (-dx * s + dy * c + cy).toFloat()
             if (x < minX || x > maxX || y < minY || y > maxY) continue
-            // celé pixely => bitmapa 1:1, ostrá
-            val left = Math.round(x - bmp.width / 2f).toFloat()
-            val top = Math.round(y - bmp.height / 2f).toFloat()
+            // stojící vozidlo na celé pixely => bitmapa 1:1, ostrá; jedoucí sub-pixelově (zaokrouhlení by pomalý vůz
+            // posouvalo po skocích o pixel, viditelné trhání)
+            val left = if (mv) x - bmp.width / 2f else Math.round(x - bmp.width / 2f).toFloat()
+            val top = if (mv) y - bmp.height / 2f else Math.round(y - bmp.height / 2f).toFloat()
             val sp = atlas.get(bmp)
             if (sp == null) { canvas.drawBitmap(bmp, left, top, bmpPaint); continue }   // (atlas plný) výjimečně zvlášť
             batch(sp.page).add(left, top, sp)
@@ -335,3 +388,15 @@ private class SpriteAtlas {
         const val MAX_PAGES = 12         // ~48 MB; víc unikátních štítků naráz se nestává
     }
 }
+
+/**
+ * O kolik ms dopočítat polohy od posledního snímku poloh ([GoogleVehicleLayer.stampNanos]) k právě kreslenému snímku.
+ * Polohy se počítají jen ~30× za vteřinu, kreslí se každý snímek (60–120 Hz): bez dopočtu by vozidla poskakovala.
+ */
+private fun extrapolationMs(layer: GoogleVehicleLayer): Double {
+    if (layer.stampNanos == 0L) return 0.0
+    return ((layer.frameNanos - layer.stampNanos) / 1e6).coerceIn(0.0, MAX_EXTRAPOLATION_MS)
+}
+
+/** Delší mezeru mezi snímky poloh (tečky po 250 ms, zaseknutí) nedopočítávat, ať vůz nepřejede. */
+private const val MAX_EXTRAPOLATION_MS = 300.0

@@ -149,6 +149,88 @@ class VehicleMotionTest {
     }
 
     @Test
+    fun restampedSamePositionIsNotTreatedAsStanding() {
+        // zdroj polohu drží a server ji posílá s novým časem pozorování: stejné souřadnice nejsou stání
+        val m = motion(north(100.0))
+        m.setRoute(route())
+        advance(6_000); fix(m, north(160.0))
+        run(m, 6_000)
+        val a = m.positionAt(now).latitude
+        val held = fix(m, north(160.0))
+        assertFalse(held)
+        val lats = run(m, 3_000)
+        assertTrue("dál jede (${meters(a, lats.last())} m)", meters(a, lats.last()) > 15.0)
+    }
+
+    @Test
+    fun slowsDownInsteadOfStoppingWhenSlightlyAhead() {
+        // jede 10 m/s, nový fix ukáže, že vůz jel o něco pomaleji (predikce je ~20 m napřed)
+        val m = motion(north(100.0))
+        m.setRoute(route())
+        advance(6_000); fix(m, north(160.0))
+        run(m, 6_000)
+        advance(100); fix(m, north(205.0))       // 45 m za 6,1 s ≈ 7,4 m/s
+        var prev = m.positionAt(now).latitude
+        var minSpeed = Double.MAX_VALUE
+        repeat(40) {
+            advance(100)
+            val l = m.positionAt(now).latitude
+            minSpeed = minOf(minSpeed, meters(prev, l) * 10.0)
+            prev = l
+        }
+        assertTrue("zpomalí, nezastaví (nejnižší rychlost $minSpeed m/s)", minSpeed > 2.0)
+    }
+
+    @Test
+    fun holdsAtStopWhenFixArrivesAtStop() {
+        // zastávka ~555 m; vůz přijede a fix ho ukáže kousek ZA sloupkem (průměrná rychlost z intervalu je vysoká)
+        val m = motion(north(470.0))
+        m.setRoute(route())
+        advance(6_000); fix(m, north(520.0))
+        run(m, 6_000)
+        advance(100); fix(m, north(565.0))       // u zastávky (10 m za sloupkem)
+        val stopLat = north(566.0).latitude
+        for (l in run(m, 6_000)) assertTrue("neodjede ze zastávky bez dat o odjezdu", l <= stopLat)
+        fix(m, north(567.0))                     // pořád stojí u zastávky
+        for (l in run(m, 6_000)) assertTrue("stojí u zastávky", l <= stopLat)
+        fix(m, north(610.0))                     // odjel
+        val after = run(m, 4_000)
+        assertTrue("po odjezdu pokračuje", after.last() > stopLat)
+    }
+
+    @Test
+    fun bigCorrectionTakesExactlyOneSecondForwardAndBack() {
+        val m = motion(north(100.0))
+        m.setRoute(route())
+        advance(6_000); fix(m, north(160.0))
+        run(m, 18_000)                           // výpadek dat: predikce dojede na horizont a čeká
+        val waited = meters(north(0.0).latitude, m.positionAt(now).latitude)
+        fix(m, north(470.0))                     // vůz mezitím ujel 310 m
+        assertTrue("predikce čekala daleko za vozem ($waited m)", 470.0 - waited > 100.0)
+        run(m, 1_000)
+        val ahead = meters(north(0.0).latitude, m.positionAt(now).latitude)
+        assertTrue("za 1 s na realtime poloze ($ahead m)", ahead in 465.0..495.0)
+        // a zpět: predikce dojela k zastávce (555 m), vůz ale stojí o 75 m dřív
+        run(m, 5_000)
+        val atStop = meters(north(0.0).latitude, m.positionAt(now).latitude)
+        fix(m, north(480.0))
+        run(m, 1_000)
+        val back = meters(north(0.0).latitude, m.positionAt(now).latitude)
+        assertTrue("za 1 s zpět na realtime poloze ($atStop -> $back m)", back in 475.0..495.0)
+    }
+
+    @Test
+    fun withoutPredictionMoveTakesOneSecondAndEases() {
+        val m = motion(north(100.0))
+        advance(6_000)
+        m.onFix(north(600.0).latitude, north(600.0).longitude, wallNow, predict = false)
+        val lats = run(m, 1_000)
+        assertEquals(north(600.0).latitude, lats.last(), 1e-9)
+        // plynulý rozjezd: první desetina vteřiny ujede méně než desetinu dráhy
+        assertTrue(meters(north(100.0).latitude, lats.first()) < 50.0)
+    }
+
+    @Test
     fun headingAgainstRouteDirectionIgnoresRoute() {
         val m = motion(north(500.0))
         m.setRoute(route())

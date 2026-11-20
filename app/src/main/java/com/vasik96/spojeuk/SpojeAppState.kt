@@ -119,6 +119,9 @@ class SpojeAppState(
     var mapError by mutableStateOf<String?>(null)
     var selectedVehicle by mutableStateOf<Vehicle?>(null)
 
+    /** Zastávka / nástupiště vybrané na mapě (panel s odjezdy). */
+    var selectedStop by mutableStateOf<MapStop?>(null)
+
     /** Víc vozů pod jedním ťuknutím (štítky přes sebe, např. dva vlaky v jedné stanici): mapa nabídne výběr. */
     var vehicleChoices by mutableStateOf<List<Vehicle>>(emptyList())
 
@@ -131,6 +134,12 @@ class SpojeAppState(
         vehicleSelectedAtMs = android.os.SystemClock.elapsedRealtime()
         android.util.Log.d("SheetLag", "selectVehicle: +${vehicleSelectedAtMs - TouchDiag.lastUpAt} ms od zvednutí prstu")
         selectedVehicle = v
+        selectedStop = null
+    }
+
+    fun selectStop(s: MapStop) {
+        selectedVehicle = null
+        selectedStop = s
     }
     var tripRoute by mutableStateOf<List<LatLng>>(emptyList())
     var tripRouteSegments by mutableStateOf<List<List<LatLng>>>(emptyList())
@@ -262,6 +271,42 @@ class SpojeAppState(
                 withContext(Dispatchers.Main) {
                     routeLoading = false
                 }
+            }
+        }
+        routeJob = job
+    }
+
+    /** Odjezd ze zastávky na mapě: celá trasa spoje, nalezení vozu (přiblížení / zvýraznění) jako u spojení. */
+    fun loadStopDepartureRoute(api: TransitRepository, d: StopDeparture, stop: MapStop, scope: CoroutineScope) {
+        routeJob?.cancel()
+        selectedStop = null
+        selectedVehicle = null
+        focusedTripVehicle = null
+        tripRoute = emptyList()
+        tripRouteSegments = emptyList()
+        fullRoute = emptyList()
+        tripStops = emptyList()
+        journeyStops = null
+        journeyWalks = emptyList()
+        walkRoute = null
+        routeLoading = true
+        val job = scope.launch {
+            try {
+                val ref = api.stopDepartureRef(d, stop)
+                focusedTripRef = ref
+                focusTrip = ref
+                highlightedTrip = ref
+                val (points, stops) = api.tripRouteById(d.tid)
+                if (!isActive) return@launch
+                tripRoute = points.map { LatLng(it.first, it.second) }
+                fullRoute = emptyList()
+                tripStops = stops.map { LatLng(it.first, it.second) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("SpojeAppState", "Chyba při načítání trasy odjezdu: ${e.message}")
+            } finally {
+                routeLoading = false
             }
         }
         routeJob = job

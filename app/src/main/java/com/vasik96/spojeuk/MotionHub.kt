@@ -31,6 +31,9 @@ internal class MotionHub(
         var wantKey: String? = null      // jakou trasu vůz chce (null = pohyb po přímce)
         var routeKey: String? = null     // pro jakou trasu už běží / doběhlo načítání
         var lastTick = 0L
+        /** Rychlost vykreslené polohy (stupně za ms) z posledního ticku: overlay z ní dopočítá polohu v každém snímku. */
+        var velLat = 0.0
+        var velLng = 0.0
         var routeJob: Job? = null
     }
 
@@ -52,6 +55,8 @@ internal class MotionHub(
     }
 
     fun positionOf(k: String): LatLng? = entries[k]?.pos
+
+    fun entryOf(k: String): Entry? = entries[k]
 
     /**
      * Voláno při každé nové dávce vozidel. Každý nový fix se VŽDY odanimuje z aktuální pozice do nové (A -> B).
@@ -129,12 +134,17 @@ internal class MotionHub(
             if (view != null && !view.contains(e.pos.latitude, e.pos.longitude)) {
                 if (now - e.lastTick < OFFSCREEN_TICK_MS) continue
             }
+            val dt = now - e.lastTick
             e.lastTick = now
             val p = e.motion.positionAt(now)
             if (p != e.pos) {
+                if (dt in 1..1_500) {
+                    e.velLat = (p.latitude - e.pos.latitude) / dt
+                    e.velLng = (p.longitude - e.pos.longitude) / dt
+                } else { e.velLat = 0.0; e.velLng = 0.0 }
                 e.pos = p
                 changed = true
-            }
+            } else { e.velLat = 0.0; e.velLng = 0.0 }
         }
         return changed
     }
@@ -142,8 +152,14 @@ internal class MotionHub(
     /** Posune jediné vozidlo (zvýrazněné, které se kreslí zvlášť a hýbe se plynule). */
     fun tickKey(k: String, now: Long) {
         val e = entries[k] ?: return
+        val dt = now - e.lastTick
         e.lastTick = now
-        e.pos = e.motion.positionAt(now)
+        val p = e.motion.positionAt(now)
+        if (dt in 1..1_500) {
+            e.velLat = (p.latitude - e.pos.latitude) / dt
+            e.velLng = (p.longitude - e.pos.longitude) / dt
+        }
+        e.pos = p
     }
 
     fun clear() {
