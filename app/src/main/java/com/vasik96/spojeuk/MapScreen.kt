@@ -1945,7 +1945,7 @@ private fun rememberShownRoute(appState: SpojeAppState, showFullRoute: Boolean):
     return s
 }
 
-private const val ROUTE_FADE_IN_MS = 350
+private const val ROUTE_FADE_IN_MS = 525
 private const val ROUTE_FADE_OUT_MS = 260
 
 /** Druh vozidla pro výběr z více vozidel: název (jednotné číslo) a ikona. Trolejbus podle `mode` ze serveru. */

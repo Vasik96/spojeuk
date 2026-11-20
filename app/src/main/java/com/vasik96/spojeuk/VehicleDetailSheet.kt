@@ -111,7 +111,7 @@ internal fun VehicleDetailBottomSheet(
         }
     }
 
-    InlineBottomSheet(onDismiss = onDismiss) {
+    InlineBottomSheet(onDismiss = onDismiss) { closeSheet ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -200,7 +200,7 @@ internal fun VehicleDetailBottomSheet(
                                 appState.tripRoute = points.map { LatLng(it.first, it.second) }
                                 appState.tripStops = stops.map { LatLng(it.first, it.second) }
                                 appState.journeyStops = null
-                                onDismiss()
+                                closeSheet() // plynule sjede dolů, trasa se mezitím objevuje
                             } else {
                                 android.widget.Toast.makeText(ctx, tr(R.string.route_not_found), android.widget.Toast.LENGTH_SHORT).show()
                             }
@@ -322,7 +322,8 @@ private fun FeatureChip(icon: androidx.compose.ui.graphics.vector.ImageVector, t
 @Composable
 internal fun InlineBottomSheet(
     onDismiss: () -> Unit,
-    content: @Composable ColumnScope.() -> Unit
+    /** Parametr obsahu: zavření s animací (sjetí dolů), na rozdíl od [onDismiss], které sheet odstraní hned. */
+    content: @Composable ColumnScope.(close: () -> Unit) -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val shown = remember { Animatable(0f) }          // 0 = schováno, 1 = zobrazeno
@@ -393,7 +394,7 @@ internal fun InlineBottomSheet(
                         .height(4.dp)
                         .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), RoundedCornerShape(2.dp))
                 )
-                content()
+                content(::dismiss)
             }
         }
     }

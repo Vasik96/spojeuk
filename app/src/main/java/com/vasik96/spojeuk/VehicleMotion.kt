@@ -312,8 +312,13 @@ private const val FAST_ANIM_DURATION_MS = 1_000.0
 /** Skok delší než tohle není jízda (výměna vozu za jiný, chyba zdroje): bez animace. */
 private const val TELEPORT_M = 3_000.0
 
-/** O kolik sekund jízdy smí predikce předběhnout poslední ověřenou polohu (pak vůz počká na další fix). */
+/**
+ * O kolik sekund jízdy smí predikce předběhnout poslední ověřenou polohu (pak vůz počká na další fix): nejméně
+ * tolik, a jinak podle rytmu dat (obvyklý odstup fixů + jejich stáří + brzdná doba), ať vůz dojede k další poloze
+ * bez brzdění. Dál než k neprojeté zastávce se nepředpovídá nikdy.
+ */
 private const val LEAD_HORIZON_S = 6.0
+private const val MAX_LEAD_HORIZON_S = 30.0
 
 /** Poloha starší než tohle (s) se už nepředpovídá, vůz zůstává tam, kde ho server naposledy viděl. */
 private const val MAX_PREDICT_DATA_AGE_S = 45.0
@@ -371,6 +376,7 @@ internal class VehicleMotion(
     private var lastObsMs = obsMs
     private var lastFixRecvMs = elapsed()
     private var intervalMs = 6_000.0         // obvyklý odstup nových fixů (pro plynulou jízdu bez trasy)
+    private var lastAgeS = 0.0               // stáří posledního fixu při příjmu
     private var lastDir: Pair<Double, Double>? = null
 
     // lineární animace (bez predikce, bez trasy)
@@ -491,6 +497,7 @@ internal class VehicleMotion(
             obsMs <= 0 -> 0.0
             else -> ((wall() - obsMs) / 1000.0).coerceAtLeast(0.0)
         }
+        lastAgeS = ageS
 
         val proj = r?.project(
             p = np,
@@ -581,21 +588,29 @@ internal class VehicleMotion(
         val dt = if (lastTickMs <= 0L) 0.0 else ((now - lastTickMs) / 1000.0).coerceIn(0.0, 2.0)
         lastTickMs = now
 
-        // cíl predikce: poslední ověřená poloha + naměřená rychlost × čas od ní (nejvýš LEAD_HORIZON_S)
-        val leadS = ((now - sFixAtMs) / 1000.0).coerceIn(0.0, LEAD_HORIZON_S)
-        var sTarget = (sFix + vEst * leadS).coerceAtMost(r.totalMeters)
-        // zastávky: dál než k příští zastávce, kterou realtime poloha ještě neprojela, se nepředpovídá;
-        // vůz u ní zastaví a pokračuje, až data ukážou, že odjel
-        r.nextStopAfter(sFix + STOP_PASSED_M)?.let { if (it < sTarget) sTarget = it }
+        // hranice predikce: nejvýš LEAD_HORIZON_S jízdy za poslední ověřenou polohou a ne dál než k příští zastávce,
+        // kterou realtime poloha ještě neprojela (vůz u ní zastaví a pokračuje, až data ukážou, že odjel)
+        // příští fix přijde zhruba za obvyklý odstup + stáří dat od pozorování sFix; do té doby (a ještě brzdnou
+        // dráhu) má být kam jet, jinak vůz před každou aktualizací zbytečně brzdí
+        val horizonS = (intervalMs / 1000.0 + lastAgeS.coerceAtMost(30.0) + vEst / (2.0 * BRAKE_MS2) + 1.0)
+            .coerceIn(LEAD_HORIZON_S, MAX_LEAD_HORIZON_S)
+        var sLimit = (sFix + vEst * horizonS).coerceAtMost(r.totalMeters)
+        r.nextStopAfter(sFix + STOP_PASSED_M)?.let { if (it < sLimit) sLimit = it }
+        // cíl predikce: poslední ověřená poloha + naměřená rychlost × čas od ní (pohybuje se rychlostí vEst)
+        val leadS = ((now - sFixAtMs) / 1000.0).coerceIn(0.0, horizonS)
+        val sTarget = (sFix + vEst * leadS).coerceAtMost(sLimit)
         val err = sTarget - sDisp
         val vMax = maxOf(vEst * 1.5, vEst + 3.0).coerceAtMost(vMaxAbs)
-        // plynulé brzdění do cíle (zastávka / konec horizontu predikce): v ≤ √(2·a·zbývající dráha)
-        val vBrake = sqrt(2.0 * BRAKE_MS2 * err.coerceAtLeast(0.0))
-        val vCmd = if (err <= 0.0) 0.0 else minOf((vEst + err / RESPONSE_S).coerceIn(0.0, vMax), vBrake)
+        // Rychlost = naměřená + dorovnání odchylky od cíle. Predikce kousek napřed (nová poloha potvrdila, že sedí)
+        // jen trochu zpomalí, nezastaví (dřív err ≤ 0 → stát). Brzdí se jen k pevné hranici (zastávka / konec
+        // horizontu): v ≤ √(2·a·dráha k hranici); dřív se brzdilo k pohyblivému cíli a vůz po každé aktualizaci,
+        // kdy byl blízko cíle, prudce zpomalil.
+        val vBrake = sqrt(2.0 * BRAKE_MS2 * (sLimit - sDisp).coerceAtLeast(0.0))
+        val vCmd = minOf((vEst + err / RESPONSE_S).coerceIn(0.0, vMax), vBrake)
         vDisp = if (vDisp < vCmd) (vDisp + accel * dt).coerceAtMost(vCmd) else (vDisp - decel * dt).coerceAtLeast(vCmd)
-        // jen dopředu a nikdy za cíl predikce
-        sDisp = (sDisp + vDisp * dt).coerceAtMost(maxOf(sDisp, sTarget)).coerceIn(0.0, r.totalMeters)
-        if (sDisp >= sTarget && vCmd == 0.0) vDisp = 0.0
+        // jen dopředu a nikdy za hranici predikce
+        sDisp = (sDisp + vDisp * dt).coerceAtMost(maxOf(sDisp, sLimit)).coerceIn(0.0, r.totalMeters)
+        if (sDisp >= sLimit && vCmd == 0.0) vDisp = 0.0
 
         var pos = r.pointAt(sDisp)
         if (gliding) {

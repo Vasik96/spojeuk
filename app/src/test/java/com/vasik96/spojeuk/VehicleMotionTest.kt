@@ -58,6 +58,31 @@ class VehicleMotionTest {
     }
 
     @Test
+    fun keepsGoingWhenNewFixConfirmsPrediction() {
+        // jede stálých 10 m/s mezi zastávkami (555 m a 1 111 m), poloha po 6 s; predikce trefuje nové fixy
+        val m = motion(north(600.0))
+        m.setRoute(route())
+        m.positionAt(now)
+        var pos = 600.0
+        val speeds = ArrayList<Double>()
+        repeat(7) { i ->
+            pos += 60.0
+            var prev = m.positionAt(now).latitude
+            repeat(60) {                       // 6 s jízdy, pak nový fix tam, kde vůz opravdu je
+                advance(100)
+                val l = m.positionAt(now).latitude
+                if (i >= 3) speeds += meters(prev, l) * 10.0   // m/s, po rozjezdu
+                prev = l
+            }
+            fix(m, north(pos))
+        }
+        // dřív vůz před každou aktualizací brzdil k pevnému horizontu 6 s a u fixu, který predikce trefila, stál
+        val min = speeds.min()
+        assertTrue("nezastaví u potvrzené predikce (nejnižší rychlost $min m/s)", min > 8.0)
+        assertTrue("nejede rychleji, než jede vůz (${speeds.max()} m/s)", speeds.max() < 12.5)
+    }
+
+    @Test
     fun neverMovesBackwardWhenPredictionIsAhead() {
         val m = motion(north(100.0))
         m.setRoute(route())
