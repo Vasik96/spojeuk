@@ -48,17 +48,35 @@ internal fun markerBitmap(ctx: Context, line: String, style: VehicleStyle, phase
  * Barevná skupina vozu (štítek i tečka). Autobusy podle zpoždění, ostatní druhy dopravy vlastní barvou
  * (zpoždění vlaku / tramvaje / metra je vidět v detailu), metro v barvách linek A / B / C.
  */
-internal enum class VehicleStyle(val color: Int, val darkText: Boolean = false) {
-    BUS(0xFF2E7D32.toInt()),
-    BUS_LATE(0xFFC62828.toInt()),
-    TRAIN(0xFF0277BD.toInt()),
-    TRAM(0xFF7B1FA2.toInt()),
-    METRO_A(0xFF00A562.toInt()),
-    METRO_B(0xFFF8B322.toInt(), darkText = true),
-    METRO_C(0xFFD6006F.toInt()),       // malinová: oficiální červená C splývala se zpožděnými autobusy
-    METRO(0xFF37474F.toInt()),
-    FERRY(0xFF1565C0.toInt()),
-    FUNICULAR(0xFF6D4C41.toInt()),
+internal enum class VehicleStyle(
+    val color: Int,
+    /** Barva trasy spoje na světlé mapě: tmavší odstín barvy vozu (stejně jako na webu). */
+    val route: Int,
+    /** Barva trasy na tmavé mapě: světlejší odstín. */
+    val routeDark: Int,
+    val darkText: Boolean = false,
+) {
+    BUS(0xFF2E7D32.toInt(), 0xFF1B5E20.toInt(), 0xFF66BB6A.toInt()),
+    BUS_LATE(0xFFC62828.toInt(), 0xFF1B5E20.toInt(), 0xFF66BB6A.toInt()),   // trasa zpožděného autobusu je autobusová
+    TRAIN(0xFF0277BD.toInt(), 0xFF01579B.toInt(), 0xFF4FC3F7.toInt()),
+    TRAM(0xFF00897B.toInt(), 0xFF00695C.toInt(), 0xFF4DB6AC.toInt()),       // tyrkysová: fialová moc poutala pozornost
+    METRO_A(0xFF00A562.toInt(), 0xFF007A48.toInt(), 0xFF4CD08F.toInt()),
+    METRO_B(0xFFF8B322.toInt(), 0xFFC68A00.toInt(), 0xFFFFD36B.toInt(), darkText = true),
+    METRO_C(0xFFD6006F.toInt(), 0xFFA10054.toInt(), 0xFFF0609F.toInt()),     // malinová: červená C splývala se zpožděnými autobusy
+    METRO(0xFF37474F.toInt(), 0xFF263238.toInt(), 0xFF90A4AE.toInt()),
+    FERRY(0xFF1565C0.toInt(), 0xFF0D47A1.toInt(), 0xFF64B5F6.toInt()),
+    FUNICULAR(0xFF6D4C41.toInt(), 0xFF4E342E.toInt(), 0xFFA1887F.toInt()),
+}
+
+/** Druh dopravy spoje z jízdního řádu (kategorie + linka metra) jako styl vozu. */
+internal fun tripStyle(category: MapCategory, line: String): VehicleStyle = when (category) {
+    MapCategory.TRAIN -> VehicleStyle.TRAIN
+    MapCategory.TRAM -> VehicleStyle.TRAM
+    MapCategory.METRO -> when (line.trim().uppercase()) {
+        "A" -> VehicleStyle.METRO_A; "B" -> VehicleStyle.METRO_B; "C" -> VehicleStyle.METRO_C
+        else -> VehicleStyle.METRO
+    }
+    MapCategory.BUS -> VehicleStyle.BUS
 }
 
 /** Druh dopravy: ze serveru (`mode`), u starších odpovědí odvozený z PID uid ("g0:…" tramvaj) a linek metra. */

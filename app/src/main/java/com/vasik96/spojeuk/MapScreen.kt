@@ -481,7 +481,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         if (hits.size == 1) appState.selectVehicle(hits[0])
                         else if (hits.size > 1) appState.vehicleChoices = hits
                         else if (cameraPositionState.position.zoom >= STOP_MIN_ZOOM_GOOGLE) {
-                            googleLayer.hitTestStop(ll.latitude, ll.longitude, degPerDp)?.let { appState.selectStop(it) }
+                            googleLayer.hitTestStop(ll.latitude, ll.longitude, degPerDp)?.let { appState.openStop(api, it, scope) }
                         }
                     }
                 },
@@ -506,7 +506,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     onDispose { googleLayer.detach() }
                 }
                 if (!isMapReady) return@GoogleMap
-                val primaryColor = MaterialTheme.colorScheme.primary
+                // barva trasy podle druhu dopravy spoje (na světlé mapě tmavší, na tmavé světlejší odstín barvy vozu)
+                val primaryColor = appState.routeStyle?.let { Color(if (useDarkMap) it.routeDark else it.route) }
+                    ?: MaterialTheme.colorScheme.primary
 
                 // trasa se plynule objeví / zmizí (shownRoute drží zrušenou trasu, dokud nezmizí)
                 val routeAlpha = shownRoute.alpha.value
@@ -572,11 +574,13 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 active = active,
                 useDarkMap = useDarkMap,
                 activeVehicles = activeVehicles,
-                primaryColor = MaterialTheme.colorScheme.primary,
+                primaryColor = appState.routeStyle?.let { Color(if (useDarkMap) it.routeDark else it.route) }
+                    ?: MaterialTheme.colorScheme.primary,
                 showFullRoute = showFullRoute,
                 phase = phase,
                 targetUid = targetUid,
                 onMapReady = { maplibreMapRef = it },
+                onStopTap = { appState.openStop(api, it, scope) },
                 onStyleLoaded = { isMapReady = true },
                 onMapDisposed = {
                     maplibreMapRef = null
@@ -806,6 +810,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             SmallFloatingActionButton(
                 onClick = {
                     appState.tripRoute = emptyList()
+                    appState.routeStyle = null
                     appState.tripRouteSegments = emptyList()
                     appState.fullRoute = emptyList()
                     appState.tripStops = emptyList()
@@ -1225,6 +1230,7 @@ private fun MapLibreScreenContent(
     hub: MotionHub,
     stopIndex: StopIndex?,
     stopIcons: StopIcons,
+    onStopTap: (MapStop) -> Unit,
     onMapDisposed: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -1413,7 +1419,7 @@ private fun MapLibreScreenContent(
                                             .map { it to Geo.distanceM(ll.latitude, ll.longitude, it.lat, it.lng) }
                                             .filter { it.second <= r }
                                             .minByOrNull { it.second }
-                                            ?.let { appState.selectStop(it.first) }
+                                            ?.let { onStopTap(it.first) }
                                     }
                                 }
                                 tapValid = false

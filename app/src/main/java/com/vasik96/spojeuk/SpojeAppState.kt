@@ -137,11 +137,32 @@ class SpojeAppState(
         selectedStop = null
     }
 
-    fun selectStop(s: MapStop) {
+    /** Odjezdy spočítané před otevřením panelu (panel naběhne rovnou s nimi), null = panel si je načte sám. */
+    var selectedStopDeps: List<StopDeparture>? = null
+    private var stopOpenSeq = 0
+
+    fun selectStop(s: MapStop, deps: List<StopDeparture>? = null) {
         selectedVehicle = null
+        selectedStopDeps = deps
         selectedStop = s
     }
+
+    /**
+     * Ťuknutí na zastávku: odjezdy se spočítají ještě před otevřením panelu, ať naběhne hotový (dřív se otevřel
+     * prázdný a odjezdy do něj naskočily až po chvíli). Trvá-li výpočet déle, panel se otevře a načte je sám.
+     */
+    fun openStop(api: TransitRepository, s: MapStop, scope: CoroutineScope) {
+        val seq = ++stopOpenSeq
+        scope.launch {
+            val deps = kotlinx.coroutines.withTimeoutOrNull(1_200) {
+                runCatching { api.stopDepartures(s, STOP_DEPARTURE_HOURS) }.getOrNull()
+            }
+            if (seq == stopOpenSeq) selectStop(s, deps)
+        }
+    }
     var tripRoute by mutableStateOf<List<LatLng>>(emptyList())
+    /** Druh dopravy zobrazené trasy (barva čáry podle motivu mapy), null = barva motivu. */
+    internal var routeStyle by mutableStateOf<VehicleStyle?>(null)
     var tripRouteSegments by mutableStateOf<List<List<LatLng>>>(emptyList())
     var tripStops by mutableStateOf<List<LatLng>>(emptyList())
 
@@ -209,6 +230,7 @@ class SpojeAppState(
     fun clearRoute() {
         routeJob?.cancel()
         routeJob = null
+        routeStyle = null
         tripRoute = emptyList()
         tripRouteSegments = emptyList()
         fullRoute = emptyList()
@@ -239,6 +261,9 @@ class SpojeAppState(
         focusTrip = ref
         highlightedTrip = ref
         selectedTab = 1
+
+        // barva trasy podle první jízdy spojení (autobus, vlak, tramvaj, metro)
+        routeStyle = journey.rawLegs.firstOrNull { it.kind == "ride" }?.let { api.tripStyleOf(it.tid) }
 
         val job = scope.launch(Dispatchers.Default) {
             try {
@@ -298,6 +323,7 @@ class SpojeAppState(
                 highlightedTrip = ref
                 val (points, stops) = api.tripRouteById(d.tid)
                 if (!isActive) return@launch
+                routeStyle = tripStyle(d.category, d.line)
                 tripRoute = points.map { LatLng(it.first, it.second) }
                 fullRoute = emptyList()
                 tripStops = stops.map { LatLng(it.first, it.second) }
@@ -323,6 +349,7 @@ class SpojeAppState(
                 if (!isActive) return@launch
                 if (points.isNotEmpty()) {
                     tripRouteSegments = emptyList()
+                    routeStyle = vehicleStyle(vehicle)
                     tripRoute = points.map { LatLng(it.first, it.second) }
                     tripStops = stops.map { LatLng(it.first, it.second) }
                     journeyStops = null

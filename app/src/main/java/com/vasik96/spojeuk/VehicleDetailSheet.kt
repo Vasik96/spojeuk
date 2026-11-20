@@ -197,6 +197,7 @@ internal fun VehicleDetailBottomSheet(
                             val stops = api.tripStopLocations(vehicle)
                             if (points.isNotEmpty()) {
                                 appState.tripRouteSegments = emptyList()
+                                appState.routeStyle = vehicleStyle(vehicle)
                                 appState.tripRoute = points.map { LatLng(it.first, it.second) }
                                 appState.tripStops = stops.map { LatLng(it.first, it.second) }
                                 appState.journeyStops = null

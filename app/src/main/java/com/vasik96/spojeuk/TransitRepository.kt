@@ -105,6 +105,13 @@ class TransitRepository(context: Context? = null) {
         stopIndexFor(b)
     }
 
+    /** Druh dopravy spoje z jízdního řádu (barva trasy), null = jízdní řád ještě není načtený. */
+    internal fun tripStyleOf(tid: Int): VehicleStyle? {
+        val tt = store.current?.timetable ?: return null
+        val line = tt.trips.lineOf(tid) ?: return null
+        return tripStyle(tt.trips.category(tid), line)
+    }
+
     /** Odkaz na spoj odjíždějící ze zastávky na mapě (pro nalezení vozu a zvýraznění). */
     suspend fun stopDepartureRef(d: StopDeparture, stop: MapStop): TripRef = withContext(Dispatchers.Default) {
         val tt = store.ensure().timetable

@@ -97,7 +97,7 @@ internal fun SelectedStopSheet(api: TransitRepository, appState: SpojeAppState) 
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     appState.selectedStop?.let { st ->
         StopDeparturesSheet(
-            st, api,
+            st, api, appState.selectedStopDeps,
             onPick = { d -> appState.loadStopDepartureRoute(api, d, st, scope) },
             onDismiss = { appState.selectedStop = null },
         )
@@ -108,11 +108,13 @@ internal fun SelectedStopSheet(api: TransitRepository, appState: SpojeAppState) 
 private fun StopDeparturesSheet(
     stop: MapStop,
     api: TransitRepository,
+    prefetched: List<StopDeparture>?,
     onPick: (StopDeparture) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    // odjezdy se přepočítají každou minutu (odjeté zmizí)
-    val deps by produceState<List<StopDeparture>?>(null, stop.key) {
+    // odjezdy spočítané před otevřením (SpojeAppState.openStop), pak obnova každou minutu (odjeté zmizí)
+    val deps by produceState(prefetched, stop.key) {
+        if (value != null) delay(60.seconds)
         while (true) {
             value = runCatching { api.stopDepartures(stop, STOP_DEPARTURE_HOURS) }.getOrDefault(value ?: emptyList())
             delay(60.seconds)
@@ -175,15 +177,7 @@ private fun StopDeparturesSheet(
 private fun DepartureRow(d: StopDeparture, now: java.time.LocalDateTime, onClick: () -> Unit) {
     val at = d.day.atStartOfDay().plusSeconds(d.depSec.toLong())
     val min = Duration.between(now, at).toMinutes()
-    val style = when (d.category) {
-        MapCategory.TRAIN -> VehicleStyle.TRAIN
-        MapCategory.TRAM -> VehicleStyle.TRAM
-        MapCategory.METRO -> when (d.line.trim().uppercase()) {
-            "A" -> VehicleStyle.METRO_A; "B" -> VehicleStyle.METRO_B; "C" -> VehicleStyle.METRO_C
-            else -> VehicleStyle.METRO
-        }
-        MapCategory.BUS -> VehicleStyle.BUS
-    }
+    val style = tripStyle(d.category, d.line)
     Row(
         modifier = Modifier
             .fillMaxWidth()
