@@ -444,6 +444,18 @@ class Planner(val tt: Timetable) {
         android.util.Log.d("SearchPerf", "síť pro $missing postavena za ${(System.nanoTime() - t0) / 1_000_000} ms")
     }
 
+    /** Druhy dopravy spojení jako bity (pořadí [MapCategory]). */
+    fun mask(j: Journey): Int {
+        var m = 0
+        for (l in j.rawLegs) if (l.kind == "ride") m = m or (1 shl tt.trips.category(l.tid).ordinal)
+        return m
+    }
+
+    /**
+     * Spojení od [start]. Při víc druzích dopravy (i "všechny") se kromě společného hledání hledá i každým druhem
+     * zvlášť: RAPTOR vrací pro každý odjezd jen nejrychlejší cestu, takže by přímý autobus, který dojede později než
+     * vlak, vůbec nenašel. Výsledky se sloučí do času, který pokryla všechna hledání (ať ve výsledcích nejsou díry).
+     */
     fun find(
         fromPlace: String,
         toPlace: String,
@@ -452,6 +464,30 @@ class Planner(val tt: Timetable) {
         end: LocalDateTime? = null,
         horizonHours: Int = 14,
         modeFilter: ModeFilter = ModeFilter.ALL
+    ): List<Journey> {
+        val cats = if (modeFilter.isAll) MapCategory.entries else MapCategory.entries.filter { it in modeFilter.cats }
+        if (cats.size <= 1) return findOne(fromPlace, toPlace, start, count, end, horizonHours, modeFilter)
+        val runs = listOf(findOne(fromPlace, toPlace, start, count, end, horizonHours, modeFilter)) +
+                cats.map { findOne(fromPlace, toPlace, start, count, end, horizonHours, ModeFilter(setOf(it))) }
+        // hledání, které skončilo na počtu, pokrylo čas jen po svůj poslední odjezd; ostatní celé okno
+        var horizon: LocalDateTime? = null
+        for (r in runs) if (r.size >= count) {
+            val last = r.maxOf { it.depDt }
+            if (horizon == null || last.isBefore(horizon)) horizon = last
+        }
+        val all = LinkedHashMap<String, Journey>()
+        for (r in runs) for (j in r) if (horizon == null || !j.depDt.isAfter(horizon)) all[j.key] = j
+        return prune(all.values.toList(), ::mask)
+    }
+
+    private fun findOne(
+        fromPlace: String,
+        toPlace: String,
+        start: LocalDateTime,
+        count: Int,
+        end: LocalDateTime?,
+        horizonHours: Int,
+        modeFilter: ModeFilter,
     ): List<Journey> {
         val srcs = tt.places[fromPlace] ?: emptyList()
         val dsts = (tt.places[toPlace] ?: emptyList()).toSet()
@@ -486,7 +522,7 @@ class Planner(val tt: Timetable) {
             }
             day = day.plusDays(1)
         }
-        val pruned = prune(out.values.toList())
+        val pruned = prune(out.values.toList(), ::mask)
         return if (modeFilter.isAll) {
             pruned
         } else {
@@ -509,7 +545,7 @@ class Planner(val tt: Timetable) {
         val last = journeys.maxOf { it.depDt }
         val newJs = find(fromPlace, toPlace, last.plusSeconds(60), count, modeFilter = modeFilter)
         val existingKeys = journeys.mapTo(HashSet()) { it.key }
-        return prune(journeys + newJs.filter { it.key !in existingKeys })
+        return prune(journeys + newJs.filter { it.key !in existingKeys }, ::mask)
     }
 
     fun moreEarlier(
@@ -527,15 +563,21 @@ class Planner(val tt: Timetable) {
             .sortedBy { it.depDt }
             .takeLast(count)
         val existingKeys = journeys.mapTo(HashSet()) { it.key }
-        return prune(journeys + newJs.filter { it.key !in existingKeys })
+        return prune(journeys + newJs.filter { it.key !in existingKeys }, ::mask)
     }
 }
 
-/** Odstraní spojení, která jsou horší než jiné (později odjíždí, dřív nedojede, víc přestupů). */
-fun prune(js: List<Journey>): List<Journey> {
+/**
+ * Odstraní spojení, která jsou horší než jiné (později odjíždí, dřív nedojede, víc přestupů). [maskOf] = druhy
+ * dopravy spojení (bity): přebít ho smí jen spojení, které nepoužívá žádný jiný druh, takže vlak nevyřadí
+ * přímý autobus (kdo chce jet jen autobusem, musí ho vidět i při "všechny druhy").
+ */
+fun prune(js: List<Journey>, maskOf: ((Journey) -> Int)? = null): List<Journey> {
+    val masks = if (maskOf != null) js.associateWith(maskOf) else emptyMap()
+    fun sub(k: Journey, j: Journey) = maskOf == null || (masks.getValue(k) and masks.getValue(j).inv()) == 0
     val keep = js.filter { j ->
         !js.any { k ->
-            k !== j &&
+            k !== j && sub(k, j) &&
                     k.depDt >= j.depDt &&
                     k.dep + (k.day.toEpochDay() - j.day.toEpochDay()) * 86400 <= j.dep.toLong() &&
                     k.transfers <= j.transfers &&

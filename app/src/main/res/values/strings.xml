@@ -378,4 +378,6 @@
     <string name="a11y_stop_passed">projeto</string>
     <string name="search_history_removed">Odebráno: %1$s – %2$s</string>
     <string name="common_undo">Zpět</string>
+    <string name="settings_map_stops">Zastávky na mapě</string>
+    <string name="settings_map_stops_desc">Ikony zastávek při přiblížené mapě, ťuknutím na zastávku se zobrazí odjezdy.</string>
 </resources>

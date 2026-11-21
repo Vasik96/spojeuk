@@ -353,4 +353,6 @@
     <string name="a11y_stop_passed">passed</string>
     <string name="search_history_removed">Removed: %1$s – %2$s</string>
     <string name="common_undo">Undo</string>
+    <string name="settings_map_stops">Stops on the map</string>
+    <string name="settings_map_stops_desc">Stop icons on a zoomed-in map; tap a stop to see its departures.</string>
 </resources>

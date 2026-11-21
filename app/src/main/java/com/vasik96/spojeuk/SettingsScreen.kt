@@ -2,6 +2,8 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.material.icons.filled.Place
+
 import androidx.compose.foundation.layout.Box
 
 import androidx.compose.animation.AnimatedContent
@@ -528,6 +530,57 @@ private fun SettingsMain(
                             contentDescription = null,
                             modifier = Modifier.size(SwitchDefaults.IconSize),
                             tint = if (compactBannerChecked) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surfaceContainerHighest
+                        )
+                    }
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        val mapStopsChecked = appState.showMapStops
+
+        OutlinedCard(
+            onClick = { appState.updateShowMapStops(!mapStopsChecked) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics { role = Role.Switch }
+        ) {
+            Row(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Place,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.settings_map_stops),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        stringResource(R.string.settings_map_stops_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = mapStopsChecked,
+                    onCheckedChange = null,
+                    thumbContent = {
+                        Icon(
+                            imageVector = if (mapStopsChecked) Icons.Default.Check else Icons.Default.Close,
+                            contentDescription = null,
+                            modifier = Modifier.size(SwitchDefaults.IconSize),
+                            tint = if (mapStopsChecked) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.surfaceContainerHighest
                         )
                     }

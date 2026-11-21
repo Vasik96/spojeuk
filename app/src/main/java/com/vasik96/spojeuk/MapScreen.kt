@@ -481,12 +481,14 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     }
 
     // ── zastávky (index se postaví, jakmile je načtený jízdní řád) ──
-    val stopIndex by produceState<StopIndex?>(null, api) {
+    val loadedStops by produceState<StopIndex?>(null, api) {
         while (value == null) {
             value = runCatching { api.mapStops() }.getOrNull()
             if (value == null) delay(3_000)
         }
     }
+    // zastávky jdou vypnout v nastavení: bez indexu je obě mapy plynule skryjí a ťuknutí na ně nic neotevře
+    val stopIndex = loadedStops.takeIf { appState.showMapStops }
 
     val stopIcons = rememberStopIcons()
     androidx.compose.runtime.SideEffect { googleLayer.stopIcons = stopIcons }
@@ -542,7 +544,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                         val hits = googleLayer.hitTest(ll.latitude, ll.longitude, degPerDp)
                         if (hits.size == 1) appState.selectVehicle(hits[0])
                         else if (hits.size > 1) appState.vehicleChoices = hits
-                        else if (cameraPositionState.position.zoom >= STOP_MIN_ZOOM_GOOGLE) {
+                        else if (appState.showMapStops && cameraPositionState.position.zoom >= STOP_MIN_ZOOM_GOOGLE) {
                             googleLayer.hitTestStop(ll.latitude, ll.longitude, degPerDp)?.let { appState.openStop(api, it, scope) }
                         }
                     }
@@ -1512,7 +1514,13 @@ private fun MapLibreScreenContent(
     // ── ZASTÁVKY: ikony v záběru (jen přiblížená mapa), přepočet po zastavení kamery ──
     LaunchedEffect(map, styleVersion, stopIndex, stopIcons) {
         val m = map ?: return@LaunchedEffect
-        val idx = stopIndex ?: return@LaunchedEffect
+        val idx = stopIndex
+        if (idx == null) {
+            // zastávky vypnuté v nastavení: vrstva plynule zmizí, ťuknutí už nic nenajde
+            (m.style?.getLayer(STOPS_LAYER) as? SymbolLayer)?.setProperties(PropertyFactory.iconOpacity(0f))
+            shownStops = emptyList()
+            return@LaunchedEffect
+        }
         stopsDirty.set(true)
         var iconsAdded = false
         var stopsShown: Boolean? = null

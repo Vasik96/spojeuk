@@ -442,6 +442,15 @@ class SpojeAppState(
         settingsPrefs.getBoolean("show_only_map_filters", false)
     )
 
+    /** Ikony zastávek na mapě (ťuknutím odjezdy); jde vypnout v nastavení. */
+    var showMapStops by mutableStateOf(settingsPrefs.getBoolean("show_map_stops", true))
+
+    fun updateShowMapStops(show: Boolean) {
+        showMapStops = show
+        settingsPrefs.edit().putBoolean("show_map_stops", show).apply()
+        if (!show) selectedStop = null
+    }
+
     fun updateShowOnlyMapFilters(showOnly: Boolean) {
         showOnlyMapFilters = showOnly
         settingsPrefs.edit().putBoolean("show_only_map_filters", showOnly).apply()
