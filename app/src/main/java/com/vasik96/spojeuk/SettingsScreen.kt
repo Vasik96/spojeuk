@@ -537,8 +537,6 @@ private fun SettingsMain(
             }
         }
 
-        Spacer(Modifier.height(8.dp))
-
         val mapStopsChecked = appState.showMapStops
 
         OutlinedCard(
