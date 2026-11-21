@@ -2025,7 +2025,7 @@ private fun JourneyCard(
                         }
 
                         Text(
-                            "· ",
+                            "·",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
                             fontWeight = FontWeight.Bold
@@ -2053,6 +2053,8 @@ private fun JourneyCard(
                                     tr(R.string.search_delay_min, j.delay)
                                 )
                             }
+
+                            Spacer(Modifier.width(1.dp))
 
                             Surface(
                                 shape = RoundedCornerShape(50),
