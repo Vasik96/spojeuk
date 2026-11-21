@@ -2179,9 +2179,10 @@ private const val ROUTE_FADE_IN_MS = 525
 private const val ROUTE_FADE_OUT_MS = 260
 
 /** Druh vozidla pro výběr z více vozidel: název (jednotné číslo) a ikona. Trolejbus podle `mode` ze serveru. */
-internal fun vehicleKind(v: Vehicle): Pair<Int, ImageVector> =
-    if (v.mode == "trolleybus") R.string.vehicle_kind_trolleybus to Icons.Default.DirectionsBus
-    else when (vehicleStyle(v)) {
+internal fun vehicleKind(v: Vehicle): Pair<Int, ImageVector> {
+    val vs = vehicleStyle(v)
+    return if (vs == VehicleStyle.TROLLEYBUS || vs == VehicleStyle.TROLLEYBUS_LATE) R.string.vehicle_kind_trolleybus to Icons.Default.DirectionsBus
+    else when (vs) {
         VehicleStyle.TRAIN -> R.string.vehicle_kind_train to Icons.Default.Train
         VehicleStyle.TRAM -> R.string.vehicle_kind_tram to Icons.Default.Tram
         VehicleStyle.METRO, VehicleStyle.METRO_A, VehicleStyle.METRO_B, VehicleStyle.METRO_C -> R.string.vehicle_kind_metro to Icons.Default.Subway
@@ -2189,6 +2190,7 @@ internal fun vehicleKind(v: Vehicle): Pair<Int, ImageVector> =
         VehicleStyle.FUNICULAR -> R.string.vehicle_kind_funicular to Icons.Default.Tram
         else -> R.string.vehicle_kind_bus to Icons.Default.DirectionsBus
     }
+}
 
 internal fun categoryIcon(c: MapCategory) = when (c) {
     MapCategory.BUS -> Icons.Default.DirectionsBus

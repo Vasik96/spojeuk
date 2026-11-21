@@ -285,7 +285,7 @@
     <string name="map_pick_vehicle">Které vozidlo?</string>
     <string name="search_filter_title">Čím cestovat</string>
     <string name="vehicle_kind_bus">Bus</string>
-    <string name="vehicle_kind_trolleybus">Bus</string>
+    <string name="vehicle_kind_trolleybus">Trolejbus</string>
     <string name="vehicle_kind_tram">Tramvaj</string>
     <string name="vehicle_kind_metro">Metro</string>
     <string name="vehicle_kind_train">Vlak</string>

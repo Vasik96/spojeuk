@@ -351,7 +351,7 @@ class SpojeAppState(
                 highlightedTrip = ref
                 val (points, stops) = api.tripRouteById(d.tid)
                 if (!isActive) return@launch
-                routeStyle = tripStyle(d.category, d.line)
+                routeStyle = tripStyle(d.category, d.line, d.agency)
                 tripRoute = points.map { LatLng(it.first, it.second) }
                 fullRoute = emptyList()
                 tripStops = stops.map { LatLng(it.first, it.second) }

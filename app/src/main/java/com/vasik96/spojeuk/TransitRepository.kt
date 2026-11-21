@@ -109,7 +109,7 @@ class TransitRepository(context: Context? = null) {
     internal fun tripStyleOf(tid: Int): VehicleStyle? {
         val tt = store.current?.timetable ?: return null
         val line = tt.trips.lineOf(tid) ?: return null
-        return tripStyle(tt.trips.category(tid), line)
+        return tripStyle(tt.trips.category(tid), line, tt.trips.agency[tid].orEmpty())
     }
 
     /** Odkaz na spoj odjíždějící ze zastávky na mapě (pro nalezení vozu a zvýraznění). */
@@ -506,7 +506,7 @@ class TransitRepository(context: Context? = null) {
                     headsign = prettyName(t?.head.orEmpty()),
                     agency = cleanAgencyName(t?.agency.orEmpty()),
                     category = cat,
-                    style = tripStyle(cat, line),
+                    style = tripStyle(cat, line, t?.agency.orEmpty()),
                     trainNumber = t?.takeIf { it.isTrain }?.num?.takeIf { it.isNotBlank() },
                     wheelchair = t?.wheel == 1,
                     stops = leg.stops.map { (sid, arr, dep) -> DetailStop(name(sid), arr, dep) },

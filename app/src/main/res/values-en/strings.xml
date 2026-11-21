@@ -264,7 +264,7 @@
     <string name="map_pick_vehicle">Which vehicle?</string>
     <string name="search_filter_title">Travel by</string>
     <string name="vehicle_kind_bus">Bus</string>
-    <string name="vehicle_kind_trolleybus">Bus</string>
+    <string name="vehicle_kind_trolleybus">Trolleybus</string>
     <string name="vehicle_kind_tram">Tram</string>
     <string name="vehicle_kind_metro">Metro</string>
     <string name="vehicle_kind_train">Train</string>

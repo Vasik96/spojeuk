@@ -125,6 +125,7 @@ internal fun VehicleDetailBottomSheet(
                 val vs = vehicleStyle(vehicle)
                 val badgeStyle = when (vs) {
                     VehicleStyle.BUS, VehicleStyle.BUS_LATE -> VehicleStyle.BUS
+                    VehicleStyle.TROLLEYBUS, VehicleStyle.TROLLEYBUS_LATE -> VehicleStyle.TROLLEYBUS
                     else -> vs
                 }
                 Surface(

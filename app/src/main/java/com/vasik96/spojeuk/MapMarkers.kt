@@ -82,6 +82,8 @@ internal enum class VehicleStyle(
     BUS_LATE(0xFFC62828.toInt(), 0xFF1B5E20.toInt(), 0xFF66BB6A.toInt()),   // trasa zpožděného autobusu je autobusová
     TRAIN(0xFF0277BD.toInt(), 0xFF01579B.toInt(), 0xFF4FC3F7.toInt()),
     TRAM(0xFFEF6C00.toInt(), 0xFFC25400.toInt(), 0xFFFFB74D.toInt()),       // oranžová (dřív fialová)
+    TROLLEYBUS(0xFF009688.toInt(), 0xFF00695C.toInt(), 0xFF4DB6AC.toInt()), // tyrkysová
+    TROLLEYBUS_LATE(0xFFC62828.toInt(), 0xFF00695C.toInt(), 0xFF4DB6AC.toInt()), // trasa zpožděného trolejbusu je trolejbusová
     METRO_A(0xFF00A562.toInt(), 0xFF007A48.toInt(), 0xFF4CD08F.toInt()),
     METRO_B(0xFFF8B322.toInt(), 0xFFC68A00.toInt(), 0xFFFFD36B.toInt(), darkText = true),
     METRO_C(0xFFD6006F.toInt(), 0xFFA10054.toInt(), 0xFFF0609F.toInt()),     // malinová: červená C splývala se zpožděnými autobusy
@@ -91,14 +93,24 @@ internal enum class VehicleStyle(
 }
 
 /** Druh dopravy spoje z jízdního řádu (kategorie + linka metra) jako styl vozu. */
-internal fun tripStyle(category: MapCategory, line: String): VehicleStyle = when (category) {
+/**
+ * Trolejbusové linky DPMÚL (Ústí nad Labem). DPMÚL ani DÚK druh vozidla neposílají a jízdní řád ho nemá,
+ * proto pevný seznam (denní 70–76, 80, 84, 87, 88, noční 43, 46). PID posílá mode = "trolleybus".
+ */
+internal val DPMUL_TROLLEYBUS_LINES = setOf("70", "71", "72", "73", "74", "75", "76", "80", "84", "87", "88", "43", "46")
+
+/** Linka [line] dopravce [agency] je ústecký trolejbus (stejná čísla jinde, třeba v Teplicích, nejsou). */
+internal fun isDpmulTrolleybus(line: String, agency: String): Boolean =
+    line.trim() in DPMUL_TROLLEYBUS_LINES && agency.contains("Ústí nad Labem") && agency.contains("Dopravní podnik")
+
+internal fun tripStyle(category: MapCategory, line: String, agency: String = ""): VehicleStyle = when (category) {
     MapCategory.TRAIN -> VehicleStyle.TRAIN
+    MapCategory.BUS -> if (isDpmulTrolleybus(line, agency)) VehicleStyle.TROLLEYBUS else VehicleStyle.BUS
     MapCategory.TRAM -> VehicleStyle.TRAM
     MapCategory.METRO -> when (line.trim().uppercase()) {
         "A" -> VehicleStyle.METRO_A; "B" -> VehicleStyle.METRO_B; "C" -> VehicleStyle.METRO_C
         else -> VehicleStyle.METRO
     }
-    MapCategory.BUS -> VehicleStyle.BUS
 }
 
 /** Druh dopravy: ze serveru (`mode`), u starších odpovědí odvozený z PID uid ("g0:…" tramvaj) a linek metra. */
@@ -114,6 +126,13 @@ internal fun vehicleStyle(v: Vehicle): VehicleStyle {
             else -> "bus"
         }
     }
+    // vozy DPMÚL (i když polohu dodává DÚK): trolejbusové linky podle seznamu
+    val isTrolleybus = mode == "trolleybus" || (mode == "bus" && v.line.trim() in DPMUL_TROLLEYBUS_LINES &&
+        (v.source == SourceIds.DPMUL || isDpmulTrolleybus(v.line, v.agency) ||
+                (v.source == SourceIds.DUK && v.ids.any { it.startsWith("dpmul:") })))
+
+    if (isTrolleybus) return if (v.delay > 3) VehicleStyle.TROLLEYBUS_LATE else VehicleStyle.TROLLEYBUS
+
     return when (mode) {
         "train" -> VehicleStyle.TRAIN
         "tram" -> VehicleStyle.TRAM

@@ -81,6 +81,7 @@ class StopDeparture(
     val line: String,
     val headsign: String,
     val category: MapCategory,
+    val agency: String = "",
 )
 
 /** Směr jízdy spoje v zastávce [s] (jednotkový, x = východ, y = sever): předchozí → další zastávka. */
@@ -471,7 +472,7 @@ internal fun stopDepartures(planner: Planner, stop: MapStop, from: LocalDateTime
             if (!seen.add((tid.toLong() shl 20) xor dep.toLong())) continue
             val head = tt.trips.head[tid]?.takeIf { it.isNotBlank() }
                 ?: tt.stop(pat.stops.last())?.name ?: ""
-            out += StopDeparture(tid, dep, day, line, prettyName(head), tt.trips.category(tid))
+            out += StopDeparture(tid, dep, day, line, prettyName(head), tt.trips.category(tid), tt.trips.agency[tid].orEmpty())
         }
     }
     out.sortBy { it.depSec }

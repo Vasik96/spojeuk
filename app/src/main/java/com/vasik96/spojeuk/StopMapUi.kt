@@ -177,7 +177,7 @@ private fun StopDeparturesSheet(
 internal fun DepartureRow(d: StopDeparture, now: java.time.LocalDateTime, onClick: () -> Unit) {
     val at = d.day.atStartOfDay().plusSeconds(d.depSec.toLong())
     val min = Duration.between(now, at).toMinutes()
-    val style = tripStyle(d.category, d.line)
+    val style = tripStyle(d.category, d.line, d.agency)
     Row(
         modifier = Modifier
             .fillMaxWidth()
