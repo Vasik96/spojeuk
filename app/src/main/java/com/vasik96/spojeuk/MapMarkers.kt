@@ -22,8 +22,30 @@ private val markerIconCache = ConcurrentHashMap<String, BitmapDrawable>()
 
 // ── štítky vozidel: bitmapa se kreslí na pozadí (prerenderMarker), overlay na mapě si bere hotové (cachedMarkerBitmap) ──
 
-internal fun labelKey(line: String, style: VehicleStyle, phase: Int, late: Int = 0): String =
-    if (late > 0) "$line:${style.name}:$phase:late" else "$line:${style.name}:$phase"
+internal fun labelKey(line: String, style: VehicleStyle, phase: Int, late: Int = 0): String {
+    // zvýrazněné štítky závisí na barvách motivu: verze palety v klíči, ať se po změně motivu nevezme stará bitmapa
+    val base = if (phase != 0) "$line:${style.name}:$phase:p${HighlightPalette.version}" else "$line:${style.name}:$phase"
+    return if (late > 0) "$base:late" else base
+}
+
+/**
+ * Barvy zvýraznění hledaného vozu (pulzování po "Mapa"): z Material You motivu (dynamické barvy),
+ * fáze 1 = primary, fáze 2 = tertiary, obrys v barvě plochy. Nastavuje je MapScreen podle aktuálního motivu.
+ */
+internal object HighlightPalette {
+    @Volatile var bg1 = 0xFFFFD54F.toInt(); private set
+    @Volatile var fg1 = 0xFF000000.toInt(); private set
+    @Volatile var bg2 = 0xFFFF6D00.toInt(); private set
+    @Volatile var fg2 = 0xFFFFFFFF.toInt(); private set
+    @Volatile var stroke = 0xFFFFFFFF.toInt(); private set
+    @Volatile var version = 0; private set
+
+    fun update(bg1: Int, fg1: Int, bg2: Int, fg2: Int, stroke: Int) {
+        if (bg1 == this.bg1 && fg1 == this.fg1 && bg2 == this.bg2 && fg2 == this.fg2 && stroke == this.stroke) return
+        this.bg1 = bg1; this.fg1 = fg1; this.bg2 = bg2; this.fg2 = fg2; this.stroke = stroke
+        version++
+    }
+}
 
 /** Tramvaje a metro mají vlastní barvu (zpoždění barvou nejde): zpoždění > 3 min (pro červený rámeček), jinak 0. */
 internal fun lateMinutes(v: Vehicle): Int {
@@ -124,8 +146,8 @@ internal fun mapCategory(v: Vehicle): MapCategory = when (vehicleStyle(v)) {
 
 /** Barva markeru vozidla (stejná pro štítek i pro tečku při oddálení); fáze zvýraznění mají vlastní barvy. */
 internal fun vehicleColor(style: VehicleStyle, phase: Int = 0): Int = when (phase) {
-    1 -> 0xFFFFD54F.toInt()
-    2 -> 0xFFFF6D00.toInt()
+    1 -> HighlightPalette.bg1
+    2 -> HighlightPalette.bg2
     else -> style.color
 }
 
@@ -152,7 +174,7 @@ internal fun dotBitmap(ctx: Context, color: Int, late: Boolean = false): Bitmap 
         bmp
     }
 
-/** phase: 0 = normální, 1 = zvýraznění A (žlutá, velká), 2 = zvýraznění B (oranžová, menší). */
+/** phase: 0 = normální, 1 = zvýraznění A (primary, velká), 2 = zvýraznění B (tertiary, menší); viz [HighlightPalette]. */
 private fun createLineMarkerDrawable(
     context: Context, line: String, vs: VehicleStyle, phase: Int, late: Int = 0
 ): BitmapDrawable {
@@ -168,7 +190,11 @@ private fun createLineMarkerDrawable(
     val strokePx = if (highlighted) 2.5f * density else 0f
 
     val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = if (phase == 1 || (phase == 0 && vs.darkText)) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+        color = when (phase) {
+            1 -> HighlightPalette.fg1
+            2 -> HighlightPalette.fg2
+            else -> if (vs.darkText) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+        }
         textSize = textSizeDp * density
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         textAlign = Paint.Align.CENTER
@@ -219,7 +245,7 @@ private fun createLineMarkerDrawable(
 
     if (highlighted) {
         val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFFFFFFF.toInt()
+            color = HighlightPalette.stroke
             style = Paint.Style.STROKE
             strokeWidth = strokePx
         }
@@ -362,7 +388,7 @@ internal fun createRouteArrows(route: List<LatLng>, spacingMeters: Float = 300f)
 
 private var startDesc: BitmapDescriptor? = null
 private var endDesc: BitmapDescriptor? = null
-private var stopDesc: BitmapDescriptor? = null
+private val stopDescs = HashMap<Int, BitmapDescriptor>()
 private var cachedStartBitmap: Bitmap? = null
 private var cachedEndBitmap: Bitmap? = null
 
@@ -464,18 +490,14 @@ internal fun routeEndBitmap(ctx: Context): Bitmap {
     return bitmap
 }
 
-/** Kruh pro mezilehlé zastávky na trase (bílý s modrým okrajem a bodem). */
-internal fun routeStopDescriptor(ctx: Context): BitmapDescriptor {
-    stopDesc?.let { return it }
-    val desc = BitmapDescriptorFactory.fromBitmap(routeStopBitmap(ctx))
-    stopDesc = desc
-    return desc
-}
+/** Kruh pro mezilehlé zastávky na trase: bílý s okrajem a bodem v barvě trasy (druhu dopravy). */
+internal fun routeStopDescriptor(ctx: Context, color: Int): BitmapDescriptor =
+    stopDescs.getOrPut(color) { BitmapDescriptorFactory.fromBitmap(routeStopBitmap(ctx, color)) }
 
-private var cachedStopBitmap: Bitmap? = null
+private val cachedStopBitmaps = HashMap<Int, Bitmap>()
 
-internal fun routeStopBitmap(ctx: Context): Bitmap {
-    cachedStopBitmap?.let { return it }
+internal fun routeStopBitmap(ctx: Context, routeColor: Int): Bitmap {
+    cachedStopBitmaps[routeColor]?.let { return it }
     val density = ctx.resources.displayMetrics.density
     val sizePx = (16 * density).toInt()
     val bitmap = createBitmap(sizePx, sizePx)
@@ -492,18 +514,18 @@ internal fun routeStopBitmap(ctx: Context): Bitmap {
     canvas.drawCircle(center, center, radius, bgPaint)
 
     val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFF0277BD.toInt() // Modrá pro zastávky
+        color = routeColor
         style = Paint.Style.STROKE
         strokeWidth = strokePx
     }
     canvas.drawCircle(center, center, radius, strokePaint)
 
     val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFF0277BD.toInt()
+        color = routeColor
         style = Paint.Style.FILL
     }
     canvas.drawCircle(center, center, 2.5f * density, dotPaint)
 
-    cachedStopBitmap = bitmap
+    cachedStopBitmaps[routeColor] = bitmap
     return bitmap
 }

@@ -2,6 +2,9 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material3.IconButton
+
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.EaseInOutSine
@@ -126,19 +129,13 @@ internal fun AppearAnimated(
     ) { content() }
 }
 
+/** Info v horní liště (dřív loga DPMÚL a DÚK): neoficiální aplikace a odkud jsou data. */
 @Composable
-internal fun SourceBadges() {
+internal fun AppInfoButton() {
     var showInfo by remember { mutableStateOf(false) }
 
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(onClickLabel = stringResource(R.string.logos_info)) { showInfo = true },
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        LogoChip(R.drawable.dpmul, stringResource(R.string.logo_dpmul))
-        LogoChip(R.drawable.duk, stringResource(R.string.app_tagline))
+    IconButton(onClick = { showInfo = true }) {
+        Icon(Icons.Outlined.Info, contentDescription = stringResource(R.string.logos_info))
     }
 
     if (showInfo) {
@@ -152,18 +149,6 @@ internal fun SourceBadges() {
             confirmButton = {
                 TextButton(onClick = { showInfo = false }) { Text(stringResource(R.string.common_ok_understood)) }
             }
-        )
-    }
-}
-
-@Composable
-private fun LogoChip(@DrawableRes res: Int, description: String) {
-    Surface(shape = RoundedCornerShape(6.dp), color = Color.White) {
-        Image(
-            painter = painterResource(res),
-            contentDescription = description,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.height(24.dp).padding(horizontal = 6.dp, vertical = 3.dp)
         )
     }
 }

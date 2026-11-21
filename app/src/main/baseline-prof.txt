@@ -1,0 +1,5 @@
+# Baseline profile: kód aplikace se předkompiluje (AOT) už při instalaci / první údržbě, ne až JITem za běhu.
+# Aplikace je malá, takže celý balíček je levnější a spolehlivější než profil generovaný macrobenchmarkem
+# (ten by při každém běhu přeinstaloval aplikaci a smazal data). Profily knihoven (Compose, …) se přidávají samy.
+Lcom/vasik96/spojeuk/**;
+HSPLcom/vasik96/spojeuk/**;->**(**)**

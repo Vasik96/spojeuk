@@ -47,6 +47,26 @@ import android.content.res.Configuration
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.filled.Train
+import androidx.compose.material.icons.filled.Timeline
+import androidx.compose.material.icons.filled.History
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.foundation.background
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.material3.FilterChip
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
@@ -199,6 +219,11 @@ private fun departChipLabel(dt: LocalDateTime): String {
     return "$day ${dt.format(DateTimeFormatter.ofPattern("HH:mm"))}"
 }
 
+/** Popisek zvoleného času: "zítra 08:00", u hledání podle příjezdu "Příjezd do zítra 08:00". */
+private fun whenLabel(dt: LocalDateTime, arrive: Boolean): String =
+    if (arrive) tr(R.string.search_arrive_by_label, departChipLabel(dt).replaceFirstChar { it.lowercase(I18n.locale()) })
+    else departChipLabel(dt)
+
 // stará poloha by předvyplnila špatnou zastávku
 private const val FIX_MAX_AGE_MS = 3 * 60_000L
 
@@ -240,7 +265,6 @@ internal fun SearchScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val listState = appState.listState
-    var isSearchCardVisible by remember { mutableStateOf(true) }
     val context = LocalContext.current
     var locatingTarget by remember { mutableStateOf<String?>(null) }
     // spinner u "Odkud" od úplného začátku (už při první kompozici), dokud předvyplnění neskončí
@@ -542,7 +566,8 @@ internal fun SearchScreen(
             appState.refreshUsage()
         }
 
-        val s = api.newSearch(a.name, b.name, modeFilter = appState.modeFilter, departAt = appState.departAt)
+        val s = api.newSearch(a.name, b.name, modeFilter = appState.modeFilter, departAt = appState.departAt,
+            arriveBy = appState.arriveBy && appState.departAt != null)
         appState.search = s
         appState.journeys = emptyList()
         appState.searched = true
@@ -555,7 +580,11 @@ internal fun SearchScreen(
         appState.loadingEarlier = false
         appState.searchError = null
         appState.searchedFrom = a
-        isSearchCardVisible = true
+        appState.searchedTo = b
+        appState.searchedArriveBy = appState.arriveBy && appState.departAt != null
+        appState.historyRev++
+        appState.detailJourney = null
+        appState.showResults = true
 
         appState.shownKeys.clear()
         listState.requestScrollToItem(0)
@@ -566,6 +595,8 @@ internal fun SearchScreen(
                 if (appState.search === s) {
                     appState.journeys = r
                     appState.hasMore = s.hasMore
+                    // podle příjezdu: nejlepší (nejpozdější odjezd, který ještě stihne) je poslední => ukázat ho
+                    if (appState.searchedArriveBy && r.isNotEmpty()) listState.requestScrollToItem(r.lastIndex)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -733,33 +764,6 @@ internal fun SearchScreen(
 
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
-    val nestedScrollConnection = remember {
-        object : NestedScrollConnection {
-            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                val dy = available.y
-                if (dy < -15f) {
-                    if (isSearchCardVisible) {
-                        isSearchCardVisible = false
-                    }
-                } else if (dy > 15f) {
-                    if (!isSearchCardVisible) {
-                        isSearchCardVisible = true
-                    }
-                }
-                return Offset.Zero
-            }
-        }
-    }
-
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 }
-            .collect { atTop ->
-                if (atTop) {
-                    isSearchCardVisible = true
-                }
-            }
-    }
-
     var cardReady by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         cardReady = true
@@ -830,20 +834,31 @@ internal fun SearchScreen(
             initialMinute = base.minute,
             is24Hour = true
         )
+        var arrive by remember { mutableStateOf(appState.arriveBy) }
         AlertDialog(
             onDismissRequest = { showTimePicker = false },
-            title = { Text(stringResource(R.string.search_departure_time)) },
+            title = { Text(stringResource(if (arrive) R.string.search_arrival_time else R.string.search_departure_time)) },
             text = {
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    // odjezd v / příjezd do
+                    androidx.compose.material3.SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        listOf(false to R.string.search_mode_depart, true to R.string.search_mode_arrive).forEachIndexed { i, (value, label) ->
+                            SegmentedButton(
+                                selected = arrive == value,
+                                onClick = { arrive = value },
+                                shape = androidx.compose.material3.SegmentedButtonDefaults.itemShape(i, 2)
+                            ) { Text(stringResource(label)) }
+                        }
+                    }
                     TimePicker(state = timeState)
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
                     val d = pickedDate ?: todayPrague()
+                    appState.arriveBy = arrive
                     appState.departAt = LocalDateTime.of(d, LocalTime.of(timeState.hour, timeState.minute))
-                    showTimePicker = false
-                    if (appState.from != null && appState.to != null) runSearch()
+                    showTimePicker = false   // hledá se až tlačítkem "Najít spojení"
                 }) { Text(stringResource(R.string.common_done)) }
             },
             dismissButton = {
@@ -963,14 +978,13 @@ internal fun SearchScreen(
                         }
                     }
                 }
-                catsAtOpen?.let { before ->
+                if (catsAtOpen != null) {
                     CategoryFilterDialog(
                         selected = cats,
                         onChange = { appState.updateSearchCategories(it) },
                         onDismiss = {
                             catsAtOpen = null
-                            // změněný výběr: hledat znovu (jako dřív při přepnutí čipu)
-                            if (appState.searchCategories != before && appState.from != null && appState.to != null && appState.searched) runSearch()
+                            // hledá se až tlačítkem "Najít spojení"
                         },
                         title = stringResource(R.string.search_filter_title),
                         allowEmpty = false,   // hledat „ničím“ nedává smysl
@@ -988,7 +1002,8 @@ internal fun SearchScreen(
                         onClick = {
                             if (appState.departAt != null) {
                                 appState.departAt = null
-                                if (appState.from != null && appState.to != null && appState.searched) runSearch()
+                                appState.arriveBy = false
+                                // hledá se až tlačítkem "Najít spojení"
                             }
                         },
                         label = { Text(stringResource(R.string.search_now)) },
@@ -997,7 +1012,7 @@ internal fun SearchScreen(
                     FilterChip(
                         selected = appState.departAt != null,
                         onClick = { showDatePicker = true },
-                        label = { Text(appState.departAt?.let { departChipLabel(it) } ?: stringResource(R.string.search_pick_datetime)) },
+                        label = { Text(appState.departAt?.let { whenLabel(it, appState.arriveBy) } ?: stringResource(R.string.search_pick_datetime)) },
                         leadingIcon = { Icon(Icons.Default.CalendarMonth, null, Modifier.size(18.dp)) }
                     )
                 }
@@ -1044,85 +1059,9 @@ internal fun SearchScreen(
         appState.searchError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
 
-    val resultsHeader: @Composable () -> Unit = {
-        if (appState.searched && !appState.searchLoading) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.search_results), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                if (appState.hasEarlier) {
-                    TextButton(
-                        onClick = { loadEarlier() },
-                        enabled = !appState.loadingEarlier
-                    ) {
-                        if (appState.loadingEarlier) {
-                            Wavy(24.dp)
-                            Spacer(Modifier.width(4.dp))
-                            Text(stringResource(R.string.common_loading))
-                        } else {
-                            Icon(
-                                Icons.Default.ArrowUpward,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(stringResource(R.string.search_earlier))
-                        }
-                    }
-                }
-                Text(
-                    stringResource(R.string.search_found, appState.journeys.size),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-    }
-
     val resultsBody: @Composable (Modifier) -> Unit = { mod ->
         if (!appState.searched) {
-            val infiniteTransition = rememberInfiniteTransition(label = "busFloating")
-            val busFloatY by infiniteTransition.animateFloat(
-                initialValue = -5f,
-                targetValue = 5f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(1400, easing = EaseInOutCubic),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "busFloatY"
-            )
-            val busScale by infiniteTransition.animateFloat(
-                initialValue = 0.97f,
-                targetValue = 1.03f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(1400, easing = EaseInOutCubic),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "busScale"
-            )
-
-            Box(
-                mod.fillMaxWidth(),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        Icons.Default.DirectionsBus,
-                        null,
-                        Modifier
-                            .size(48.dp)
-                            .graphicsLayer {
-                                translationY = busFloatY
-                                scaleX = busScale
-                                scaleY = busScale
-                            },
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Text(stringResource(R.string.search_empty_title), style = MaterialTheme.typography.headlineSmall)
-                    Text(stringResource(R.string.search_empty_text), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
+            SearchEmptyState(mod)
         } else if (appState.searchLoading && appState.journeys.isEmpty()) {
             Box(mod.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 val strokeWidth = with(LocalDensity.current) { 8.dp.toPx() }
@@ -1152,7 +1091,7 @@ internal fun SearchScreen(
                         contentType = { _, _ -> "journey" }
                     ) { index, journey ->
                         AppearAnimated(appState, journey.key, index, Modifier.animateItem()) {
-                            JourneyCard(journey, now, appState.walkRoute) { onShowMapForJourney(journey) }
+                            JourneyCard(journey, now, appState.walkRoute, onOpen = { appState.detailJourney = journey }, onOpenLeg = { appState.legSheet = journey to it }) { onShowMapForJourney(journey) }
                         }
                     }
 
@@ -1173,6 +1112,9 @@ internal fun SearchScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         textAlign = TextAlign.Center
                                     )
+                                appState.searchedArriveBy && appState.journeys.isEmpty() && !appState.searchLoading ->
+                                    Text(stringResource(R.string.search_none_arrive_by), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                appState.searchedArriveBy -> Unit   // "to je vše na dnes" u příjezdu nedává smysl
                                 appState.journeys.isEmpty() && !appState.hasMore && !appState.searchLoading ->
                                     Text(stringResource(R.string.search_none_until_end_of_day), color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 !appState.hasMore ->
@@ -1185,64 +1127,427 @@ internal fun SearchScreen(
         }
     }
 
-    if (isLandscape) {
-        Row(modifier.fillMaxSize()) {
-            // vlevo formulář (scrolluje se, aby tlačítko bylo vždy dostupné)
-            Column(
-                modifier = Modifier
-                    .weight(0.42f)
-                    .fillMaxHeight()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                searchCard()
-            }
+    // ───── hlavní obrazovka: formulář + historie hledání ─────
+    val history = remember(appState.historyRev) { appState.history.recent(15) }
+    val favorites = remember(appState.historyRev) { appState.history.pinned() }
 
-            // vpravo výsledky
-            Column(
-                modifier = Modifier
-                    .weight(0.58f)
-                    .fillMaxHeight()
-            ) {
-                Box(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
-                    resultsHeader()
-                }
-                resultsBody(Modifier.weight(1f))
+    fun searchFromHistory(fromName: String, toName: String) {
+        val a = appState.stops.firstOrNull { it.name == fromName }
+        val b = appState.stops.firstOrNull { it.name == toName }
+        if (a == null || b == null) {
+            toast(tr(R.string.search_history_stop_missing))
+            return
+        }
+        appState.from = a
+        appState.fromQuery = stopLabel(a.name)
+        appState.to = b
+        appState.toQuery = stopLabel(b.name)
+        runSearch()
+    }
+
+    val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
+
+    // Kolikrát byla dvojice odebrána: je součástí klíče řádku. Stav swipu se ukládá podle klíče (rememberSaveable),
+    // takže vrácená položka ("Zpět" nebo nové hledání) by se stejným klíčem převzala stav "smazáno" a hned zmizela.
+    val removedGen = remember { androidx.compose.runtime.mutableStateMapOf<String, Int>() }
+
+    /** Odebrání swipem: hned zmizí, snackbar nabídne "Zpět" (omylem přejetý řádek jde vrátit). */
+    fun removeHistory(fromName: String, toName: String) {
+        val removed = appState.history.remove(fromName, toName) ?: return
+        val pair = "$fromName|$toName"
+        removedGen[pair] = (removedGen[pair] ?: 0) + 1
+        appState.historyRev++
+        scope.launch {
+            snackbar.currentSnackbarData?.dismiss()   // předchozí "Zpět" už neplatí
+            val r = snackbar.showSnackbar(
+                message = tr(R.string.search_history_removed, stopLabel(fromName), stopLabel(toName)),
+                actionLabel = tr(R.string.common_undo),
+                duration = androidx.compose.material3.SnackbarDuration.Long
+            )
+            if (r == androidx.compose.material3.SnackbarResult.ActionPerformed) {
+                appState.history.restore(removed)
+                appState.historyRev++
             }
         }
-    } else {
-        Column(modifier.fillMaxSize()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                AnimatedVisibility(
-                    visible = isSearchCardVisible || !appState.searched,
-                    enter = expandVertically(
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioNoBouncy,
-                            stiffness = Spring.StiffnessMediumLow
-                        )
-                    ) + fadeIn(animationSpec = tween(200)),
-                    exit = shrinkVertically(
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioNoBouncy,
-                            stiffness = Spring.StiffnessMediumLow
-                        )
-                    ) + fadeOut(animationSpec = tween(200))
-                ) {
-                    searchCard()
-                }
-                resultsHeader()
+    }
+
+    fun setFavorite(fromName: String, toName: String, pinned: Boolean) {
+        appState.history.setPinned(fromName, toName, pinned)
+        appState.historyRev++
+    }
+
+    // odjezdy z nejbližší zastávky (podle polohy), obnova každou minutu
+    val nearby by produceState<NearbyDepartures?>(null, appState.userLoc, appState.indexedStops.isNotEmpty()) {
+        while (true) {
+            val u = appState.userLoc
+            if (u != null) runCatching {
+                // stejná zastávka jako předvyplněné "Odkud": nejbližší po cestě (sdílený výpočet), ne vzdušnou čarou
+                val near = runCatching { nearestFor(u.first, u.second).await() }.getOrNull()
+                api.nearbyDepartures(u.first, u.second, near?.refined ?: near?.cands?.firstOrNull())
             }
-            resultsBody(
+                .onFailure { android.util.Log.w("Nearby", "odjezdy z blízké zastávky: ${it.message}") }
+                .getOrNull()?.let { value = it }
+            // dokud není jízdní řád načtený (po startu), zkouší se často, pak jednou za minutu
+            delay(if (value == null) 3_000 else 60_000)
+        }
+    }
+
+    val historyItems: androidx.compose.foundation.lazy.LazyListScope.() -> Unit = {
+        nearby?.let { nb ->
+            item(key = "nearby") {
+                NearbyDeparturesCard(
+                    nb, now,
+                    onPick = { d, platform ->
+                        appState.loadStopDepartureRoute(api, d, platform, scope)
+                        appState.selectedTab = 1
+                    },
+                    onOpenStop = {
+                        appState.focusPoint = com.google.android.gms.maps.model.LatLng(nb.stop.lat, nb.stop.lng)
+                        appState.openStop(api, nb.stop, scope)
+                        appState.selectedTab = 1
+                    },
+                    modifier = Modifier.animateItem()
+                )
+            }
+        }
+        if (history.isEmpty() && favorites.isEmpty()) {
+            item(key = "empty") { SearchEmptyState(Modifier.padding(top = 40.dp, bottom = 24.dp)) }
+        }
+        fun section(key: String, title: Int, list: List<Pair<String, String>>, pinned: Boolean) {
+            if (list.isEmpty()) return
+            item(key = key) {
+                Text(
+                    stringResource(title),
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(start = 4.dp, top = 6.dp).animateItem()
+                )
+            }
+            items(list, key = { "$key:${it.first}|${it.second}:${removedGen["${it.first}|${it.second}"] ?: 0}" }) { (f, t) ->
+                HistoryRow(
+                    fromName = f,
+                    toName = t,
+                    pinned = pinned,
+                    enabled = appState.stops.isNotEmpty(),
+                    onClick = { searchFromHistory(f, t) },
+                    onReverse = { searchFromHistory(t, f) },
+                    onTogglePin = { setFavorite(f, t, !pinned) },
+                    onRemove = { removeHistory(f, t) },
+                    modifier = Modifier.animateItem()
+                )
+            }
+        }
+        section("fav", R.string.search_favorites_title, favorites, pinned = true)
+        section("h", R.string.search_history_title, history, pinned = false)
+    }
+
+    Box(modifier.fillMaxSize()) {
+        if (isLandscape) {
+            Row(Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .weight(0.45f)
+                        .fillMaxHeight()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) { searchCard() }
+                LazyColumn(
+                    modifier = Modifier.weight(0.55f).fillMaxHeight(),
+                    contentPadding = PaddingValues(start = 8.dp, end = 16.dp, top = 10.dp, bottom = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    content = historyItems
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item(key = "form") {
+                    Column(
+                        Modifier.padding(bottom = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) { searchCard() }
+                }
+                historyItems()
+            }
+        }
+
+        androidx.compose.material3.SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(12.dp))
+
+        // ───── výsledky: samostatná obrazovka přes hlavní (zpět = formulář s historií) ─────
+        PredictiveBackLayer(
+            visible = appState.showResults,
+            onBack = { appState.showResults = false },
+            enabled = appState.selectedTab == 0
+        ) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                Column(Modifier.fillMaxSize()) {
+                    TopAppBar(
+                        title = {
+                            Column {
+                                val f = appState.searchedFrom?.name?.let { stopLabel(it) }.orEmpty()
+                                val to = appState.searchedTo?.name?.let { stopLabel(it) }.orEmpty()
+                                RouteTitle(f, to, MaterialTheme.typography.titleMedium)
+                                // čas hledání a počet nalezených (dřív zvláštní řádek "Výsledky" pod lištou)
+                                val whenLabel = appState.departAt?.let { whenLabel(it, appState.arriveBy) } ?: stringResource(R.string.search_now)
+                                val found = if (appState.searched && !appState.searchLoading)
+                                    " · " + stringResource(R.string.search_found, appState.journeys.size) else ""
+                                Text(
+                                    whenLabel + found,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        actions = {
+                            if (appState.searched && !appState.searchLoading && appState.hasEarlier) {
+                                TextButton(onClick = { loadEarlier() }, enabled = !appState.loadingEarlier) {
+                                    if (appState.loadingEarlier) Wavy(20.dp)
+                                    else Icon(Icons.Default.ArrowUpward, null, Modifier.size(18.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(stringResource(R.string.search_earlier))
+                                }
+                            }
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = { appState.showResults = false }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.common_back))
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                        windowInsets = WindowInsets(0)
+                    )
+                    appState.searchError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                    }
+                    resultsBody(Modifier.weight(1f))
+                }
+            }
+        }
+
+        // ───── detail spojení: podobrazovka přes výsledky ─────
+        var shownDetail by remember { mutableStateOf(appState.detailJourney) }
+        appState.detailJourney?.let { shownDetail = it }
+        PredictiveBackLayer(
+            visible = appState.detailJourney != null,
+            onBack = { appState.detailJourney = null },
+            enabled = appState.selectedTab == 0
+        ) {
+            shownDetail?.let { dj ->
+                JourneyDetailScreen(
+                    j = dj,
+                    api = api,
+                    now = now,
+                    onBack = { appState.detailJourney = null },
+                    onShowMap = { onShowMapForJourney(dj) },
+                    onOpenLeg = { appState.legSheet = dj to it }
+                )
+            }
+        }
+    }
+}
+
+/** Karta s odjezdy z nejbližší zastávky: ťuknutí na odjezd = trasa spoje na mapě, "Na mapě" = panel zastávky. */
+@Composable
+private fun NearbyDeparturesCard(
+    nb: NearbyDepartures,
+    now: LocalDateTime,
+    onPick: (StopDeparture, MapStop) -> Unit,
+    onOpenStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    ElevatedCard(
+        shape = RoundedCornerShape(26.dp),
+        colors = CardDefaults.elevatedCardColors(containerColor = colors.surfaceContainer),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(start = 14.dp, end = 8.dp, top = 12.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Place, null, Modifier.size(20.dp), tint = colors.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.search_nearby_title, fmtDist(nb.distanceM)),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.onSurfaceVariant
+                    )
+                    Text(
+                        stopLabel(nb.stop.name),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                TextButton(onClick = onOpenStop) { Text(stringResource(R.string.search_nearby_on_map)) }
+            }
+            if (nb.departures.isEmpty()) {
+                Text(
+                    stringResource(R.string.search_nearby_none),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 28.dp, bottom = 4.dp)
+                )
+            } else {
+                for ((d, platform) in nb.departures) {
+                    DepartureRow(d, now) { onPick(d, platform) }
+                }
+            }
+        }
+    }
+}
+
+/** Prázdná hlavní obrazovka (zatím žádná historie): poskakující autobus a nápověda. */
+@Composable
+private fun SearchEmptyState(modifier: Modifier = Modifier) {
+    val infiniteTransition = rememberInfiniteTransition(label = "busFloating")
+    val busFloatY by infiniteTransition.animateFloat(
+        initialValue = -5f,
+        targetValue = 5f,
+        animationSpec = infiniteRepeatable(tween(1400, easing = EaseInOutCubic), RepeatMode.Reverse),
+        label = "busFloatY"
+    )
+    val busScale by infiniteTransition.animateFloat(
+        initialValue = 0.97f,
+        targetValue = 1.03f,
+        animationSpec = infiniteRepeatable(tween(1400, easing = EaseInOutCubic), RepeatMode.Reverse),
+        label = "busScale"
+    )
+    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                Icons.Default.DirectionsBus,
+                null,
                 Modifier
-                    .weight(1f)
-                    .nestedScroll(nestedScrollConnection)
+                    .size(48.dp)
+                    .graphicsLayer {
+                        translationY = busFloatY
+                        scaleX = busScale
+                        scaleY = busScale
+                    },
+                tint = MaterialTheme.colorScheme.primary
             )
+            Text(stringResource(R.string.search_empty_title), style = MaterialTheme.typography.headlineSmall)
+            Text(
+                stringResource(R.string.search_empty_text),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+/** Jakou část šířky řádku je potřeba přetáhnout, aby se odebral z historie. */
+private const val DISMISS_FRACTION = 0.5f
+
+/**
+ * Jedno spojení z historie / oblíbených: ťuknutí = hledat znovu, šipky = opačný směr, hvězdička = oblíbené,
+ * přejetí do strany = odebrat.
+ */
+@Composable
+private fun HistoryRow(
+    fromName: String,
+    toName: String,
+    pinned: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    onReverse: () -> Unit,
+    onTogglePin: () -> Unit,
+    onRemove: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    // odebrání až po přetažení přes polovinu řádku, ať se nesmaže omylem. Samotný práh nestačí: rychlé
+    // švihnutí (i krátké) by řádek dorazilo podle rychlosti, proto se smazání potvrdí jen podle skutečné vzdálenosti.
+    var rowWidth by remember { mutableIntStateOf(0) }
+    lateinit var dismiss: androidx.compose.material3.SwipeToDismissBoxState
+    @Suppress("DEPRECATION")
+    dismiss = androidx.compose.material3.rememberSwipeToDismissBoxState(
+        confirmValueChange = { v ->
+            v == androidx.compose.material3.SwipeToDismissBoxValue.Settled ||
+                    (rowWidth > 0 && kotlin.math.abs(dismiss.requireOffset()) >= rowWidth * DISMISS_FRACTION)
+        },
+        positionalThreshold = { total -> total * DISMISS_FRACTION }
+    )
+    val removeLabel = stringResource(R.string.search_history_remove)
+    val pinLabel = stringResource(if (pinned) R.string.search_favorite_remove else R.string.search_favorite_add)
+    androidx.compose.material3.SwipeToDismissBox(
+        state = dismiss,
+        modifier = modifier.onSizeChanged { rowWidth = it.width },
+        backgroundContent = {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 2.dp)
+                    .background(colors.errorContainer, RoundedCornerShape(22.dp))
+                    .padding(horizontal = 20.dp),
+                contentAlignment = if (dismiss.dismissDirection == androidx.compose.material3.SwipeToDismissBoxValue.StartToEnd)
+                    Alignment.CenterStart else Alignment.CenterEnd
+            ) {
+                Icon(Icons.Default.Delete, null, tint = colors.onErrorContainer)
+            }
+        },
+        onDismiss = { onRemove() }
+    ) {
+        Surface(
+            onClick = onClick,
+            enabled = enabled,
+            shape = RoundedCornerShape(22.dp),
+            color = colors.surfaceContainer,
+            modifier = Modifier
+                .fillMaxWidth()
+                // TalkBack: celý řádek jako jedno spojení + akce místo gesta přejetí
+                .semantics {
+                    customActions = listOf(
+                        CustomAccessibilityAction(removeLabel) { onRemove(); true },
+                        CustomAccessibilityAction(pinLabel) { onTogglePin(); true },
+                    )
+                }
+        ) {
+            Row(
+                Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(shape = RoundedCornerShape(50), color = colors.secondaryContainer, contentColor = colors.onSecondaryContainer) {
+                    Icon(if (pinned) Icons.Default.Star else Icons.Default.History, null, Modifier.padding(8.dp).size(20.dp))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        stopLabel(fromName),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
+                        Text(
+                            stopLabel(toName),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                IconButton(onClick = onReverse, enabled = enabled) {
+                    Icon(Icons.Default.SwapVert, stringResource(R.string.search_history_reverse), tint = colors.onSurfaceVariant)
+                }
+                IconButton(onClick = onTogglePin) {
+                    Icon(
+                        if (pinned) Icons.Default.Star else Icons.Default.StarBorder,
+                        pinLabel,
+                        tint = colors.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }
@@ -1646,11 +1951,14 @@ private fun JourneyCard(
     j: Journey,
     now: LocalDateTime,
     walk: WalkRoute?,
+    onOpen: () -> Unit,
+    onOpenLeg: (Int) -> Unit,
     onMap: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
 
     ElevatedCard(
+        onClick = onOpen,
         shape = RoundedCornerShape(26.dp),
         colors = CardDefaults.elevatedCardColors(
             containerColor = colors.surfaceContainer
@@ -1693,12 +2001,15 @@ private fun JourneyCard(
                         )
                     }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    // FlowRow: když se nevejde (info + Mapa vpravo), chip zpoždění přejde celý na další řádek
+                    FlowRow(
+                        itemVerticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
                             departsIn(j, now),
+                            maxLines = 1,
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.primary,
                             fontWeight = FontWeight.Medium
@@ -1723,6 +2034,7 @@ private fun JourneyCard(
 
                         Text(
                             stringResource(R.string.search_ride_minutes, j.durationMinutes),
+                            maxLines = 1,
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant
                         )
@@ -1749,6 +2061,8 @@ private fun JourneyCard(
                             ) {
                                 Text(
                                     label,
+                                    maxLines = 1,
+                                    softWrap = false,
                                     modifier = Modifier.padding(
                                         horizontal = 9.dp,
                                         vertical = 4.dp
@@ -1764,6 +2078,11 @@ private fun JourneyCard(
                 }
 
 
+                // podrobnosti spojení (zastávky, směr, dopravce): malé info vedle mapy
+                IconButton(onClick = onOpen) {
+                    Icon(Icons.Filled.Info, contentDescription = stringResource(R.string.jd_open))
+                }
+                Spacer(Modifier.width(2.dp))
                 FilledTonalButton(
                     onClick = onMap,
                     contentPadding = PaddingValues(horizontal = 12.dp)
@@ -1788,7 +2107,12 @@ private fun JourneyCard(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 itemVerticalAlignment = Alignment.CenterVertically
             ) {
+                // ťuknutí na číslo linky = detail té jízdy (index úseku v rawLegs)
+                val rideIdx = remember(j.key) { j.rawLegs.indices.filter { j.rawLegs[it].kind == "ride" } }
+                val lineA11y = stringResource(R.string.a11y_line_details_plain, j.line)
                 Surface(
+                    onClick = { rideIdx.getOrNull(0)?.let(onOpenLeg) },
+                    modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = lineA11y },
                     shape = RoundedCornerShape(9.dp),
                     color = colors.primaryContainer,
                     contentColor = colors.onPrimaryContainer
@@ -1804,7 +2128,7 @@ private fun JourneyCard(
                     )
                 }
 
-                j.lines.drop(1).forEach { extraLine ->
+                j.lines.drop(1).forEachIndexed { i, extraLine ->
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowForward,
                         contentDescription = stringResource(R.string.search_transfer),
@@ -1812,7 +2136,10 @@ private fun JourneyCard(
                         tint = colors.onSurfaceVariant
                     )
 
+                    val extraA11y = stringResource(R.string.a11y_line_details_plain, extraLine)
                     Surface(
+                        onClick = { rideIdx.getOrNull(i + 1)?.let(onOpenLeg) },
+                        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = extraA11y },
                         shape = RoundedCornerShape(9.dp),
                         color = colors.secondaryContainer,
                         contentColor = colors.onSecondaryContainer
@@ -1845,14 +2172,10 @@ private fun JourneyCard(
                 }
             }
 
-            HorizontalDivider(
-                color = colors.outlineVariant.copy(alpha = 0.35f)
-            )
-
             val displayStops = remember(j.routeStops) {
                 fun norm(name: String): String {
                     val label = splitStopName(prettyName(name)).first.ifBlank { name }
-                    return foldText(label).replace(Regex("\\bhl\\.?n\\.?\\b"), "hlavni nadrazi").replace(Regex("\\s+"), "")
+                    return foldText(label).replace(HL_N_REGEX, "hlavni nadrazi").replace(SPACES_REGEX, "")
                 }
                 val result = mutableListOf<String>()
                 for (stop in j.routeStops) {
@@ -1865,45 +2188,31 @@ private fun JourneyCard(
 
             // Trasa spoje – pouze začátek, přestupy a cíl
             if (displayStops.size >= 2) {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
+                HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.35f))
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text(
                         stringResource(R.string.search_route),
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant,
                         fontWeight = FontWeight.Bold
                     )
-
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                         itemVerticalAlignment = Alignment.CenterVertically
                     ) {
                         displayStops.forEachIndexed { index, stop ->
+                            val edge = index == 0 || index == displayStops.lastIndex
                             Text(
                                 splitStopName(stop).first,
-                                style = if (
-                                    index == 0 || index == displayStops.lastIndex
-                                ) {
-                                    MaterialTheme.typography.bodyMedium
-                                } else {
-                                    MaterialTheme.typography.bodySmall
-                                },
-                                fontWeight = if (
-                                    index == 0 || index == displayStops.lastIndex
-                                ) {
-                                    FontWeight.Bold
-                                } else {
-                                    FontWeight.Normal
-                                },
+                                style = if (edge) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall,
+                                fontWeight = if (edge) FontWeight.Bold else FontWeight.Normal,
                                 color = when (index) {
                                     0 -> colors.primary
                                     displayStops.lastIndex -> colors.tertiary
                                     else -> colors.onSurfaceVariant
                                 }
                             )
-
                             if (index < displayStops.lastIndex) {
                                 Icon(
                                     Icons.AutoMirrored.Filled.ArrowForward,
@@ -1915,18 +2224,12 @@ private fun JourneyCard(
                         }
                     }
                 }
-
-                HorizontalDivider(
-                    color = colors.outlineVariant.copy(alpha = 0.35f)
-                )
             }
 
-
-            // 4. Detaily spoje
-            Column(
-                verticalArrangement = Arrangement.spacedBy(3.dp)
-            ) {
-                if (j.isTransfer) {
+            // 4. Přestupy (směr, dopravce a počet zastávek jsou v detailu; "přímý spoj" je zřejmý z jedné linky)
+            if (j.isTransfer && j.transferList.isNotEmpty()) {
+                HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.35f))
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     j.transferList.forEachIndexed { idx, t ->
                         val prefix = if (j.transferList.size > 1) tr(R.string.search_transfer_n, idx + 1) else tr(R.string.search_transfer)
                         val at = t.at.takeIf { it.isNotBlank() }
@@ -1936,20 +2239,14 @@ private fun JourneyCard(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Text(
-                                    text = "$prefix: ${parts[0].trim()}",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
+                                Text("$prefix: ${parts[0].trim()}", style = MaterialTheme.typography.bodyMedium)
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                                     contentDescription = stringResource(R.string.search_to_arrow),
                                     modifier = Modifier.size(14.dp),
                                     tint = colors.onSurface
                                 )
-                                Text(
-                                    text = parts[1].trim(),
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
+                                Text(parts[1].trim(), style = MaterialTheme.typography.bodyMedium)
                             }
                         } else {
                             Text(
@@ -1963,34 +2260,19 @@ private fun JourneyCard(
                             style = MaterialTheme.typography.bodyMedium,
                             color = colors.onSurfaceVariant
                         )
+                        // zpoždění přijíždějícího spoje ukrajuje z čekání
+                        transferStatus(j.rawLegs, idx, j.legDelays, secondsSinceMidnight(j.day, now))
+                            ?.takeIf { it.risk != TransferRisk.NONE }
+                            ?.let { TransferRiskChip(it, Modifier.padding(top = 2.dp)) }
                     }
-                } else {
-                    Text(
-                        j.stopsCount?.let { pluralStringResource(R.plurals.search_direct_stops, it, it) } ?: stringResource(R.string.search_direct_unknown),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-
-                if (j.destination.isNotBlank()) {
-                    Text(
-                        stringResource(R.string.search_direction, splitStopName(j.destination).first),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant
-                    )
-                }
-
-                val cleanedAgency = cleanAgencyName(j.agency)
-                if (cleanedAgency.isNotBlank()) {
-                    Text(
-                        text = cleanedAgency,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurfaceVariant
-                    )
                 }
             }
         }
     }
 }
+
+private val HL_N_REGEX = Regex("\\bhl\\.?n\\.?\\b")
+private val SPACES_REGEX = Regex("\\s+")
 
 
 fun cleanAgencyName(name: String): String {

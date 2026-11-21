@@ -31,6 +31,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
     private var lastStops: List<LatLng>? = null
     private var lastArrows: List<RouteArrow>? = null
     private var lastArrowColor = 0
+    private var lastStopColor = 0
 
     // ── snímek vozidel pro [GoogleDotOverlay]. Zapisuje i čte se jen na hlavním vlákně. ──
     var count = 0
@@ -316,16 +317,18 @@ internal class GoogleVehicleLayer(private val context: Context) {
         useFull: Boolean,
         stopDots: List<LatLng>,
         arrows: List<RouteArrow>,
-        arrowColor: Int
+        arrowColor: Int,
+        stopColor: Int,
     ) {
         val map = googleMap ?: return
         if (route === lastRoute && full === lastFull && useFull == lastUseFull &&
-            stopDots == lastStops && arrows === lastArrows && arrowColor == lastArrowColor
+            stopDots == lastStops && arrows === lastArrows && arrowColor == lastArrowColor &&
+            stopColor == lastStopColor
         ) return
 
         clearRoute()
         lastRoute = route; lastFull = full; lastUseFull = useFull
-        lastStops = stopDots; lastArrows = arrows; lastArrowColor = arrowColor
+        lastStops = stopDots; lastArrows = arrows; lastArrowColor = arrowColor; lastStopColor = stopColor
 
         if (route.size < 2) return
 
@@ -339,7 +342,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
         add(MarkerOptions().position(start).icon(routeStartDescriptor(context)).anchor(0.5f, 0.5f).zIndex(1.1f))
         add(MarkerOptions().position(end).icon(routeEndDescriptor(context)).anchor(0.5f, 0.5f).zIndex(1.1f))
 
-        val stopDesc = routeStopDescriptor(context)
+        val stopDesc = routeStopDescriptor(context, stopColor)
         for (stop in stopDots) {
             add(MarkerOptions().position(stop).icon(stopDesc).anchor(0.5f, 0.5f).zIndex(1.05f))
         }

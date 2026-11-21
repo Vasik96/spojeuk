@@ -13,7 +13,21 @@ class MainActivity : ComponentActivity() {
         installSplashScreen()
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        handleIntent(intent)
         setContent { SpojeApp() }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    /** Ťuknutí na notifikaci sledované cesty: otevřít její detail. */
+    private fun handleIntent(intent: android.content.Intent?) {
+        if (intent?.getBooleanExtra(JourneyTrackingService.EXTRA_OPEN_TRACKED, false) == true) {
+            intent.removeExtra(JourneyTrackingService.EXTRA_OPEN_TRACKED)
+            JourneyTracker.openRequested.value = true
+        }
     }
 
     // diagnostika zpoždění: jak dlouho událost čekala ve frontě hlavního vlákna a kdy přesně byl prst zvednut

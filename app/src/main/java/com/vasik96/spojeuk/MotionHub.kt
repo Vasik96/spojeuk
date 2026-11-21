@@ -39,6 +39,9 @@ internal class MotionHub(
 
     private val entries = HashMap<String, Entry>()
 
+    /** Kdy přišla poslední dávka vozidel (0 = ještě žádná). */
+    private var lastUpdateAt = 0L
+
     /**
      * Vozy, které na chvíli vypadly z dat (jedna dvě odpovědi bez nich: stáří polohy, výpadek zdroje). Když se do
      * [GRACE_MS] vrátí, naváže se na jejich dosavadní pohyb; jinak by se objevily jinde bez animace (skok).
@@ -65,13 +68,18 @@ internal class MotionHub(
     fun update(list: List<Pair<String, Vehicle>>, followRoads: Boolean) {
         val alive = HashSet<String>(list.size * 2)
         val now = android.os.SystemClock.elapsedRealtime()
+        // Dlouho žádná dávka = mapa byla zavřená a polohy se neobnovovaly. Zobrazené polohy jsou zastaralé
+        // a animace by vozy k novým polohám pomalu dojížděla (kamera po "Mapa" už míří na skutečnou polohu,
+        // štítek by tam dorazil až za desítky sekund) => skočit. Pomalé zdroje na otevřené mapě se dál animují.
+        val snap = lastUpdateAt > 0 && now - lastUpdateAt > STALE_BATCH_MS
+        lastUpdateAt = now
         for ((k, v) in list) {
             alive += k
             val e = obtain(k, v, now)
             e.vehicle = v
             // azimut z DPMÚL je směr k nejbližší zastávce vzdušnou čarou, ne směr jízdy: tam směr určí realtime pohyb
             val heading = if (v.source == SourceIds.DPMUL) null else v.heading
-            e.motion.onFix(v.lat, v.lng, v.observedAtMs, heading = heading, predict = followRoads)
+            e.motion.onFix(v.lat, v.lng, v.observedAtMs, heading = heading, predict = followRoads, snap = snap)
 
             e.wantKey = if (followRoads) "${v.tid}|${v.cis}|${v.trip}" else null
             if (e.wantKey == null && e.routeKey != null) {
@@ -171,6 +179,8 @@ internal class MotionHub(
 
     private companion object {
         const val MAX_LAUNCH = 12
+        /** Mezera mezi dávkami vozidel, po které se zobrazené polohy berou jako zastaralé (běžně chodí po ~6 s). */
+        const val STALE_BATCH_MS = 45_000L
         const val OFFSCREEN_TICK_MS = 1000L
         const val GRACE_MS = 90_000L
         /** Dál se vůz za [GRACE_MS] reálně nedostane; větší skok = jiný vůz pod stejným klíčem, nenavazovat. */

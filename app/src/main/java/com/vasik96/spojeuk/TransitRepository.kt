@@ -131,6 +131,43 @@ class TransitRepository(context: Context? = null) {
             geometry.forTrip(tt, tid) to platformLocations(tt, tt.tripStops(tid))
         }
 
+    /**
+     * Nejbližší zastávka k poloze (do [maxM] m vzdušnou čarou) a její nejbližší odjezdy ze všech nástupišť
+     * (oba směry), seřazené podle času. null = žádná zastávka v dosahu nebo jízdní řád ještě není načtený.
+     */
+    suspend fun nearbyDepartures(
+        lat: Double, lng: Double,
+        /** Nejbližší zastávka po cestě (jako u předvyplnění "Odkud") a vzdálenost k ní; null = vzdušnou čarou. */
+        preferred: Pair<Stop, Double>? = null,
+        maxM: Double = 800.0, limit: Int = 4,
+    ): NearbyDepartures? =
+        withContext(Dispatchers.Default) {
+            val b = store.current ?: return@withContext null
+            val idx = stopIndexFor(b)
+            val nearest: MapStop
+            val dist: Double
+            val pref = preferred?.takeIf { it.first.hasCoords }
+            if (pref != null) {
+                val want = prettyName(pref.first.name)   // MapStop.name je ve tvaru prettyName
+                nearest = idx.stops.filter { it.name == want }
+                    .minByOrNull { Geo.distanceM(pref.first.lat, pref.first.lng, it.lat, it.lng) } ?: return@withContext null
+                dist = pref.second
+            } else {
+                nearest = idx.stops.minByOrNull { Geo.distanceM(lat, lng, it.lat, it.lng) } ?: return@withContext null
+                dist = Geo.distanceM(lat, lng, nearest.lat, nearest.lng)
+            }
+            if (dist > maxM) return@withContext null
+            // nástupiště stejné zastávky (oba směry, vlaky), ne zastávka stejného jména na druhém konci města
+            val platforms = idx.stops.filter { it.name == nearest.name && Geo.distanceM(nearest.lat, nearest.lng, it.lat, it.lng) < 300.0 }
+            val now = nowPrague()
+            val seen = HashSet<Long>()
+            val deps = platforms.flatMap { p -> stopDepartures(b.planner, p, now, 2).map { it to p } }
+                .filter { (d, _) -> seen.add(d.tid.toLong() shl 20 or (d.depSec.toLong() and 0xFFFFF)) }
+                .sortedBy { (d, _) -> d.day.atStartOfDay().plusSeconds(d.depSec.toLong()) }
+                .take(limit)
+            NearbyDepartures(nearest, dist, deps)
+        }
+
     /** Odjezdy ze zastávky na mapě v nejbližších [hours] hodinách (podle jízdního řádu). */
     suspend fun stopDepartures(stop: MapStop, hours: Int = 3): List<StopDeparture> = withContext(Dispatchers.Default) {
         val b = store.ensure()
@@ -293,7 +330,8 @@ class TransitRepository(context: Context? = null) {
         toName: String,
         modeFilter: ModeFilter = ModeFilter.ALL,
         departAt: LocalDateTime? = null,
-    ): JourneySearch = JourneySearch(this, fromName, toName, modeFilter, departAt)
+        arriveBy: Boolean = false,
+    ): JourneySearch = JourneySearch(this, fromName, toName, modeFilter, departAt, arriveBy)
 
     suspend fun searchConnections(
         fromName: String,
@@ -369,12 +407,15 @@ class TransitRepository(context: Context? = null) {
         runCatching { kotlinx.coroutines.withTimeoutOrNull(LIVE_DELAY_WAIT_MS) { hub.refresh(maxAgeMs = 10_000) } }
         val fleet = hub.fleet
         for (j in journeys) {
-            for (leg in j.rawLegs) {
-                if (leg.kind != "ride") continue
-                val v = fleet.liveOn(leg, j.day) ?: continue
+            val delays = HashMap<Int, Int>()
+            j.rawLegs.forEachIndexed { i, leg ->
+                if (leg.kind != "ride") return@forEachIndexed
+                val v = fleet.liveOn(leg, j.day) ?: return@forEachIndexed
+                delays[i] = v.delay
                 j.delay = v.delay
                 j.realtime = true
             }
+            j.legDelays = delays
         }
         return journeys
     }
@@ -434,6 +475,112 @@ class TransitRepository(context: Context? = null) {
             }
         }
         routes
+    }
+
+    /** Podrobnosti spojení pro detail: všechny zastávky jednotlivých jízd, linky, dopravci, chůze. */
+    internal suspend fun journeyDetail(j: Journey): List<DetailLeg> = withContext(Dispatchers.Default) {
+        detailOf(store.ensure().timetable, j)
+    }
+
+    /** Detail hned (bez čekání), když už je jízdní řád v paměti: sheet / obrazovka pak neposkočí po načtení. */
+    internal fun journeyDetailNow(j: Journey): List<DetailLeg>? = store.current?.timetable?.let { detailOf(it, j) }
+
+    /** Živé vozy z posledního známého stavu (bez dotazu na server), pro první snímek detailu. */
+    fun journeyLiveNow(j: Journey): Map<Int, Vehicle> {
+        val fleet = hub.fleet
+        val out = HashMap<Int, Vehicle>()
+        j.rawLegs.forEachIndexed { i, leg -> if (leg.kind == "ride") fleet.liveOn(leg, j.day)?.let { out[i] = it } }
+        return out
+    }
+
+    private fun detailOf(tt: Timetable, j: Journey): List<DetailLeg> {
+        fun name(id: Int) = tt.stops[id]?.name?.let { prettyName(it) } ?: "?"
+        return j.rawLegs.mapIndexedNotNull { idx, leg ->
+            if (leg.kind == "ride") {
+                val t = tt.trips[leg.tid]
+                val line = t?.line ?: "?"
+                val cat = tt.trips.category(leg.tid)
+                DetailLeg.Ride(
+                    index = idx,
+                    line = line,
+                    headsign = prettyName(t?.head.orEmpty()),
+                    agency = cleanAgencyName(t?.agency.orEmpty()),
+                    category = cat,
+                    style = tripStyle(cat, line),
+                    trainNumber = t?.takeIf { it.isTrain }?.num?.takeIf { it.isNotBlank() },
+                    wheelchair = t?.wheel == 1,
+                    stops = leg.stops.map { (sid, arr, dep) -> DetailStop(name(sid), arr, dep) },
+                )
+            } else {
+                if (leg.fromStop == leg.toStop || leg.arr - leg.dep <= 0) return@mapIndexedNotNull null
+                val a = tt.stops[leg.fromStop]
+                val b = tt.stops[leg.toStop]
+                val dist = if (a != null && b != null && a.hasCoords && b.hasCoords)
+                    Geo.distanceM(a.lat, a.lng, b.lat, b.lng) else null
+                DetailLeg.Walk(
+                    index = idx,
+                    fromName = name(leg.fromStop),
+                    toName = name(leg.toStop),
+                    dep = leg.dep,
+                    arr = leg.arr,
+                    distanceM = dist,
+                )
+            }
+        }
+    }
+
+    /**
+     * Jen jedna jízda spojení jako samostatné "spojení": mapa pak ukáže a vyhledá vůz právě téhle jízdy
+     * (ne vždy té první, jako u celého spojení s přestupem).
+     */
+    fun legJourney(j: Journey, legIndex: Int): Journey? {
+        val leg = j.rawLegs.getOrNull(legIndex)?.takeIf { it.kind == "ride" } ?: return null
+        val t = store.current?.timetable?.trips?.get(leg.tid)
+        val line = t?.line ?: "?"
+        return j.copy(
+            departure = hhmm(leg.dep),
+            arrival = hhmm(leg.arr),
+            line = line,
+            line2 = null,
+            destination = prettyName(t?.head.orEmpty()),
+            agency = t?.agency.orEmpty(),
+            stopsCount = maxOf(0, leg.stops.size - 1),
+            transferAt = null,
+            transferWait = null,
+            trip = t?.num?.ifBlank { null } ?: leg.tid.toString(),
+            trip2 = null,
+            sortKey = leg.dep,
+            rawLegs = listOf(leg),
+            transfers = 0,
+            lines = listOf(line),
+            transferList = emptyList(),
+            cis = t?.cis.orEmpty(),
+            boardWalkMin = null,
+            boardStopName = null,
+            transferWalkMin = null,
+        )
+    }
+
+    /**
+     * Která jízda spojení se má ukázat na mapě (index v [Journey.rawLegs]): první, dokud z nástupní zastávky
+     * neodjela před víc než 3 minutami (odjezd podle JŘ + živé zpoždění), pak další atd.
+     */
+    fun activeLegIndex(j: Journey, now: java.time.LocalDateTime = nowPrague()): Int {
+        val fleet = hub.fleet
+        return activeLegIndexOf(j.rawLegs, secondsSinceMidnight(j.day, now)) { i ->
+            fleet.liveOn(j.rawLegs[i], j.day)?.delay ?: 0
+        }
+    }
+
+    /** Živé vozy na jízdách spojení (index úseku v [Journey.rawLegs] → vůz); čerstvé polohy se čekají jen krátce. */
+    suspend fun journeyLive(j: Journey): Map<Int, Vehicle> {
+        runCatching { kotlinx.coroutines.withTimeoutOrNull(LIVE_DELAY_WAIT_MS) { hub.refresh(maxAgeMs = 10_000) } }
+        val fleet = hub.fleet
+        val out = HashMap<Int, Vehicle>()
+        j.rawLegs.forEachIndexed { i, leg ->
+            if (leg.kind == "ride") fleet.liveOn(leg, j.day)?.let { out[i] = it }
+        }
+        return out
     }
 
     /** pěší trasa po silnici před nástupem **/
@@ -727,12 +874,17 @@ private const val LIVE_DELAY_WAIT_MS = 1_200L
 private const val SEARCH_SPAN_HOURS = 24L
 
 /** Stránkování výsledků hledání (načíst další / dřívější). */
+/** Nejbližší zastávka (pro hlavní obrazovku hledání) a její odjezdy s nástupištěm, ze kterého jedou. */
+class NearbyDepartures(val stop: MapStop, val distanceM: Double, val departures: List<Pair<StopDeparture, MapStop>>)
+
 class JourneySearch(
     private val api: TransitRepository,
     private val fromName: String,
     private val toName: String,
     private val modeFilter: ModeFilter = ModeFilter.ALL,
     private val departAt: LocalDateTime? = null,
+    /** [departAt] je nejpozdější příjezd (ne odjezd): hledají se spojení, která do té doby dorazí. */
+    private val arriveBy: Boolean = false,
 ) {
     private val currentJourneys = mutableListOf<Journey>()
     private val mutex = Mutex()
@@ -746,10 +898,16 @@ class JourneySearch(
     var hasEarlier: Boolean = true
         private set
 
-    fun fresh(): JourneySearch = JourneySearch(api, fromName, toName, modeFilter, departAt)
+    fun fresh(): JourneySearch = JourneySearch(api, fromName, toName, modeFilter, departAt, arriveBy)
 
     suspend fun loadMore(minNew: Int = 1): List<Journey> = withContext(Dispatchers.IO) {
         mutex.withLock {
+            if (arriveBy) {
+                // příjezd: později už nic (spoj by nedorazil včas); jen jednou úvodní hledání
+                if (currentJourneys.isEmpty()) currentJourneys.addAll(searchArriveBy(minNew))
+                hasMore = false
+                return@withLock currentJourneys.toList()
+            }
             if (currentJourneys.isEmpty()) {
                 val initial = api.searchConnections(fromName, toName, startTime, minNew, modeFilter = modeFilter)
                 currentJourneys.addAll(initial)
@@ -766,6 +924,30 @@ class JourneySearch(
             currentJourneys.toList() // kopie, ať Compose vidí změnu
         }
     }
+
+    /**
+     * Spojení s příjezdem nejpozději v [startTime]. Plánovač hledá jen dopředu, takže se hledá od okamžiku
+     * před cílovým časem (okno se zvětšuje, dokud se nenajdou aspoň 3 vyhovující) a vezmou se ta s nejpozdějším
+     * odjezdem. Výsledek je seřazený podle odjezdu jako u běžného hledání ("Dřívější" funguje stejně).
+     */
+    private suspend fun searchArriveBy(want: Int): List<Journey> {
+        val deadline = startTime
+        val now = nowPrague()
+        var best: List<Journey> = emptyList()
+        for (windowMin in longArrayOf(90, 180, 360, 720)) {
+            var from = deadline.minusMinutes(windowMin)
+            // dnešní cíl: do minulosti se nehledá (větší okno by už nic nového nepřineslo)
+            val clamped = deadline.isAfter(now) && from.isBefore(now)
+            if (clamped) from = now
+            val found = api.searchConnections(fromName, toName, from, (want * 2).coerceAtLeast(12), modeFilter = modeFilter)
+            val ok = found.filter { arrivalDt(it) <= deadline }
+            if (ok.size > best.size) best = ok
+            if (ok.size >= 3 || clamped) break
+        }
+        return best.sortedBy { it.depDt }.takeLast(want.coerceAtLeast(4))
+    }
+
+    private fun arrivalDt(j: Journey): LocalDateTime = j.day.atStartOfDay().plusSeconds(j.arr.toLong())
 
     suspend fun loadEarlier(): List<Journey> = withContext(Dispatchers.IO) {
         mutex.withLock {

@@ -302,4 +302,29 @@ class VehicleMotionTest {
         fix(m, LatLng(50.2, 14.3))              // jiný vůz / chyba zdroje
         assertEquals(50.2, m.positionAt(now).latitude, 1e-9)
     }
+
+    @Test
+    fun staleShownPositionSnapsInsteadOfCatchingUp() {
+        // mapa byla 2 min zavřená (žádné fixy), vůz mezitím ujel 900 m: po otevření skočí rovnou na novou polohu,
+        // nedojíždí ji animací (kamera už míří na skutečnou polohu)
+        val m = motion(north(100.0))
+        m.setRoute(route())
+        m.positionAt(now)
+        advance(120_000)
+        val p = north(1_000.0)
+        m.onFix(p.latitude, p.longitude, wallNow, predict = true, snap = true)
+        assertEquals(p.latitude, m.positionAt(now).latitude, 1e-9)
+    }
+
+    @Test
+    fun slowFeedStillAnimates() {
+        // pomalý zdroj (fix po 60 s) na otevřené mapě: žádný skok, vůz k nové poloze plynule jede
+        val m = motion(north(100.0))
+        m.setRoute(route())
+        m.positionAt(now)
+        advance(60_000)
+        fix(m, north(180.0))
+        val p = m.positionAt(now).latitude
+        assertTrue("nemá skočit (${meters(north(100.0).latitude, p)} m)", meters(north(100.0).latitude, p) < 40.0)
+    }
 }

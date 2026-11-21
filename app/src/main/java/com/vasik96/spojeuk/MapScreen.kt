@@ -94,6 +94,10 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.layout.boundsInParent
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -195,6 +199,11 @@ private const val SHEET_OPEN_GRACE_MS = 900L
 @Composable
 internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, api: TransitRepository, active: Boolean) {
     val context = LocalContext.current
+    // barvy zvýraznění hledaného vozu podle Material You motivu
+    val cs = MaterialTheme.colorScheme
+    SideEffect {
+        HighlightPalette.update(cs.primary.toArgb(), cs.onPrimary.toArgb(), cs.tertiary.toArgb(), cs.onTertiary.toArgb(), cs.surface.toArgb())
+    }
     val scope = rememberCoroutineScope()
     var showFullRoute by remember { mutableStateOf(false) }
     var isMapReady by remember { mutableStateOf(false) }
@@ -309,7 +318,22 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
 
     var maplibreMapRef by remember { mutableStateOf<MapLibreMap?>(null) }
 
-    val animateCameraTo: suspend (LatLng, Float) -> Unit = { targetLatLng, targetZoom ->
+    // spodní okraj karty "Mapa vozidel" nahoře (px v rámci mapy): co je pod ní, není vidět
+    var bannerBottomPx by remember { mutableFloatStateOf(0f) }
+    var mapSizePx by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+
+    /**
+     * Cíl kamery posunutý tak, aby [p] při zoomu [zoom] vyšel do středu viditelné části mapy pod kartou nahoře
+     * (ne do středu celé mapy, kde by byl napůl schovaný). Metry na dp: dlaždice 256 dp.
+     */
+    fun belowBanner(p: LatLng, zoom: Float): LatLng {
+        val shiftDp = bannerBottomPx / 2.0 / context.resources.displayMetrics.density
+        val mPerDp = 156543.03 * Math.cos(Math.toRadians(p.latitude)) / Math.pow(2.0, zoom.toDouble())
+        return LatLng(p.latitude + shiftDp * mPerDp / Geo.M_PER_DEG_LAT, p.longitude)
+    }
+
+    val animateCameraTo: suspend (LatLng, Float) -> Unit = { target, targetZoom ->
+        val targetLatLng = belowBanner(target, targetZoom)
         if (appState.mapProvider == MapProvider.GOOGLE) {
             cameraPositionState.animate(
                 CameraUpdateFactory.newLatLngZoom(targetLatLng, targetZoom), 700
@@ -323,6 +347,48 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 700
             )
         }
+    }
+
+    /**
+     * Výřez, ve kterém jsou vidět všechny [points], ve viditelné části mapy pod kartou nahoře. Zoom se spočítá
+     * přímo (Mercator, dlaždice 256 dp) pro plochu pod kartou s okrajem; posun středu pod kartu dělá [animateCameraTo].
+     */
+    val animateCameraToBounds: suspend (List<LatLng>) -> Unit = { points ->
+        val w = mapSizePx.width
+        val h = mapSizePx.height
+        if (points.size >= 2 && w > 0 && h > 0) {
+            val density = context.resources.displayMetrics.density
+            val padDp = 48.0
+            val wDp = (w / density - 2 * padDp).coerceAtLeast(64.0)
+            val hDp = ((h - bannerBottomPx) / density - 2 * padDp).coerceAtLeast(64.0)
+            fun mercY(lat: Double) = Math.log(Math.tan(Math.PI / 4 + Math.toRadians(lat) / 2))
+            val minLat = points.minOf { it.latitude }; val maxLat = points.maxOf { it.latitude }
+            val minLng = points.minOf { it.longitude }; val maxLng = points.maxOf { it.longitude }
+            val xFrac = ((maxLng - minLng) / 360.0).coerceAtLeast(1e-9)
+            val yFrac = ((mercY(maxLat) - mercY(minLat)) / (2 * Math.PI)).coerceAtLeast(1e-9)
+            val zoom = minOf(
+                Math.log(wDp / (256 * xFrac)) / Math.log(2.0),
+                Math.log(hDp / (256 * yFrac)) / Math.log(2.0)
+            ).coerceIn(3.0, 17.0).toFloat()
+            val midLat = Math.toDegrees(Math.atan(Math.sinh((mercY(minLat) + mercY(maxLat)) / 2)))
+            animateCameraTo(LatLng(midLat, (minLng + maxLng) / 2), zoom)
+        }
+    }
+
+    // zastávka otevřená z hledání ("Na mapě" u nejbližší zastávky): mapa na ni přiblíží
+    LaunchedEffect(appState.focusPoint, isMapReady, maplibreMapRef) {
+        val p = appState.focusPoint ?: return@LaunchedEffect
+        if (appState.mapProvider == MapProvider.GOOGLE && !isMapReady) return@LaunchedEffect
+        if (appState.mapProvider != MapProvider.GOOGLE && maplibreMapRef == null) return@LaunchedEffect
+        // Panel s odjezdy zakryje spodní ~64 % mapy: zastávka má vyjít doprostřed pruhu mezi kartou nahoře
+        // a panelem. animateCameraTo ji dá doprostřed plochy pod kartou, odsud se posune o rozdíl výš.
+        val h = mapSizePx.height.toFloat().takeIf { it > 0f } ?: (context.resources.displayMetrics.heightPixels * 0.76f)
+        val sheetTop = h * STOP_SHEET_TOP_FRACTION
+        val shiftPx = (bannerBottomPx + h) / 2f - (bannerBottomPx + sheetTop) / 2f
+        val mPerDp = 156543.03 * Math.cos(Math.toRadians(p.latitude)) / Math.pow(2.0, 17.0)
+        val shiftM = shiftPx / context.resources.displayMetrics.density * mPerDp
+        animateCameraTo(LatLng(p.latitude - shiftM / Geo.M_PER_DEG_LAT, p.longitude), 17f)
+        appState.focusPoint = null
     }
 
     // přiblížení po kliknutí na "Mapa"
@@ -349,7 +415,11 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     android.widget.Toast.LENGTH_LONG
                 ).show()
             }
-            animateCameraTo(LatLng(v.lat, v.lng), 16f)
+            // vůz na trase (jede ji) => přiblížit na něj; ještě k trase přijíždí (spoj nevyjel) => výřez
+            // s trasou i vozem, jinak by trasa nebyla vidět a vůz by se ukazoval někde mimo
+            val onRoute = route.isEmpty() || distanceToRouteM(LatLng(v.lat, v.lng), route) < VEHICLE_ON_ROUTE_M
+            if (onRoute) animateCameraTo(LatLng(v.lat, v.lng), 16f)
+            else animateCameraToBounds(route + LatLng(v.lat, v.lng))
         } else {
             appState.focusedTripVehicle = null
             appState.focusedTripRef = null
@@ -363,16 +433,8 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 else -> tr(R.string.map_vehicle_not_found)
             }
             android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
-            if (route.isNotEmpty()) {
-                val lats = route.map { it.latitude }
-                val lons = route.map { it.longitude }
-                val span = maxOf(lats.max() - lats.min(), lons.max() - lons.min())
-                val zoom =
-                    if (span > 0.3) 10f else if (span > 0.15) 11f else if (span > 0.07) 12f else 13f
-                animateCameraTo(
-                    LatLng((lats.max() + lats.min()) / 2, (lons.max() + lons.min()) / 2), zoom
-                )
-            }
+            // vůz nenalezen: celá trasa ve viditelné části pod kartou
+            if (route.size >= 2) animateCameraToBounds(route)
         }
         appState.focusTrip = null
     }
@@ -507,8 +569,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 }
                 if (!isMapReady) return@GoogleMap
                 // barva trasy podle druhu dopravy spoje (na světlé mapě tmavší, na tmavé světlejší odstín barvy vozu)
-                val primaryColor = appState.routeStyle?.let { Color(if (useDarkMap) it.routeDark else it.route) }
-                    ?: MaterialTheme.colorScheme.primary
+                val primaryColor = rememberRouteColor(appState, useDarkMap)
 
                 // trasa se plynule objeví / zmizí (shownRoute drží zrušenou trasu, dokud nezmizí)
                 val routeAlpha = shownRoute.alpha.value
@@ -565,6 +626,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     active = active,
                     shown = shownRoute,
                     stopIndex = stopIndex,
+                    routeColor = rememberRouteColor(appState, useDarkMap).toArgb(),
                 )
             }
         } else {
@@ -574,8 +636,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 active = active,
                 useDarkMap = useDarkMap,
                 activeVehicles = activeVehicles,
-                primaryColor = appState.routeStyle?.let { Color(if (useDarkMap) it.routeDark else it.route) }
-                    ?: MaterialTheme.colorScheme.primary,
+                primaryColor = rememberRouteColor(appState, useDarkMap),
                 showFullRoute = showFullRoute,
                 phase = phase,
                 targetUid = targetUid,
@@ -624,7 +685,11 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         }
 
         ElevatedCard(
-            modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth(),
+            modifier = Modifier.align(Alignment.TopCenter).padding(12.dp).fillMaxWidth()
+                .onGloballyPositioned {
+                    bannerBottomPx = it.boundsInParent().bottom
+                    it.parentLayoutCoordinates?.size?.let { s -> mapSizePx = s }
+                },
             shape = RoundedCornerShape(24.dp)
         ) {
             Column {
@@ -892,6 +957,8 @@ private fun GoogleVehicleOverlay(
     active: Boolean,
     shown: ShownRoute,
     stopIndex: StopIndex?,
+    /** Barva trasy (druh dopravy): v ní jsou i tečky zastávek na trase. */
+    routeColor: Int,
 ) {
     val arrowArgb = MaterialTheme.colorScheme.onBackground.toArgb()
     val context = LocalContext.current
@@ -915,8 +982,8 @@ private fun GoogleVehicleOverlay(
         else withContext(Dispatchers.Default) { createRouteArrows(route = route, spacingMeters = arrowSpacing) }
     }
 
-    LaunchedEffect(route, full, useFull, stopDots, arrows, arrowArgb) {
-        layer.updateRoute(route, full, useFull, stopDots, arrows, arrowArgb)
+    LaunchedEffect(route, full, useFull, stopDots, arrows, arrowArgb, routeColor) {
+        layer.updateRoute(route, full, useFull, stopDots, arrows, arrowArgb, routeColor)
     }
 
     val latestVehicles by rememberUpdatedState(activeVehicles)
@@ -1566,7 +1633,7 @@ private fun MapLibreScreenContent(
     val tertiaryArgb = tertiaryColor.toArgb()
     val arrowArgb = arrowColor.toArgb()
     val walkList = if (appState.journeyWalks.isNotEmpty()) appState.journeyWalks
-    else listOfNotNull(appState.journeyWalk ?: appState.walkRoute)
+    else listOfNotNull(appState.journeyWalk)
     val tripRoute = appState.tripRoute
     val tripRouteSegments = appState.tripRouteSegments
     val fullRoute = appState.fullRoute
@@ -1687,7 +1754,7 @@ private fun MapLibreScreenContent(
 
             // mezilehlé zastávky: tečky na přesné poloze zastávky (pod začátkem / koncem)
             if (stopDots.isNotEmpty()) {
-                style.addImage("route-stop", routeStopBitmap(context))
+                style.addImage("route-stop", routeStopBitmap(context, primaryColorArgb))
                 val stopFeatures = withContext(Dispatchers.Default) {
                     FeatureCollection.fromFeatures(
                         stopDots.map { Feature.fromGeometry(Point.fromLngLat(it.longitude, it.latitude)) }
@@ -2037,7 +2104,9 @@ private fun sourceLabelText(label: String, normal: Color, bad: Color) = buildAnn
     splitSources(label).forEachIndexed { i, part ->
         if (i > 0) withStyle(SpanStyle(color = normal)) { append(", ") }
         val stale = part.endsWith(staleSuffix)
-        withStyle(SpanStyle(color = if (stale) bad else normal)) { append(part) }
+        // zastaralý zdroj stačí červeně, bez textu "(zastaralé)" (značka v popisku slouží jen k rozpoznání)
+        val name = if (stale) part.removeSuffix(staleSuffix).trimEnd() else part
+        withStyle(SpanStyle(color = if (stale) bad else normal)) { append(name) }
     }
 }
 
@@ -2063,7 +2132,7 @@ private fun rememberShownRoute(appState: SpojeAppState, showFullRoute: Boolean):
     val segments = appState.tripRouteSegments
     val full = appState.fullRoute
     val walks = if (appState.journeyWalks.isNotEmpty()) appState.journeyWalks
-    else listOfNotNull(appState.journeyWalk ?: appState.walkRoute)
+    else listOfNotNull(appState.journeyWalk)
     val stopDots = appState.stopDots(showFullRoute)
     LaunchedEffect(route, segments, full, walks, stopDots) {
         if (route.isNotEmpty()) {
@@ -2078,6 +2147,25 @@ private fun rememberShownRoute(appState: SpojeAppState, showFullRoute: Boolean):
     }
     return s
 }
+
+/**
+ * Barva trasy podle druhu dopravy. Drží poslední známý druh: při zrušení trasy se [SpojeAppState.routeStyle]
+ * vynuluje hned, ale trasa ještě plynule mizí a nesmí přitom přeskočit na výchozí (modrou) barvu.
+ * Každá nová trasa druh nastavuje, takže zapamatovaná hodnota nikdy nepřetrvá do jiné trasy.
+ */
+@Composable
+private fun rememberRouteColor(appState: SpojeAppState, useDarkMap: Boolean): Color {
+    val last = remember { mutableStateOf<VehicleStyle?>(null) }
+    appState.routeStyle?.let { last.value = it }
+    return last.value?.let { Color(if (useDarkMap) it.routeDark else it.route) }
+        ?: MaterialTheme.colorScheme.primary
+}
+
+/** Horní okraj panelu s odjezdy zastávky jako podíl výšky mapy (panel zabírá zbytek dole). */
+private const val STOP_SHEET_TOP_FRACTION = 0.36f
+
+/** Vůz blíž než tolik metrů od trasy ji už jede (nebo stojí na výchozí zastávce). */
+private const val VEHICLE_ON_ROUTE_M = 350.0
 
 private const val ROUTE_FADE_IN_MS = 525
 private const val ROUTE_FADE_OUT_MS = 260

@@ -69,6 +69,8 @@ import androidx.compose.runtime.withFrameNanos
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.graphics.graphicsLayer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -223,13 +225,82 @@ internal fun SpojeApp() {
         }
     }
 
-    BackHandler(enabled = appState.selectedTab == 2) {
-        if (appState.settingsSubscreen == SettingsSubscreen.DATA_UPDATES) {
-            appState.settingsSubscreen = SettingsSubscreen.MAIN
-        } else {
-            appState.selectedTab = 0
+    // ťuknutí na notifikaci sledované cesty => detail spojení na záložce Spoje
+    LaunchedEffect(Unit) {
+        JourneyTracker.openRequested.collect { requested ->
+            if (!requested) return@collect
+            JourneyTracker.openRequested.value = false
+            JourneyTracker.current.value?.let { j ->
+                appState.legSheet = null
+                appState.selectedTab = 0
+                appState.detailJourney = j
+            }
         }
     }
+
+    // ───── zpět z mapy = záložka Spoje (s náhledem gesta) ─────
+    val mapBack = remember { PredictiveBackState() }
+    val mapFade = remember { androidx.compose.animation.core.Animatable(1f) }
+    var mapLeaving by remember { mutableStateOf(false) }
+    androidx.activity.compose.PredictiveBackHandler(enabled = appState.selectedTab == 1) { events ->
+        mapBack.active = true
+        appState.backPreviewSearch = true
+        try {
+            events.collect { e ->
+                mapBack.edge = e.swipeEdge
+                mapBack.progress.snapTo(e.progress)
+            }
+            withContext(NonCancellable) {
+                mapLeaving = true
+                mapFade.animateTo(0f, tween(160))
+                appState.selectedTab = 0
+                mapBack.active = false
+                mapLeaving = false
+                appState.backPreviewSearch = false
+                mapBack.progress.snapTo(0f)
+                mapFade.snapTo(1f)
+            }
+        } catch (e: CancellationException) {
+            mapBack.active = false
+            appState.backPreviewSearch = false
+            scope.launch { mapBack.progress.animateTo(0f, tween(180)) }
+            throw e
+        }
+    }
+
+    /** [hideUserWalk]: zobrazuje se až další jízda spojení, pěší trasa uživatele k výchozí zastávce nemá smysl. */
+    fun showJourneyOnMap(journey: Journey, hideUserWalk: Boolean = false) {
+        appState.legSheet = null   // po návratu z mapy se sheet jízdy nemá znovu objevit
+        appState.hideUserWalk = hideUserWalk
+        val bp = api.boardingPoint(journey)
+        val isPast = journey.depDt.isBefore(nowPrague())
+        val ref = TripRef(
+            cis = journey.cis,
+            trip = journey.trip,
+            line = journey.line,
+            boardLat = bp?.first,
+            boardLng = bp?.second,
+            destination = journey.destination,
+            isPast = isPast,
+            departureTimeMillis = journey.depDt
+                .atZone(java.time.ZoneId.of("Europe/Prague"))
+                .toInstant()
+                .toEpochMilli(),
+            tid = journey.rawLegs.firstOrNull { it.kind == "ride" }?.tid ?: 0
+        )
+        appState.loadJourneyRoute(api, journey, scope, ref)
+    }
+
+    /** Jízda [legIndex] spojení na mapě; první jízda = celé spojení (s pěší trasou k zastávce). */
+    fun showLegOnMap(journey: Journey, legIndex: Int) {
+        val firstRide = journey.rawLegs.indexOfFirst { it.kind == "ride" }
+        if (legIndex == firstRide) showJourneyOnMap(journey)
+        else showJourneyOnMap(api.legJourney(journey, legIndex) ?: journey, hideUserWalk = true)
+    }
+
+    /** Tlačítka mapy u spojení: ukáže jízdu, která je právě aktuální (po odjezdu první už další). */
+    fun showJourneyOnMapSmart(journey: Journey) = showLegOnMap(journey, api.activeLegIndex(journey))
+
 
     val systemDark = isSystemInDarkTheme()
     val dark = when (appState.appTheme) {
@@ -270,7 +341,7 @@ internal fun SpojeApp() {
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             },
-                            actions = { SourceBadges(); Spacer(Modifier.width(12.dp)) }
+                            actions = { AppInfoButton(); Spacer(Modifier.width(4.dp)) }
                         )
                     },
                     bottomBar = {
@@ -300,12 +371,21 @@ internal fun SpojeApp() {
                 ) { padding ->
                     Box(Modifier.padding(padding).fillMaxSize()) {
                         if (mapVisited) {
-                            MapScreen(
-                                modifier = Modifier.fillMaxSize(),
-                                appState = appState,
-                                api = api,
-                                active = appState.selectedTab == 1
-                            )
+                            // během gesta zpět je mapa nad Spoji (ty se pod ní ukážou jako náhled)
+                            Box(
+                                Modifier
+                                    .fillMaxSize()
+                                    .zIndex(if (mapBack.active || mapLeaving) 1f else 0f)
+                                    .predictiveBack(mapBack)
+                                    .graphicsLayer { alpha = mapFade.value }
+                            ) {
+                                MapScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    appState = appState,
+                                    api = api,
+                                    active = appState.selectedTab == 1
+                                )
+                            }
                         }
 
                         AnimatedVisibility(
@@ -320,7 +400,7 @@ internal fun SpojeApp() {
                         }
 
                         AnimatedVisibility(
-                            visible = appState.selectedTab == 0,
+                            visible = appState.selectedTab == 0 || appState.backPreviewSearch,
                             enter = fadeIn(tween(260, easing = FastOutSlowInEasing)) + scaleIn(
                                 initialScale = 0.97f,
                                 animationSpec = spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow)
@@ -338,25 +418,7 @@ internal fun SpojeApp() {
                                     modifier = Modifier.fillMaxSize(),
                                     appState = appState,
                                     api = api,
-                                    onShowMapForJourney = { journey ->
-                                        val bp = api.boardingPoint(journey)
-                                        val isPast = journey.depDt.isBefore(nowPrague())
-                                        val ref = TripRef(
-                                            cis = journey.cis,
-                                            trip = journey.trip,
-                                            line = journey.line,
-                                            boardLat = bp?.first,
-                                            boardLng = bp?.second,
-                                            destination = journey.destination,
-                                            isPast = isPast,
-                                            departureTimeMillis = journey.depDt
-                                                .atZone(java.time.ZoneId.of("Europe/Prague"))
-                                                .toInstant()
-                                                .toEpochMilli(),
-                                            tid = journey.rawLegs.firstOrNull { it.kind == "ride" }?.tid ?: 0
-                                        )
-                                        appState.loadJourneyRoute(api, journey, scope, ref)
-                                    }
+                                    onShowMapForJourney = { showJourneyOnMapSmart(it) }
                                 )
                             }
                         }
@@ -372,8 +434,11 @@ internal fun SpojeApp() {
                                 animationSpec = tween(160, easing = FastOutLinearInEasing)
                             )
                         ) {
+                            // zpět z nastavení = záložka Spoje, s náhledem gesta (Spoje se pod nastavením složí)
+                            val back = rememberPredictiveBack(enabled = appState.selectedTab == 2) { appState.selectedTab = 0 }
+                            LaunchedEffect(back.active) { appState.backPreviewSearch = back.active }
                             Surface(
-                                modifier = Modifier.fillMaxSize().pointerInput(Unit) {},
+                                modifier = Modifier.fillMaxSize().predictiveBack(back).pointerInput(Unit) {},
                                 color = MaterialTheme.colorScheme.background
                             ) {
                                 SettingsScreen(
@@ -387,6 +452,13 @@ internal fun SpojeApp() {
                 }
 
                 // bottom sheet vozidla nad celým UI (i nad spodní lištou), ale bez Dialog okna => naběhne hned
+                // detail jedné jízdy spojení (ťuknutí na číslo linky v hledání)
+                if (appState.selectedTab == 0) {
+                    appState.legSheet?.let { (j, idx) ->
+                        JourneyLegSheet(j, idx, api, onDismiss = { appState.legSheet = null }) { showLegOnMap(j, idx) }
+                    }
+                }
+
                 if (appState.selectedTab == 1) {
                     SelectedVehicleSheet(api, appState)
                     SelectedStopSheet(api, appState)

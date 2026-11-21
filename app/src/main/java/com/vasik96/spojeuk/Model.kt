@@ -102,6 +102,8 @@ data class Journey(
     val boardStopName: String? = null,  // kam se jde pěšky
     val transferWalkMin: Int? = null,   // chůze mezi spoji
     var routeStops: List<String> = emptyList(),
+    /** Živá zpoždění jízd v min (index v [rawLegs] → zpoždění), z doby hledání. */
+    var legDelays: Map<Int, Int> = emptyMap(),
 ) {
     val dep: Int get() = sortKey
     val arr: Int get() = sortKey + durationMinutes * 60

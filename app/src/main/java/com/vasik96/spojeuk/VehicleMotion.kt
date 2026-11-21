@@ -475,7 +475,9 @@ internal class VehicleMotion(
         lng: Double,
         obsMs: Long,
         heading: Double? = null,
-        predict: Boolean = false
+        predict: Boolean = false,
+        /** Zobrazená poloha je zastaralá (mapa byla zavřená): na novou polohu skočit, ne ji dojíždět animací. */
+        snap: Boolean = false,
     ): Boolean {
         val np = LatLng(lat, lng)
         val now = elapsed()
@@ -511,7 +513,7 @@ internal class VehicleMotion(
         lastFixRecvMs = now
         direction(heading, moveVec)?.let { lastDir = it }
 
-        if (haversineMeters(shown, np) > TELEPORT_M) {
+        if (snap || haversineMeters(shown, np) > TELEPORT_M) {
             leaveRoute(now)
             shown = np
             planLinear(np, np, now, 1.0)

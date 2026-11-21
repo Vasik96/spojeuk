@@ -99,6 +99,10 @@ class SpojeAppState(
 
     var journeys by mutableStateOf<List<Journey>>(emptyList())
     var departAt by mutableStateOf<java.time.LocalDateTime?>(null)   // zvolený čas odjezdu; null = teď
+    /** [departAt] je čas příjezdu ("chci tam být do"), ne odjezdu. */
+    var arriveBy by mutableStateOf(false)
+    /** Zobrazené výsledky jsou podle příjezdu (nejpozdější vyhovující dole). */
+    var searchedArriveBy by mutableStateOf(false)
     var searchLoading by mutableStateOf(false)
     var loadingMore by mutableStateOf(false)
     var refreshing by mutableStateOf(false)
@@ -109,6 +113,27 @@ class SpojeAppState(
 
     var search: JourneySearch? = null
     var searchJob: Job? = null
+
+    /** Spojení otevřené v detailu (podobrazovka hledání); null = seznam výsledků. */
+    var detailJourney by mutableStateOf<Journey?>(null)
+
+    /** Obrazovka výsledků hledání (přes hlavní obrazovku s formulářem a historií). */
+    var showResults by mutableStateOf(false)
+
+    /** Zastávka "kam" posledního hledání (do hlavičky výsledků). */
+    var searchedTo by mutableStateOf<Stop?>(null)
+
+    /** Změna historie hledání (seznam na hlavní obrazovce se podle toho načte znovu). */
+    var historyRev by mutableIntStateOf(0)
+
+    /** Probíhá gesto zpět z jiné záložky na Spoje: záložka Spoje se pod ní ukáže jako náhled. */
+    var backPreviewSearch by mutableStateOf(false)
+
+    /** Na mapě neukazovat pěší trasu od uživatele k výchozí zastávce (zobrazená je až další jízda spojení). */
+    var hideUserWalk by mutableStateOf(false)
+
+    /** Bottom sheet jedné jízdy spojení: (spojení, index úseku v [Journey.rawLegs]). */
+    var legSheet by mutableStateOf<Pair<Journey, Int>?>(null)
 
     var loadingEarlier by mutableStateOf(false)
     var hasEarlier by mutableStateOf(true)
@@ -179,6 +204,9 @@ class SpojeAppState(
     }
     var routeLoading by mutableStateOf(false)
 
+    /** Místo, na které má mapa jednorázově přiblížit (zastávka otevřená z hledání), null = nic. */
+    var focusPoint by mutableStateOf<LatLng?>(null)
+
     /** Spoj, na který má mapa přiblížit (jednorázově). */
     var focusTrip by mutableStateOf<TripRef?>(null)
 
@@ -216,7 +244,7 @@ class SpojeAppState(
     var journeyWalks by mutableStateOf<List<WalkRoute>>(emptyList())
 
     var journeyWalk: WalkRoute?
-        get() = journeyWalks.firstOrNull() ?: walkRoute
+        get() = journeyWalks.firstOrNull() ?: walkRoute?.takeUnless { hideUserWalk }
         set(value) {
             journeyWalks = if (value != null) listOf(value) else emptyList()
         }
@@ -225,7 +253,7 @@ class SpojeAppState(
     private var routeJob: Job? = null
 
     val hasRoute: Boolean
-        get() = tripRoute.isNotEmpty() || fullRoute.isNotEmpty() || tripRouteSegments.isNotEmpty() || walkRoute != null || journeyWalks.isNotEmpty()
+        get() = tripRoute.isNotEmpty() || fullRoute.isNotEmpty() || tripRouteSegments.isNotEmpty() || (walkRoute != null && !hideUserWalk) || journeyWalks.isNotEmpty()
 
     fun clearRoute() {
         routeJob?.cancel()

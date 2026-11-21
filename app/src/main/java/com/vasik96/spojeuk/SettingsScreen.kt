@@ -2,6 +2,8 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.foundation.layout.Box
+
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -98,33 +100,22 @@ internal fun SettingsScreen(
     appState: SpojeAppState,
     api: TransitRepository
 ) {
-    AnimatedContent(
-        targetState = appState.settingsSubscreen,
-        modifier = modifier,
-        transitionSpec = {
-            if (targetState == SettingsSubscreen.DATA_UPDATES) {
-                (slideInHorizontally(tween(300, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(150))) togetherWith
-                        (slideOutHorizontally(tween(300, easing = FastOutSlowInEasing)) { -it / 4 } + fadeOut(tween(200, delayMillis = 100, easing = FastOutLinearInEasing)))
-            } else {
-                (slideInHorizontally(tween(260, easing = FastOutSlowInEasing)) { -it / 4 } + fadeIn(tween(150))) togetherWith
-                        (slideOutHorizontally(tween(260, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(200, easing = FastOutLinearInEasing)))
-            }
-        },
-        label = "settingsSubscreen"
-    ) { screen ->
-        // Surface s pozadím, aby se obě obrazovky při přechodu nepřekrývaly průhledně
+    // hlavní nastavení zůstává pod podobrazovkou složené, aby ho gesto zpět mohlo ukázat jako náhled
+    Box(modifier) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            when (screen) {
-                SettingsSubscreen.DATA_UPDATES -> DataUpdatesScreen(
+            SettingsMain(modifier = Modifier.fillMaxSize(), appState = appState, api = api)
+        }
+        PredictiveBackLayer(
+            visible = appState.settingsSubscreen == SettingsSubscreen.DATA_UPDATES,
+            onBack = { appState.settingsSubscreen = SettingsSubscreen.MAIN },
+            enabled = appState.selectedTab == 2
+        ) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                DataUpdatesScreen(
                     modifier = Modifier.fillMaxSize(),
                     appState = appState,
                     api = api,
                     onBack = { appState.settingsSubscreen = SettingsSubscreen.MAIN }
-                )
-                SettingsSubscreen.MAIN -> SettingsMain(
-                    modifier = Modifier.fillMaxSize(),
-                    appState = appState,
-                    api = api
                 )
             }
         }

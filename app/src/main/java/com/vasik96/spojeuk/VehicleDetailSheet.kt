@@ -3,7 +3,6 @@
 package com.vasik96.spojeuk
 
 import androidx.compose.ui.res.stringResource
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animate
@@ -343,7 +342,17 @@ internal fun InlineBottomSheet(
         }
     }
 
-    BackHandler { dismiss() }
+    // prediktivní zpět: sheet během gesta trochu sjede a zmenší se, dokončené gesto ho zavře
+    var backP by remember { mutableFloatStateOf(0f) }
+    androidx.activity.compose.PredictiveBackHandler { events ->
+        try {
+            events.collect { backP = it.progress }
+            dismiss()
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            scope.launch { animate(backP, 0f, animationSpec = tween(160)) { v, _ -> backP = v } }
+            throw e
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
         // scrim
@@ -362,7 +371,11 @@ internal fun InlineBottomSheet(
                 .onSizeChanged { heightPx = it.height }
                 .graphicsLayer {
                     alpha = if (heightPx == 0) 0f else 1f
-                    translationY = (1f - shown.value) * heightPx + dragPx
+                    translationY = (1f - shown.value) * heightPx + dragPx + backP * 48.dp.toPx()
+                    val s = 1f - 0.06f * backP
+                    scaleX = s
+                    scaleY = s
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f)
                 }
                 .pointerInput(Unit) { detectTapGestures { } }
                 .draggable(
