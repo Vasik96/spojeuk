@@ -58,8 +58,19 @@ internal const val STOP_MIN_ZOOM_GOOGLE = 14.5f
 /** Bitmapy zastávek na mapě: kruh s ikonou autobusu / vlaku. */
 internal class StopIcons(val bus: Bitmap, val rail: Bitmap)
 
-/** Průměr ikony zastávky (dp), včetně světlého lemu. */
-internal const val STOP_ICON_DP = 30f
+/** Maximální průměr ikony zastávky (dp), při vysokém zoomu. */
+internal const val STOP_ICON_MAX_DP = 30f
+/** Minimální průměr ikony zastávky (dp), při základním přiblížení. */
+internal const val STOP_ICON_MIN_DP = 16f
+
+/** Spočíta velikost ikony zastávky v dp pro daný zoom. */
+internal fun stopIconDpForZoom(zoom: Double): Float {
+    if (zoom <= 13.5) return STOP_ICON_MIN_DP
+    if (zoom >= 17.0) return STOP_ICON_MAX_DP
+    val t = ((zoom - 13.5) / (17.0 - 13.5)).toFloat()
+    return STOP_ICON_MIN_DP + t * (STOP_ICON_MAX_DP - STOP_ICON_MIN_DP)
+}
+internal fun stopIconDpForZoom(zoom: Float): Float = stopIconDpForZoom(zoom.toDouble())
 
 /** Ikony zastávek v barvách Material You (podle aktuálního motivu). */
 @Composable
@@ -72,8 +83,8 @@ internal fun rememberStopIcons(): StopIcons {
     val glyph = cs.onPrimary
     val ring = cs.surface
     return remember(fill, glyph, ring, density) {
-        val px = with(density) { STOP_ICON_DP.dp.toPx() }
-        val ringW = with(density) { 2.5.dp.toPx() }
+        val px = with(density) { STOP_ICON_MAX_DP.dp.toPx() }
+        val ringW = with(density) { 1.2.dp.toPx() } // tenčí okraj
         fun icon(painter: androidx.compose.ui.graphics.painter.Painter): Bitmap {
             val img = ImageBitmap(px.toInt(), px.toInt())
             CanvasDrawScope().draw(density, LayoutDirection.Ltr, androidx.compose.ui.graphics.Canvas(img), Size(px, px)) {

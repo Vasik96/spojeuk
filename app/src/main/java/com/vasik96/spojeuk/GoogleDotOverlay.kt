@@ -144,18 +144,22 @@ private class DotPainter(private val context: Context) {
                 stopPaint.alpha = (stopA * 255f).toInt().coerceIn(0, 255)
                 val sx = layer.stopWx
                 val sy = layer.stopWy
-                val hw = icons.bus.width / 2f
-                val hh = icons.bus.height / 2f
+                val iconDp = stopIconDpForZoom(zoom)
+                val scale = iconDp / STOP_ICON_MAX_DP
+                val bw = icons.bus.width * scale
+                val bh = icons.bus.height * scale
+                val hw = bw / 2f
+                val hh = bh / 2f
+                val dstRect = android.graphics.RectF()
                 for (i in sts.indices) {
                     val dx = (sx[i] - cwx) * world
                     val dy = (sy[i] - cwy) * world
                     val x = (dx * c + dy * s + cx).toFloat()
                     val y = (-dx * s + dy * c + cy).toFloat()
                     if (x < -hw || x > w + hw || y < -hh || y > h + hh) continue
-                    canvas.drawBitmap(
-                        if (sts[i].kind == StopKind.RAIL) icons.rail else icons.bus,
-                        Math.round(x - hw).toFloat(), Math.round(y - hh).toFloat(), stopPaint
-                    )
+                    val bmp = if (sts[i].kind == StopKind.RAIL) icons.rail else icons.bus
+                    dstRect.set(x - hw, y - hh, x + hw, y + hh)
+                    canvas.drawBitmap(bmp, null, dstRect, stopPaint)
                 }
             }
         }
@@ -166,6 +170,7 @@ private class DotPainter(private val context: Context) {
         if (appear <= 0f) { drawStops(); return }
 
         atlas.beginFrame()
+        drawStops()
         if (!fade.switching()) {
             // běžný snímek: jeden průchod; v režimu teček se (doznívající) štítky ignorují
             pass(canvas, if (fade.dotMode) PASS_DOTS else PASS_ALL, appear, layer, cwx, cwy, world, c, s, cx, cy, minX, maxX, minY, maxY)
@@ -175,8 +180,6 @@ private class DotPainter(private val context: Context) {
             pass(canvas, PASS_DOTS_LABELED, appear * fade.dotAlpha(), layer, cwx, cwy, world, c, s, cx, cy, minX, maxX, minY, maxY)
             pass(canvas, PASS_LABELS, appear * fade.labelAlpha(), layer, cwx, cwy, world, c, s, cx, cy, minX, maxX, minY, maxY)
         }
-
-        drawStops()
 
         val hlLayer = appear < 0.996f && hl in 0 until n
         if (hlLayer) canvas.saveLayerAlpha(null, (appear * 255f).toInt())

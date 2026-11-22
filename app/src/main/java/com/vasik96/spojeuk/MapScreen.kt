@@ -1482,8 +1482,10 @@ private fun MapLibreScreenContent(
                                 if (tapValid && ev.eventTime - downAt <= android.view.ViewConfiguration.getLongPressTimeout()) {
                                     val ll = m.projection.fromScreenLocation(android.graphics.PointF(ev.x, ev.y))
                                     if (!pickVehicle(ll) && m.cameraPosition.zoom >= STOP_MIN_ZOOM_GOOGLE - 1.0) {
-                                        // zastávka do ~14 dp od ťuknutí (metry na pixel jen jednou, žádná projekce každé)
-                                        val r = 18.0 * density * m.projection.getMetersPerPixelAtLatitude(ll.latitude)
+                                        // klikací oblast přizpůsobená aktuální velikosti ikony zastávky
+                                        val iconDp = stopIconDpForZoom(m.cameraPosition.zoom)
+                                        val hitRadiusDp = iconDp / 2f + 4f
+                                        val r = hitRadiusDp * density * m.projection.getMetersPerPixelAtLatitude(ll.latitude)
                                         shownStops
                                             .map { it to Geo.distanceM(ll.latitude, ll.longitude, it.lat, it.lng) }
                                             .filter { it.second <= r }
@@ -1536,7 +1538,7 @@ private fun MapLibreScreenContent(
             }
             if (style.getSource(STOPS_SRC) == null) {
                 style.addSource(GeoJsonSource(STOPS_SRC, FeatureCollection.fromFeatures(emptyList<Feature>())))
-                // nad vozidly (vlak u nástupiště nesmí zakrýt zastávku), pod zvýrazněným vozidlem
+                // zastávky pod vozidly
                 ensureVehicleLayer(style)
                 style.addLayerBelow(
                     SymbolLayer(STOPS_LAYER, STOPS_SRC).withProperties(
@@ -1544,8 +1546,15 @@ private fun MapLibreScreenContent(
                         PropertyFactory.iconAllowOverlap(true),
                         PropertyFactory.iconIgnorePlacement(true),
                         PropertyFactory.iconOpacity(0f),
+                        PropertyFactory.iconSize(
+                            Expression.interpolate(
+                                Expression.linear(), Expression.zoom(),
+                                Expression.stop(13.5, STOP_ICON_MIN_DP / STOP_ICON_MAX_DP),
+                                Expression.stop(17.0, 1.0f)
+                            )
+                        ),
                     ).also { it.iconOpacityTransition = TransitionOptions(STOP_FADE_MS, 0, false) },
-                    VEH_HL_LAYER
+                    VEH_DOT_LAYER
                 )
                 stopsShown = null
                 stopsDirty.set(true)
