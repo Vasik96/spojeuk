@@ -338,7 +338,7 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
                 train = o.optBoolean("train", false),
                 accessible = optBool(o, "low"),
                 airConditioned = optBool(o, "ac"),
-                heading = if (o.isNull("heading")) null else o.optDouble("heading"),
+                heading = if (o.isNull("heading")) null else o.optDouble("heading").takeIf { it != 0.0 },
                 station = o.optInt("station", 0),
                 finalStation = o.optInt("finalStation", 0),
                 sources = sources,

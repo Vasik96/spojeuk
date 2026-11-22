@@ -718,9 +718,11 @@ internal class VehicleKeyer {
         if (v.serverUid.isNotEmpty()) !v.serverUid.startsWith("p") else v.id != 0
 
     private fun directionCompatible(a: Double?, b: Double?): Boolean {
-        if (a == null || b == null) return true
+        val ha = a?.takeIf { it != 0.0 }
+        val hb = b?.takeIf { it != 0.0 }
+        if (ha == null || hb == null) return true
 
-        val diff = kotlin.math.abs((a - b + 540.0) % 360.0 - 180.0)
+        val diff = kotlin.math.abs((ha - hb + 540.0) % 360.0 - 180.0)
         return diff <= MAX_DIRECTION_DIFF
     }
 

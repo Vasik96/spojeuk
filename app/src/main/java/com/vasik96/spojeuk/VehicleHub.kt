@@ -55,6 +55,7 @@ class HeadingTracker(private val minMoveM: Double = 15.0) {
 
     @Synchronized
     fun track(v: Vehicle): Vehicle {
+        val effectiveHeading = v.heading?.takeIf { it != 0.0 }
         val prev = lastPos[v.uid]
         if (prev == null) {
             lastPos[v.uid] = v.lat to v.lng
@@ -62,7 +63,8 @@ class HeadingTracker(private val minMoveM: Double = 15.0) {
             headings[v.uid] = Geo.bearingDeg(prev.first, prev.second, v.lat, v.lng)
             lastPos[v.uid] = v.lat to v.lng
         }
-        return if (v.heading != null) v else v.copy(heading = headings[v.uid])
+        val h = effectiveHeading ?: headings[v.uid]
+        return if (h != v.heading) v.copy(heading = h) else v
     }
 }
 

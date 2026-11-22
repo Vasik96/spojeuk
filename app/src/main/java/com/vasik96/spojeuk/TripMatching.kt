@@ -212,7 +212,7 @@ class TripLocator(private val tt: Timetable) : TripProgress {
         }
         if (score == Double.MAX_VALUE) return null
 
-        val vehicleHeading = v.heading
+        val vehicleHeading = v.heading?.takeIf { it != 0.0 }
         if (vehicleHeading != null && !legHeading.isNaN()) {
             if (Geo.angleDiff(vehicleHeading, legHeading) > 90) return null
         }

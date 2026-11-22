@@ -78,7 +78,7 @@ internal class MotionHub(
             val e = obtain(k, v, now)
             e.vehicle = v
             // azimut z DPMÚL je směr k nejbližší zastávce vzdušnou čarou, ne směr jízdy: tam směr určí realtime pohyb
-            val heading = if (v.source == SourceIds.DPMUL) null else v.heading
+            val heading = if (v.source == SourceIds.DPMUL) null else v.heading?.takeIf { it != 0.0 }
             e.motion.onFix(v.lat, v.lng, v.observedAtMs, heading = heading, predict = followRoads, snap = snap)
 
             e.wantKey = if (followRoads) "${v.tid}|${v.cis}|${v.trip}" else null
