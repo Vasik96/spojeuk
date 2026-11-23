@@ -93,19 +93,9 @@ internal enum class VehicleStyle(
 }
 
 /** Druh dopravy spoje z jízdního řádu (kategorie + linka metra) jako styl vozu. */
-/**
- * Trolejbusové linky DPMÚL (Ústí nad Labem). DPMÚL ani DÚK druh vozidla neposílají a jízdní řád ho nemá,
- * proto pevný seznam (denní 70–76, 80, 84, 87, 88, noční 43, 46). PID posílá mode = "trolleybus".
- */
-internal val DPMUL_TROLLEYBUS_LINES = setOf("70", "71", "72", "73", "74", "75", "76", "80", "84", "87", "88", "43", "46")
-
-/** Linka [line] dopravce [agency] je ústecký trolejbus (stejná čísla jinde, třeba v Teplicích, nejsou). */
-internal fun isDpmulTrolleybus(line: String, agency: String): Boolean =
-    line.trim() in DPMUL_TROLLEYBUS_LINES && agency.contains("Ústí nad Labem") && agency.contains("Dopravní podnik")
-
 internal fun tripStyle(category: MapCategory, line: String, agency: String = ""): VehicleStyle = when (category) {
     MapCategory.TRAIN -> VehicleStyle.TRAIN
-    MapCategory.BUS -> if (isDpmulTrolleybus(line, agency)) VehicleStyle.TROLLEYBUS else VehicleStyle.BUS
+    MapCategory.BUS -> VehicleStyle.BUS
     MapCategory.TRAM -> VehicleStyle.TRAM
     MapCategory.METRO -> when (line.trim().uppercase()) {
         "A" -> VehicleStyle.METRO_A; "B" -> VehicleStyle.METRO_B; "C" -> VehicleStyle.METRO_C
@@ -126,14 +116,9 @@ internal fun vehicleStyle(v: Vehicle): VehicleStyle {
             else -> "bus"
         }
     }
-    // vozy DPMÚL (i když polohu dodává DÚK): trolejbusové linky podle seznamu
-    val isTrolleybus = mode == "trolleybus" || (mode == "bus" && v.line.trim() in DPMUL_TROLLEYBUS_LINES &&
-        (v.source == SourceIds.DPMUL || isDpmulTrolleybus(v.line, v.agency) ||
-                (v.source == SourceIds.DUK && v.ids.any { it.startsWith("dpmul:") })))
-
-    if (isTrolleybus) return if (v.delay > 3) VehicleStyle.TROLLEYBUS_LATE else VehicleStyle.TROLLEYBUS
 
     return when (mode) {
+        "trolleybus" -> if (v.delay > 3) VehicleStyle.TROLLEYBUS_LATE else VehicleStyle.TROLLEYBUS
         "train" -> VehicleStyle.TRAIN
         "tram" -> VehicleStyle.TRAM
         "ferry" -> VehicleStyle.FERRY
