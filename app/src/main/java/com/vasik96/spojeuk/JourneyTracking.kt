@@ -119,6 +119,7 @@ class JourneyTrackingService : Service() {
             .setAutoCancel(true)
             .setTimeoutAfter(4 * 60_000L)
             .setContentIntent(openIntent(this))
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
         runCatching { NotificationManagerCompat.from(this).notify(ALERT_ID, n) }
     }
@@ -152,11 +153,13 @@ class JourneyTrackingService : Service() {
                     setSound(null, null)          // průběžné aktualizace nepípají
                     enableVibration(false)
                     setShowBadge(false)
+                    lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
                 }
             )
             nm.createNotificationChannel(
                 NotificationChannel(CHANNEL_ALERTS, tr(R.string.track_channel_alerts), NotificationManager.IMPORTANCE_HIGH).apply {
                     description = tr(R.string.track_channel_alerts_desc)
+                    lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
                 }
             )
         }
@@ -274,6 +277,7 @@ class JourneyTrackingService : Service() {
                 .setContentIntent(openIntent(ctx))
                 .addAction(0, tr(R.string.track_stop), stopIntent)
                 .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .build()
         }
     }
