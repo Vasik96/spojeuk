@@ -345,6 +345,7 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
                 ids = ids,
                 serverUid = o.optString("uid"),
                 mode = o.optStringClean("mode"),
+                christmas = o.optBoolean("christmas", false),
             )
         }
     }

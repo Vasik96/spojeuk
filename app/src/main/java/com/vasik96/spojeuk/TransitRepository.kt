@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -11,6 +12,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.time.LocalDateTime
@@ -131,6 +133,58 @@ class TransitRepository(context: Context? = null) {
             geometry.forTrip(tt, tid) to platformLocations(tt, tt.tripStops(tid))
         }
 
+    // ── poslední karta odjezdů z nejbližší zastávky: ukáže se hned po startu, než se načte jízdní řád ──
+    private val nearbyFile = context?.let { File(it.filesDir, "last_nearby.json") }
+
+    /** Uloží poslední výsledek [nearbyDepartures] (k poloze [lat], [lng]) pro okamžité zobrazení po příštím startu. */
+    suspend fun saveNearbySnapshot(lat: Double, lng: Double, nb: NearbyDepartures) = withContext(Dispatchers.IO) {
+        val f = nearbyFile ?: return@withContext
+        runCatching {
+            val deps = JSONArray()
+            for ((d, p) in nb.departures) deps.put(
+                JSONObject().put("tid", d.tid).put("dep", d.depSec).put("day", d.day.toString())
+                    .put("line", d.line).put("head", d.headsign).put("cat", d.category.name).put("ag", d.agency)
+                    .put("pLat", p.lat).put("pLng", p.lng).put("pName", p.name)
+            )
+            val o = JSONObject().put("tag", store.meta()["tag"] ?: "")
+                .put("uLat", lat).put("uLng", lng)
+                .put("name", nb.stop.name).put("lat", nb.stop.lat).put("lng", nb.stop.lng).put("dist", nb.distanceM)
+                .put("deps", deps)
+            val tmp = File(f.parentFile, f.name + ".tmp")
+            tmp.writeText(o.toString())
+            if (!tmp.renameTo(f)) tmp.delete()
+        }.onFailure { Log.w(TAG, "uložení odjezdů z blízké zastávky selhalo: ${it.message}") }
+    }
+
+    /**
+     * Uložená karta pro stejné místo (do 150 m) a stejný jízdní řád, jen s odjezdy, které ještě neodjely.
+     * Má příznak [NearbyDepartures.cached]: zastávka je jen popisek a ťuknutí se řeší až s opravdovými daty.
+     */
+    suspend fun cachedNearby(lat: Double, lng: Double): NearbyDepartures? = withContext(Dispatchers.IO) {
+        val f = nearbyFile?.takeIf { it.exists() } ?: return@withContext null
+        runCatching {
+            val o = JSONObject(f.readText())
+            if (o.optString("tag") != (store.meta()["tag"] ?: "")) return@runCatching null
+            if (Geo.distanceM(lat, lng, o.getDouble("uLat"), o.getDouble("uLng")) > 150.0) return@runCatching null
+            val now = nowPrague()
+            val arr = o.getJSONArray("deps")
+            val deps = ArrayList<Pair<StopDeparture, MapStop>>()
+            for (i in 0 until arr.length()) {
+                val j = arr.getJSONObject(i)
+                val day = java.time.LocalDate.parse(j.getString("day"))
+                val dep = j.getInt("dep")
+                if (!day.atStartOfDay().plusSeconds(dep.toLong()).isAfter(now)) continue
+                deps += StopDeparture(
+                    j.getInt("tid"), dep, day, j.getString("line"), j.getString("head"),
+                    MapCategory.valueOf(j.getString("cat")), j.optString("ag", ""),
+                ) to MapStop("", j.getDouble("pLat"), j.getDouble("pLng"), j.getString("pName"), IntArray(0))
+            }
+            if (deps.isEmpty()) return@runCatching null
+            val stop = MapStop("", o.getDouble("lat"), o.getDouble("lng"), o.getString("name"), IntArray(0))
+            NearbyDepartures(stop, o.getDouble("dist"), deps, cached = true)
+        }.getOrNull()
+    }
+
     /**
      * Nejbližší zastávka k poloze (do [maxM] m vzdušnou čarou) a její nejbližší odjezdy ze všech nástupišť
      * (oba směry), seřazené podle času. null = žádná zastávka v dosahu nebo jízdní řád ještě není načtený.
@@ -142,7 +196,8 @@ class TransitRepository(context: Context? = null) {
         maxM: Double = 800.0, limit: Int = 4,
     ): NearbyDepartures? =
         withContext(Dispatchers.Default) {
-            val b = store.current ?: return@withContext null
+            // čeká se na dokončení načtení (bez dotazování po třech vteřinách), samo načítání už běží na pozadí
+            val b = store.awaitCurrent()
             val idx = stopIndexFor(b)
             val nearest: MapStop
             val dist: Double
@@ -383,13 +438,13 @@ class TransitRepository(context: Context? = null) {
      */
     private fun prewarmPlanner() {
         val b = store.current ?: return
-        // pěší přestupy mezi zastávkami (~0,7 s) a síť spojů (~1,5 s) souběžně, obojí potřebuje první hledání
-        scope.launch(Dispatchers.Default) {
-            val t0 = System.nanoTime()
-            runCatching { b.timetable.foot }.onFailure { Log.w(TAG, "příprava pěších přestupů selhala: ${it.message}") }
-            Log.d("SearchPerf", "pěší přestupy připraveny za ${(System.nanoTime() - t0) / 1_000_000} ms")
+        // Karta odjezdů z nejbližší zastávky potřebuje index zastávek a síť dnešního dne: ty se stavějí hned a souběžně.
+        // Pěší přestupy (až pro hledání spojení) přijdou na řadu teprve potom, ať neberou procesor kartě.
+        // stopIndexFor je zamčený, takže kdo index potřebuje dřív, jen počká na rozdělanou stavbu.
+        val indexJob = scope.async(Dispatchers.Default) {
+            runCatching { stopIndexFor(b) }.onFailure { Log.w(TAG, "příprava indexu zastávek selhala: ${it.message}") }
         }
-        scope.launch(Dispatchers.Default) {
+        val netJob = scope.async(Dispatchers.Default) {
             val now = nowPrague()
             runCatching {
                 val today = now.toLocalDate()
@@ -397,6 +452,12 @@ class TransitRepository(context: Context? = null) {
             }.onFailure { Log.w(TAG, "příprava plánovače selhala: ${it.message}") }
             val rt = Runtime.getRuntime()
             Log.d("SearchPerf", "halda po přípravě: ${(rt.totalMemory() - rt.freeMemory()) / 1048576} MB z ${rt.maxMemory() / 1048576} MB")
+        }
+        scope.launch(Dispatchers.Default) {
+            indexJob.await(); netJob.await()
+            val t0 = System.nanoTime()
+            runCatching { b.timetable.foot }.onFailure { Log.w(TAG, "příprava pěších přestupů selhala: ${it.message}") }
+            Log.d("SearchPerf", "pěší přestupy připraveny za ${(System.nanoTime() - t0) / 1_000_000} ms")
         }
     }
 
@@ -875,7 +936,11 @@ private const val SEARCH_SPAN_HOURS = 24L
 
 /** Stránkování výsledků hledání (načíst další / dřívější). */
 /** Nejbližší zastávka (pro hlavní obrazovku hledání) a její odjezdy s nástupištěm, ze kterého jedou. */
-class NearbyDepartures(val stop: MapStop, val distanceM: Double, val departures: List<Pair<StopDeparture, MapStop>>)
+class NearbyDepartures(
+    val stop: MapStop, val distanceM: Double, val departures: List<Pair<StopDeparture, MapStop>>,
+    /** Uložený výsledek z minula (zobrazí se hned po startu), ne čerstvě spočítaný. */
+    val cached: Boolean = false,
+)
 
 class JourneySearch(
     private val api: TransitRepository,

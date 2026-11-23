@@ -2,6 +2,7 @@ package com.vasik96.spojeuk
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -41,6 +42,14 @@ class TimetableStore(
     @Volatile
     var current: TimetableBundle? = null
         private set
+
+    /** Dokončí se ve chvíli, kdy je jízdní řád načtený; kdo na něj čeká, nemusí dotazovat dokola (viz [awaitCurrent]). */
+    private val ready = CompletableDeferred<TimetableBundle>()
+
+    /**
+     * Počká na načtený jízdní řád, ale sám ho nespouští ani nestahuje (jako [ensure]). Bez zpoždění, jakmile je hotový.
+     */
+    suspend fun awaitCurrent(): TimetableBundle = current ?: ready.await()
 
     private val loadLock = Mutex()
     private val importLock = Mutex()
@@ -118,6 +127,7 @@ class TimetableStore(
     private fun install(tt: Timetable): TimetableBundle {
         val bundle = TimetableBundle(tt, Planner(tt))
         current = bundle
+        ready.complete(bundle)
         return bundle
     }
 

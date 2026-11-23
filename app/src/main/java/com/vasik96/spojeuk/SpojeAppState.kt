@@ -514,7 +514,18 @@ class SpojeAppState(
         settingsPrefs.edit { putString("map_provider", provider.name) }
     }
 
-    var focusedTripVehicle by mutableStateOf<Vehicle?>(null)
+    private var focusedTripVehicleState by mutableStateOf<Vehicle?>(null)
+
+    /**
+     * Vůz, který právě sledujeme na trase spoje. Barva trasy z jízdního řádu ([tripStyle]) o vánočním voze nic neví
+     * (je to jen příznak živého vozu), takže jakmile se vánoční vůz najde, přebije barvu trasy jeho stylem (červená).
+     */
+    var focusedTripVehicle: Vehicle?
+        get() = focusedTripVehicleState
+        set(value) {
+            focusedTripVehicleState = value
+            if (value != null && value.christmas) routeStyle = vehicleStyle(value)
+        }
     var focusedTripRef by mutableStateOf<TripRef?>(null)
 
     /** Najde v novém seznamu stejný vůz jako [cur]. Primárně podle uid ze serveru, pak source + id nebo sameVehicleId. */

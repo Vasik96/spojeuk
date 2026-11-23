@@ -96,12 +96,13 @@ private class DotPainter(private val context: Context) {
     private val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG)   // bez barvy (alfa paintu by se propsala do bitmapy)
     private var lastColor = 0
     private var lastLate = false
+    private var lastChristmas = false
     private var lastBmp: Bitmap? = null
     private val stopPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
-    private fun dotFor(color: Int, late: Boolean): Bitmap {
-        if (color == lastColor && late == lastLate) lastBmp?.let { return it }
-        return dotBitmap(context, color, late).also { lastColor = color; lastLate = late; lastBmp = it }
+    private fun dotFor(color: Int, late: Boolean, christmas: Boolean): Bitmap {
+        if (color == lastColor && late == lastLate && christmas == lastChristmas) lastBmp?.let { return it }
+        return dotBitmap(context, color, late, christmas).also { lastColor = color; lastLate = late; lastChristmas = christmas; lastBmp = it }
     }
 
     private fun batch(page: Int): Batch {
@@ -222,6 +223,7 @@ private class DotPainter(private val context: Context) {
         val ext = extrapolationMs(layer)
         val colors = layer.color
         val lates = layer.late
+        val christmases = layer.christmas
         val labels = layer.label
         val hl = layer.hl
         for (b in batches) b.reset()
@@ -235,10 +237,10 @@ private class DotPainter(private val context: Context) {
             if (i == hl) continue
             val lb = labels[i]
             val bmp = when (mode) {
-                PASS_ALL -> lb ?: dotFor(colors[i], lates[i])
-                PASS_DOTS -> dotFor(colors[i], lates[i])
-                PASS_DOTS_UNLABELED -> if (lb == null) dotFor(colors[i], lates[i]) else continue
-                PASS_DOTS_LABELED -> if (lb != null) dotFor(colors[i], lates[i]) else continue
+                PASS_ALL -> lb ?: dotFor(colors[i], lates[i], christmases[i])
+                PASS_DOTS -> dotFor(colors[i], lates[i], christmases[i])
+                PASS_DOTS_UNLABELED -> if (lb == null) dotFor(colors[i], lates[i], christmases[i]) else continue
+                PASS_DOTS_LABELED -> if (lb != null) dotFor(colors[i], lates[i], christmases[i]) else continue
                 else -> lb ?: continue
             }
             val mv = vwx[i] != 0.0 || vwy[i] != 0.0
