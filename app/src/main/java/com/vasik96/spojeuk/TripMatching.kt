@@ -115,6 +115,18 @@ class TripLocator(private val tt: Timetable) : TripProgress {
 
     private val polylines = ConcurrentHashMap<Int, Polyline>()
 
+    // Přiřazení podle polohy je odhad a bez paměti by se u každého dotazu (a u každého kliknutí na „zobrazit trasu“)
+    // mohlo rozhodnout jinak. Spoj, který vozu už byl přiřazen, proto dostává bonus a drží se, dokud vůz
+    // opravdu sedí na jiném spoji. Je součástí locatoru, takže s novým jízdním řádem (jiná čísla tid) zaniká.
+    private class Sticky(val tid: Int, val line: String, val atMs: Long)
+    private val sticky = ConcurrentHashMap<String, Sticky>()
+
+    /** Spoj, který byl tomuto vozu naposledy přiřazen podle polohy (jen pro stejnou linku a ne starý). */
+    fun stickyTid(v: Vehicle): Int? {
+        val s = sticky[v.uid] ?: return null
+        return if (s.line == v.line && System.currentTimeMillis() - s.atMs < STICKY_MS) s.tid else null
+    }
+
     // ───────── postup po trase ─────────
 
     override fun along(tid: Int, lat: Double, lng: Double): Double? {
@@ -161,6 +173,16 @@ class TripLocator(private val tt: Timetable) : TripProgress {
      * od jízdního řádu (po odečtení zpoždění); penalizace za opačný směr, bonus za shodný cíl a číslo spoje.
      */
     fun matchByPosition(v: Vehicle, agencyKeywords: List<String>): Int? {
+        val prefer = stickyTid(v)
+        val best = matchByPositionUncached(v, agencyKeywords, prefer)
+        if (best != null) {
+            if (sticky.size > STICKY_MAX) sticky.clear()
+            sticky[v.uid] = Sticky(best, v.line, System.currentTimeMillis())
+        }
+        return best
+    }
+
+    private fun matchByPositionUncached(v: Vehicle, agencyKeywords: List<String>, prefer: Int?): Int? {
         val now = nowPrague()
         val wantedHead = foldText(v.destination)
         val maxDist = maxStopDistance(v)
@@ -176,14 +198,14 @@ class TripLocator(private val tt: Timetable) : TripProgress {
                 // spojů a párují se stovky vozů => jinak stovky MB odpadu a GC zasekávající UI
                 if (!trips.has(tid) || trips.svc[tid] !in active || rel < trips.t0[tid] - 900 || rel > trips.t1[tid] + 900) continue
                 val trip = trips[tid] ?: continue
-                val score = scoreTrip(v, tid, trip, rel, wantedHead, maxDist) ?: continue
+                val score = scoreTrip(v, tid, trip, rel, wantedHead, maxDist, tid == prefer) ?: continue
                 if (score < bestScore) { best = tid; bestScore = score }
             }
         }
         return best
     }
 
-    private fun scoreTrip(v: Vehicle, tid: Int, trip: DbTrip, rel: Double, wantedHead: String, maxDist: Double): Double? {
+    private fun scoreTrip(v: Vehicle, tid: Int, trip: DbTrip, rel: Double, wantedHead: String, maxDist: Double, preferred: Boolean): Double? {
         val times = tt.tripTimes(tid) ?: return null
         // Vzdálenost k ÚSEKU mezi dvěma po sobě jdoucími zastávkami a čas interpolovaný po něm (ne jen k zastávkám):
         // vůz uprostřed dlouhého úseku (AE Dejvická → Letiště, příměstské linky) je od zastávek daleko, ale na trase.
@@ -212,10 +234,28 @@ class TripLocator(private val tt: Timetable) : TripProgress {
         }
         if (score == Double.MAX_VALUE) return null
 
-        val vehicleHeading = v.heading?.takeIf { it != 0.0 }
-        if (vehicleHeading != null && !legHeading.isNaN()) {
-            if (Geo.angleDiff(vehicleHeading, legHeading) > 90) return null
+        // Směr jízdy: nejdřív podle postupu po trase spoje (z historie pohybu). Ten nezávisí na zatáčkách, kdežto
+        // úhel úsečky mezi zastávkami se od skutečného směru v oblouku liší klidně o 90° i víc. Protisměrný spoj
+        // má postup opačný. Azimut se použije jen když historie pohybu chybí a je jen penalizací (dřív tvrdé
+        // zamítnutí vyřazovalo správný spoj, a zbyl jen ten opačný nebo žádný).
+        var dirKnown = false
+        val trail = v.trail
+        if (trail != null && Geo.distanceM(trail.first, trail.second, v.lat, v.lng) >= MIN_TRAIL_M) {
+            val a0 = along(tid, trail.first, trail.second)
+            val a1 = along(tid, v.lat, v.lng)
+            if (a0 != null && a1 != null) {
+                val moved = a1 - a0
+                if (moved < -PROGRESS_EPS_M) { score += WRONG_DIRECTION_PENALTY; dirKnown = true }
+                else if (moved > PROGRESS_EPS_M) { score -= RIGHT_DIRECTION_BONUS; dirKnown = true }
+            }
         }
+        if (!dirKnown) {
+            val vehicleHeading = v.heading?.takeIf { it != 0.0 }
+            if (vehicleHeading != null && !legHeading.isNaN() && Geo.angleDiff(vehicleHeading, legHeading) > 90) {
+                score += HEADING_MISMATCH_PENALTY
+            }
+        }
+        if (preferred) score -= STICKY_BONUS
         val tripHead = tt.foldedHead(trip.head)
         if (wantedHead.isNotBlank() && tripHead.isNotBlank()) {
             if (wantedHead in tripHead || tripHead in wantedHead) {
@@ -260,5 +300,13 @@ class TripLocator(private val tt: Timetable) : TripProgress {
     private companion object {
         const val SCORE_LIMIT = 800.0
         const val DEFAULT_STOP_DIST_M = 700.0
+        const val MIN_TRAIL_M = 15.0
+        const val PROGRESS_EPS_M = 5.0
+        const val WRONG_DIRECTION_PENALTY = 500.0
+        const val RIGHT_DIRECTION_BONUS = 60.0
+        const val HEADING_MISMATCH_PENALTY = 300.0
+        const val STICKY_BONUS = 150.0
+        const val STICKY_MS = 10 * 60_000L
+        const val STICKY_MAX = 6_000
     }
 }

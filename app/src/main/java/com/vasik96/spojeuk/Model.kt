@@ -168,6 +168,11 @@ data class Vehicle(
     /** Druh dopravy ze serveru: bus | tram | metro | trolleybus | train | ferry | funicular (prázdné = starší server). */
     val mode: String = "",
     val christmas: Boolean = false,
+    /**
+     * Poloha vozu před (aspoň ~20 m) touto polohou, ze sledování pohybu v [HeadingTracker]. Slouží ke zjištění
+     * směru jízdy po trase spoje (nezávisle na zatáčkách) tam, kde zdroj azimut nedává (DPMÚL).
+     */
+    val trail: Pair<Double, Double>? = null,
 ) {
     init {
         if (id == 200 && (source == "duk" || source == "dpmul")) {

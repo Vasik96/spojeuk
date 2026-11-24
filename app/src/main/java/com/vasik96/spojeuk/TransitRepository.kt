@@ -702,9 +702,7 @@ class TransitRepository(context: Context? = null) {
             return@withContext t.route.takeIf { it.size >= 2 } ?: stops
         }
         val tt = store.ensure().timetable
-        val tid = v.tid.takeIf { it != 0 }
-            ?: tt.findTripId(v.cis, v.trip)
-            ?: tripFallback(tt, v)
+        val tid = resolveTid(tt, v)
             ?: return@withContext emptyList()
         geometry.forTrip(tt, tid)
     }
@@ -716,15 +714,29 @@ class TransitRepository(context: Context? = null) {
      */
     private fun tripFallback(tt: Timetable, v: Vehicle): Int? =
         if (v.train) tt.findTrainTripIdAnyDay(v.cis)
-        else tt.locator.matchByPosition(v, emptyList())
+        else tt.locator.stickyTid(v)?.takeIf { tt.trips.has(it) }
+            ?: tt.locator.matchByPosition(v, if (isDpmul(v)) DPMUL_AGENCY_KEYWORDS else emptyList())
             ?: tt.locator.nearestOnLine(v.line, v.lat, v.lng, maxStopDistance(v))
+
+    private fun isDpmul(v: Vehicle) = v.source == SourceIds.DPMUL || SourceIds.DPMUL in v.sources
+
+    /**
+     * Spoj vozu pro trasu a detail. Detail dostává vůz z okamžiku otevření (bez spoje, se starým směrem), proto se
+     * bere nejnovější stav téhož vozu z flotily, kde už je spoj přiřazen stejně jako na mapě. Jinak by se
+     * u odhadovaných spojů (DPMÚL) trasa po kliknutí lišila od té, po které vůz jede.
+     */
+    private fun resolveTid(tt: Timetable, v0: Vehicle): Int? {
+        val v = hub.fleet.vehicles.firstOrNull { it.uid == v0.uid } ?: v0
+        return v.tid.takeIf { it != 0 && tt.trips.has(it) }
+            ?: v0.tid.takeIf { it != 0 && tt.trips.has(it) }
+            ?: tt.findTripId(v.cis, v.trip)
+            ?: tripFallback(tt, v)
+    }
 
     /** Pro ladění: z čeho se kreslí trasa tohoto vozidla (viz řádek „Trasa“ v detailu). */
     suspend fun routeSourceInfo(v: Vehicle): String = withContext(Dispatchers.IO) {
         val tt = store.ensure().timetable
-        val tid = v.tid.takeIf { it != 0 }
-            ?: tt.findTripId(v.cis, v.trip)
-            ?: tripFallback(tt, v)
+        val tid = resolveTid(tt, v)
             ?: return@withContext "spoj z jízdního řádu nenalezen"
         "spoj $tid, ${geometry.describe(tt, tid)}\ngid: ${tt.gidOf(tid)}"
     }
@@ -732,9 +744,7 @@ class TransitRepository(context: Context? = null) {
     suspend fun tripStopLocations(v: Vehicle): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
         pmdpTrip(v)?.let { t -> return@withContext t.stops.filter { it.hasCoords() }.map { it.lat to it.lng } }
         val tt = store.ensure().timetable
-        val tid = v.tid.takeIf { it != 0 }
-            ?: tt.findTripId(v.cis, v.trip)
-            ?: tripFallback(tt, v)
+        val tid = resolveTid(tt, v)
             ?: return@withContext emptyList()
         platformLocations(tt, tt.tripStops(tid))
     }
@@ -755,9 +765,7 @@ class TransitRepository(context: Context? = null) {
 
     suspend fun resolveTripId(v: Vehicle): Int? = withContext(Dispatchers.IO) {
         val tt = store.ensure().timetable
-        v.tid.takeIf { it != 0 }
-            ?: tt.findTripId(v.cis, v.trip)
-            ?: tripFallback(tt, v)
+        resolveTid(tt, v)
     }
 
     suspend fun routeForTrip(tid: Int): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
@@ -879,8 +887,7 @@ class TransitRepository(context: Context? = null) {
         pmdpTrip(v)?.let { return@withContext remoteTripInfo(v, it) }
         val tt = store.ensure().timetable
         // příští / konečná zastávka jen ze spoje, který opravdu jede (ne ranní oběh stojící soupravy)
-        val tid = v.tid.takeIf { it != 0 } ?: tt.findTripId(v.cis, v.trip)
-            ?: (if (v.train) tt.findTrainTripId(v.cis) else tripFallback(tt, v))
+        val tid = (if (v.train) v.tid.takeIf { it != 0 } ?: tt.findTripId(v.cis, v.trip) ?: tt.findTrainTripId(v.cis) else resolveTid(tt, v))
             ?: return@withContext none
         val trip = tt.trips[tid] ?: return@withContext none
         val times = tt.tripTimes(tid) ?: return@withContext none
