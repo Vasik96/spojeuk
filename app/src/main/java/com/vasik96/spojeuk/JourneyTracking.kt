@@ -74,6 +74,8 @@ class JourneyTrackingService : Service() {
     private var fusedLocationClient: FusedLocationProviderClient? = null
     private var locationCallback: LocationCallback? = null
     @Volatile private var latestLocation: Location? = null
+    /** Pozná, že uživatel sedí v jedoucím voze sledovaného spojení (viz [OnBoardTracker]). */
+    private val onBoard = OnBoardTracker()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -98,6 +100,7 @@ class JourneyTrackingService : Service() {
         ServiceCompat.startForeground(this, NOTIF_ID, first, fgsType)
         alightAlerted = -1
         lastRerouteMs = 0L
+        onBoard.reset()
         loop?.cancel()
         loop = scope.launch { run(j, repo) }
         return START_NOT_STICKY
@@ -138,21 +141,34 @@ class JourneyTrackingService : Service() {
             val live = runCatching { repo.journeyLive(j) }.getOrDefault(emptyMap())
             val delays = live.mapValues { it.value.delay }
             val nowSec = secondsSinceMidnight(j.day)
-            val phase = trackPhase(j.rawLegs, nowSec, delays)
+
+            // poloha uživatele vs. poloha živých vozů jízd: pozná, že sedí v autobuse (i když ještě "nemá" odjet / je před zastávkou)
+            val loc = latestLocation
+            onBoard.update(
+                System.currentTimeMillis(), loc?.latitude, loc?.longitude, loc?.takeIf { it.hasAccuracy() }?.accuracy,
+                live.mapValues { VehiclePos(it.value.lat, it.value.lng, it.value.ageSec()) },
+            )
+            val onBoardRide = onBoard.ride
+            val phase = trackPhaseOnBoard(j.rawLegs, nowSec, delays, onBoardRide)
 
             // 1. Kontrola zmeškaného přestupu / odjezdu a případné automatické přeplánování na nový spoj
-            val reroutedJ = maybeCheckMissedTransferAndReroute(j, delays, phase, nowSec, repo)
+            val reroutedJ = maybeCheckMissedTransferAndReroute(j, delays, phase, nowSec, repo, live, onBoardRide)
             if (reroutedJ != null) {
                 j = reroutedJ
                 alightAlerted = -1
+                onBoard.reset()
                 continue
             }
 
             // po dojezdu ještě chvíli ukázat "v cíli", pak konec
             if (phase is TrackPhase.Arrived && nowSec > phase.arrSec + 120) break
 
-            runCatching { nm.notify(NOTIF_ID, buildNotification(this, j, detail, live)) }
-            maybeAlertAlighting(j, detail, phase, nowSec, repo)
+            val alight = (phase as? TrackPhase.Riding)?.let { alightState(j, it.ride, live, repo) }
+            val alightNear = alight == null || alightImminent(
+                (phase as TrackPhase.Riding).arrSec - nowSec, alight.nextStopIsAlight, alight.distM,
+            )
+            runCatching { nm.notify(NOTIF_ID, buildNotification(this, j, detail, live, phase, alightNear)) }
+            maybeAlertAlighting(j, detail, phase, nowSec, alight, repo)
 
             val soon = when (phase) {
                 is TrackPhase.BeforeDeparture -> phase.depSec - nowSec < 300
@@ -165,18 +181,38 @@ class JourneyTrackingService : Service() {
         finish()
     }
 
-    /** Jednorázové upozornění (zvuk / vibrace) před výstupem, vyhodnocované podle blízkosti i času. */
-    private fun maybeAlertAlighting(j: Journey, detail: List<DetailLeg>, phase: TrackPhase, nowSec: Int, repo: TransitRepository) {
-        if (phase !is TrackPhase.Riding || alightAlerted == phase.ride) return
-        val leg = j.rawLegs.getOrNull(phase.ride) ?: return
-        val coords = repo.stopCoords(leg.toStop)
-        val userLoc = latestLocation
-        val userLat = userLoc?.latitude
-        val userLng = userLoc?.longitude
-        val alightLat = coords?.first
-        val alightLng = coords?.second
+    /** Kde je výstup jízdy [ride]: vzdálenost k zastávce a jestli je to příští zastávka (mezi tím žádná jiná). */
+    private class AlightState(val distM: Double?, val nextStopIsAlight: Boolean, val refLat: Double?, val refLng: Double?)
 
-        if (!shouldTriggerAlightAlert(nowSec, phase.arrSec, leg.dep, userLat, userLng, alightLat, alightLng)) return
+    /**
+     * Vztažná poloha je poloha uživatele, když sedí ve voze (nebo vůz nemáme), jinak poloha vozu. Vzdálenost a "zastávka
+     * mezi" se počítají od ní. Bez polohy a bez souřadnic zastávky se rozhoduje jen podle času.
+     */
+    private fun alightState(j: Journey, ride: Int, live: Map<Int, Vehicle>, repo: TransitRepository): AlightState {
+        val leg = j.rawLegs.getOrNull(ride) ?: return AlightState(null, true, null, null)
+        val alight = repo.stopCoords(leg.toStop)
+        val veh = live[ride]
+        val user = latestLocation
+        val ref: Pair<Double, Double>? =
+            if (veh != null && onBoard.ride != ride) veh.lat to veh.lng
+            else user?.let { it.latitude to it.longitude } ?: veh?.let { it.lat to it.lng }
+        if (ref == null || alight == null) return AlightState(null, true, ref?.first, ref?.second)
+        val dist = Geo.distanceM(ref.first, ref.second, alight.first, alight.second)
+        val between = hasStopBetween(ref, alight, repo.intermediateStopCoords(leg))
+        return AlightState(dist, !between, ref.first, ref.second)
+    }
+
+    /** Jednorázové upozornění (zvuk / vibrace) před výstupem: až když je zastávka příští a je blízko (ne hned po předchozí). */
+    private fun maybeAlertAlighting(j: Journey, detail: List<DetailLeg>, phase: TrackPhase, nowSec: Int, alight: AlightState?, repo: TransitRepository) {
+        if (phase !is TrackPhase.Riding || alightAlerted == phase.ride || alight == null) return
+        val leg = j.rawLegs.getOrNull(phase.ride) ?: return
+        val userLat = alight.refLat
+        val userLng = alight.refLng
+        val alightCoords = repo.stopCoords(leg.toStop)
+        val alightLat = alightCoords?.first
+        val alightLng = alightCoords?.second
+
+        if (!shouldTriggerAlightAlert(nowSec, phase.arrSec, leg.dep, userLat, userLng, alightLat, alightLng, alight.nextStopIsAlight)) return
 
         alightAlerted = phase.ride
         val ride = detail.filterIsInstance<DetailLeg.Ride>().firstOrNull { it.index == phase.ride } ?: return
@@ -212,6 +248,8 @@ class JourneyTrackingService : Service() {
         phase: TrackPhase,
         nowSec: Int,
         repo: TransitRepository,
+        live: Map<Int, Vehicle>,
+        onBoardRide: Int,
     ): Journey? {
         val nowMs = System.currentTimeMillis()
         if (nowMs - lastRerouteMs < 60_000L) return null
@@ -226,11 +264,14 @@ class JourneyTrackingService : Service() {
             val stopId = j.rawLegs[b].fromStop
             val coords = repo.stopCoords(stopId)
             val hasLiveB = delays.containsKey(b)
+            val notYet = live[b]?.let { repo.vehicleNotLeftStop(j.rawLegs[b], stopId, it) } == true
             val missed = isTransferMissed(
                 j.rawLegs, k, delays, nowSec,
                 latestLocation?.latitude, latestLocation?.longitude,
                 coords?.first, coords?.second,
-                hasLiveB = hasLiveB
+                hasLiveB = hasLiveB,
+                onBoardRide = onBoardRide,
+                vehicleBNotLeftStop = notYet,
             )
             if (missed) {
                 isMissed = true
@@ -246,11 +287,14 @@ class JourneyTrackingService : Service() {
                 val boardId = j.rawLegs[r0].fromStop
                 val coords = repo.stopCoords(boardId)
                 val hasLiveFirst = delays.containsKey(r0)
+                val notYet = live[r0]?.let { repo.vehicleNotLeftStop(j.rawLegs[r0], boardId, it) } == true
                 if (isInitialDepartureMissed(
                         j.rawLegs, delays, nowSec,
                         latestLocation?.latitude, latestLocation?.longitude,
                         coords?.first, coords?.second,
-                        hasLiveFirst = hasLiveFirst
+                        hasLiveFirst = hasLiveFirst,
+                        userOnBoard = onBoardRide >= r0,
+                        vehicleNotLeftStop = notYet,
                     )
                 ) {
                     isMissed = true
@@ -368,10 +412,16 @@ class JourneyTrackingService : Service() {
         private fun min(sec: Int) = maxOf(0, (sec + 59) / 60)
 
         /** Notifikace podle fáze cesty: co dělat teď, kdy, a průběh celé cesty. */
-        internal fun buildNotification(ctx: Context, j: Journey, detail: List<DetailLeg>, live: Map<Int, Vehicle>): android.app.Notification {
+        internal fun buildNotification(
+            ctx: Context, j: Journey, detail: List<DetailLeg>, live: Map<Int, Vehicle>,
+            /** Fáze už s vědomím, že uživatel sedí ve voze ([trackPhaseOnBoard]); bez ní se spočítá z jízdního řádu. */
+            phaseOverride: TrackPhase? = null,
+            /** Výstup je na dosah: píše se "Vystupuješ", jinak jen kam se jede (ne hned po předchozí zastávce). */
+            alightNear: Boolean = true,
+        ): android.app.Notification {
             val delays = live.mapValues { it.value.delay }
             val nowSec = secondsSinceMidnight(j.day)
-            val phase = trackPhase(j.rawLegs, nowSec, delays)
+            val phase = phaseOverride ?: trackPhase(j.rawLegs, nowSec, delays)
             val rides = detail.filterIsInstance<DetailLeg.Ride>().associateBy { it.index }
             fun lineOf(i: Int) = rides[i]?.line ?: "?"
             fun boardOf(i: Int) = rides[i]?.stops?.firstOrNull()?.name?.let { stopLabel(it) }.orEmpty()
@@ -394,7 +444,7 @@ class JourneyTrackingService : Service() {
                 is TrackPhase.Riding -> {
                     val m = min(phase.arrSec - nowSec)
                     val next = rideIdx.getOrNull(rideIdx.indexOf(phase.ride) + 1)
-                    title = tr(R.string.track_riding, alightOf(phase.ride), m)
+                    title = tr(if (alightNear) R.string.track_riding else R.string.track_riding_far, alightOf(phase.ride), m)
                     text = (if (next != null) tr(R.string.track_riding_then, hhmm(phase.arrSec), lineOf(next))
                             else tr(R.string.track_riding_final, hhmm(phase.arrSec))) + delayNote(phase.ride)
                     chip = tr(R.string.fmt_min, m); target = phase.arrSec

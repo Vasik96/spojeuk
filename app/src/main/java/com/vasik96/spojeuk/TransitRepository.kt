@@ -831,6 +831,30 @@ class TransitRepository(context: Context? = null) {
         return tt.stops[stopId]?.takeIf { it.hasCoords }?.let { it.lat to it.lng }
     }
 
+    /**
+     * Neodjel vůz [v] jízdy [leg] ještě ze zastávky [stopId]? true = je před ní (semafor 150 m před zastávkou) nebo na
+     * ní ještě stojí (nejvýš ~60 m za ní, rezerva na nepřesnost trasy z úseček mezi zastávkami); false = už je jasně
+     * za ní; null = nejde určit (spoj chybí, stará poloha). Podle jízdního řádu by už odjet měl, ale zpoždění zdroj
+     * často hlásí pozdě, takže se věří poloze.
+     */
+    fun vehicleNotLeftStop(leg: Leg, stopId: Int, v: Vehicle): Boolean? {
+        val tt = store.current?.timetable ?: return null
+        if (leg.tid == 0 || v.ageSec() > 120) return null
+        val s = tt.stops[stopId]?.takeIf { it.hasCoords } ?: return null
+        val stopAlong = tt.locator.along(leg.tid, s.lat, s.lng) ?: return null
+        val vehAlong = tt.locator.along(leg.tid, v.lat, v.lng) ?: return null
+        return stopAlong - vehAlong > -60.0
+    }
+
+    /** Polohy zastávek jízdy [leg] mezi nástupem a výstupem (bez nich samotných). */
+    fun intermediateStopCoords(leg: Leg): List<Pair<Double, Double>> {
+        val tt = store.current?.timetable ?: return emptyList()
+        val ids = if (leg.stops.isNotEmpty()) leg.stops.map { it.first } else tt.tripStops(leg.tid).toList()
+        val from = ids.indexOf(leg.fromStop).takeIf { it >= 0 } ?: return emptyList()
+        val to = ids.indexOf(leg.toStop).takeIf { it > from } ?: return emptyList()
+        return ids.subList(from + 1, to).mapNotNull { stopCoords(it) }
+    }
+
     fun stopName(stopId: Int): String? {
         val tt = store.current?.timetable ?: return null
         return tt.stops[stopId]?.name?.let { prettyName(it) }

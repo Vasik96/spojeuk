@@ -362,6 +362,7 @@
     <string name="track_before">%1$s odjíždí za %2$d min</string>
     <string name="track_before_text">Z %1$s v %2$s · směr %3$s</string>
     <string name="track_riding">Vystupuješ: %1$s za %2$d min</string>
+    <string name="track_riding_far">Jedeš do: %1$s · za %2$d min</string>
     <string name="track_riding_then">Příjezd v %1$s, pak přestup na %2$s</string>
     <string name="track_riding_final">Příjezd do cíle v %1$s</string>
     <string name="track_transfer">Přestup na %1$s · odjezd za %2$d min</string>

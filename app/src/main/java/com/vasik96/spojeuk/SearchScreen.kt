@@ -1446,7 +1446,14 @@ private fun NearbyDeparturesCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                FilledTonalButton(onClick = onOpenStop) { Text(stringResource(R.string.search_nearby_on_map)) }
+                FilledTonalButton(
+                    onClick = onOpenStop,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    ),
+                    elevation = null,
+                ) { Text(stringResource(R.string.search_nearby_on_map)) }
             }
             if (nb.departures.isEmpty()) {
                 Text(

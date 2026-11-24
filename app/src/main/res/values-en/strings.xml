@@ -337,6 +337,7 @@
     <string name="track_before">%1$s departs in %2$d min</string>
     <string name="track_before_text">From %1$s at %2$s · towards %3$s</string>
     <string name="track_riding">Get off at %1$s in %2$d min</string>
+    <string name="track_riding_far">Riding to %1$s · in %2$d min</string>
     <string name="track_riding_then">Arrival at %1$s, then change to %2$s</string>
     <string name="track_riding_final">Arrival at destination at %1$s</string>
     <string name="track_transfer">Change to %1$s · departs in %2$d min</string>

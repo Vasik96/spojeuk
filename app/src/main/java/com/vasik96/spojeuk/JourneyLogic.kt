@@ -109,10 +109,45 @@ internal fun trackPhase(legs: List<Leg>, nowSec: Int, delays: Map<Int, Int>): Tr
     return TrackPhase.Arrived(legs[last].arr + (delays[last] ?: 0) * 60)
 }
 
+/** Do jaké vzdálenosti od zastávky výstupu se teprve hlásí "vystupuješ" (ne hned po předchozí zastávce). */
+internal const val ALIGHT_ANNOUNCE_M = 350.0
+
+/** Rezerva, o kolik smí být zastávka "mezi" vedle přímky poloha → výstup, aby se pořád brala jako ležící mezi nimi. */
+private const val BETWEEN_SLACK_M = 120.0
+
+/**
+ * Leží mezi [from] a cílovou zastávkou [to] nějaká jiná zastávka z [between]? Zastávka je "mezi", když se cesta
+ * from → ona → to prodlouží oproti přímé jen o málo ([BETWEEN_SLACK_M]) a ona sama není u cíle (to je ta samá zastávka).
+ */
+internal fun hasStopBetween(from: Pair<Double, Double>, to: Pair<Double, Double>, between: List<Pair<Double, Double>>): Boolean {
+    val direct = Geo.distanceM(from.first, from.second, to.first, to.second)
+    return between.any { s ->
+        val toEnd = Geo.distanceM(s.first, s.second, to.first, to.second)
+        if (toEnd < 40.0) return@any false     // další nástupiště téže zastávky
+        val viaIt = Geo.distanceM(from.first, from.second, s.first, s.second) + toEnd
+        viaIt <= direct + BETWEEN_SLACK_M
+    }
+}
+
+/**
+ * Je výstup "na dosah", tedy má se psát / hlásit "vystupuješ"? Až když je to příští zastávka (žádná mezi) a zbývá
+ * nejvýš [ALIGHT_ANNOUNCE_M] m; na dlouhém úseku se tedy nehlásí hned po odjezdu z předchozí zastávky. Krátký úsek
+ * (zastávky blíž než [ALIGHT_ANNOUNCE_M]) splní podmínku hned, takže se hlásí tak jako dřív.
+ * Bez polohy: jen příští zastávka a zbývá nejvýš 90 s.
+ */
+internal fun alightImminent(
+    remainingSec: Int,
+    nextStopIsAlight: Boolean,
+    distToAlightM: Double?,
+): Boolean {
+    if (remainingSec < 0 || !nextStopIsAlight) return false
+    return if (distToAlightM != null) distToAlightM <= ALIGHT_ANNOUNCE_M else remainingSec <= 90
+}
+
 /**
  * Vyhodnocení, zda se má vyvolat jednorázové upozornění na výstup ("Příští zastávka... vystupuješ").
- * Upozornění se spustí pouze tehdy, když se uživatel/vozidlo reálně blíží k cílové zastávce
- * (do ~500 m podle GPS), aby se nehlásilo hned po opuštění předchozí zastávky, pokud je úsek dlouhý (např. 10 minut).
+ * Spustí se, až když je zastávka výstupu příští (mezi tím žádná, [nextStopIsAlight]) a je do [ALIGHT_ANNOUNCE_M] m
+ * podle GPS, ne hned po opuštění předchozí zastávky, pokud je úsek dlouhý (např. 10 minut).
  */
 internal fun shouldTriggerAlightAlert(
     nowSec: Int,
@@ -122,14 +157,14 @@ internal fun shouldTriggerAlightAlert(
     userLng: Double? = null,
     alightLat: Double? = null,
     alightLng: Double? = null,
+    nextStopIsAlight: Boolean = true,
 ): Boolean {
     val remainingSec = arrSec - nowSec
-    if (remainingSec < 0) return false
+    if (remainingSec < 0 || !nextStopIsAlight) return false
 
     if (userLat != null && userLng != null && alightLat != null && alightLng != null) {
         val distM = Geo.distanceM(userLat, userLng, alightLat, alightLng)
-        if (distM > 600.0) return false // Na dlouhých úsecích ještě daleko -> neupozorňovat
-        return distM <= 500.0 && remainingSec <= 180
+        return distM <= ALIGHT_ANNOUNCE_M && remainingSec <= 240
     }
 
     // Bez souřadnic: upozornit jen v závěrečných 40 % úseku a nejvýše 90 sekund před příjezdem
@@ -137,6 +172,88 @@ internal fun shouldTriggerAlightAlert(
     val elapsed = nowSec - depSec
     val progressFrac = elapsed.toDouble() / legDuration
     return remainingSec <= 90 && progressFrac >= 0.6
+}
+
+// ───────────────────────── je uživatel ve voze? ─────────────────────────
+
+/** Poloha živého vozu jízdy a stáří údaje (s). */
+internal data class VehiclePos(val lat: Double, val lng: Double, val ageSec: Long)
+
+/**
+ * Je uživatel s největší pravděpodobností v tomto voze? Tolerance roste s nepřesností GPS a stářím polohy vozu
+ * (vůz mezitím ujede, polohy chodí po několika vteřinách), ať se člověk v jedoucím autobuse pozná i s trochu starým údajem.
+ */
+internal fun isNearVehicle(userLat: Double, userLng: Double, accuracyM: Float?, v: VehiclePos): Boolean =
+    Geo.distanceM(userLat, userLng, v.lat, v.lng) <= vehicleTolerance(accuracyM, v.ageSec)
+
+private fun vehicleTolerance(accuracyM: Float?, ageSec: Long): Double =
+    70.0 + (accuracyM ?: 25f).coerceAtMost(60f) * 0.5 + ageSec.coerceIn(0L, 30L) * 6.0
+
+/**
+ * Pozná, že uživatel sedí v konkrétní jízdě sledovaného spojení: poloha uživatele sedí na polohu živého vozu téže jízdy
+ * ve dvou po sobě jdoucích měřeních a uživatel se přitom pohybuje rychlostí vozidla (nad chůzi) nebo je od vozu
+ * skoro na dosah ruky. Když je jednou ve voze, drží se to, dokud se od vozu dvakrát po sobě nevzdálí.
+ */
+internal class OnBoardTracker {
+    /** Index jízdy v rawLegs, ve které uživatel jede; -1 = neznámo / ne ve voze. */
+    var ride: Int = -1
+        private set
+    private var cand = -1
+    private var hits = 0
+    private var misses = 0
+    private var prev: Triple<Double, Double, Long>? = null
+
+    fun reset() { ride = -1; cand = -1; hits = 0; misses = 0; prev = null }
+
+    fun update(nowMs: Long, userLat: Double?, userLng: Double?, accuracyM: Float?, live: Map<Int, VehiclePos>) {
+        if (userLat == null || userLng == null) return
+        val p = prev
+        val speed = if (p != null && nowMs - p.third in 3_000L..60_000L)
+            Geo.distanceM(p.first, p.second, userLat, userLng) / ((nowMs - p.third) / 1000.0) else Double.NaN
+        prev = Triple(userLat, userLng, nowMs)
+
+        if (ride >= 0) {
+            val v = live[ride]
+            val far = v == null || Geo.distanceM(userLat, userLng, v.lat, v.lng) > STAY_FACTOR * vehicleTolerance(accuracyM, v.ageSec)
+            if (far) { if (++misses >= 2) { ride = -1; misses = 0; cand = -1; hits = 0 } } else misses = 0
+            if (ride >= 0) return
+        }
+        var best = -1
+        var bestD = Double.MAX_VALUE
+        for ((i, v) in live) {
+            if (!isNearVehicle(userLat, userLng, accuracyM, v)) continue
+            val d = Geo.distanceM(userLat, userLng, v.lat, v.lng)
+            val moving = !speed.isNaN() && speed >= MOVING_MS
+            if (!(moving || d <= TOUCHING_M)) continue
+            if (d < bestD) { bestD = d; best = i }
+        }
+        if (best < 0) { cand = -1; hits = 0; return }
+        if (best == cand) hits++ else { cand = best; hits = 1 }
+        if (hits >= 2) { ride = best; misses = 0 }
+    }
+
+    private companion object {
+        const val MOVING_MS = 2.5      // nad rychlost chůze (1,4 m/s)
+        const val TOUCHING_M = 30.0
+        const val STAY_FACTOR = 2.5    // jednou ve voze: vzdálení až po výrazně větší vzdálenosti než pro nástup
+    }
+}
+
+/**
+ * [trackPhase] s vědomím, že uživatel už sedí v jízdě [onBoardRide]: podle jízdního řádu (a zpoždění) by ještě čekal na
+ * nástupu / přestupu, ale je ve voze, takže jede (výstup podle zpoždění vozu).
+ */
+internal fun trackPhaseOnBoard(legs: List<Leg>, nowSec: Int, delays: Map<Int, Int>, onBoardRide: Int): TrackPhase {
+    val base = trackPhase(legs, nowSec, delays)
+    if (onBoardRide < 0 || legs.getOrNull(onBoardRide)?.kind != "ride") return base
+    val ride = when (base) {
+        is TrackPhase.BeforeDeparture -> base.ride
+        is TrackPhase.Transfer -> base.ride
+        else -> return base
+    }
+    if (ride != onBoardRide) return base
+    val arr = legs[onBoardRide].arr + (delays[onBoardRide] ?: 0) * 60
+    return TrackPhase.Riding(onBoardRide, maxOf(arr, nowSec + 60))
 }
 
 /**
@@ -154,11 +271,17 @@ internal fun isTransferMissed(
     transferStopLat: Double? = null,
     transferStopLng: Double? = null,
     hasLiveB: Boolean = true,
+    /** Jízda, ve které uživatel podle [OnBoardTracker] právě jede (-1 = neznámo). */
+    onBoardRide: Int = -1,
+    /** Navazující vůz podle své polohy na trase ještě z přestupní zastávky neodjel (nedojel na ni, nebo na ní ještě stojí). */
+    vehicleBNotLeftStop: Boolean = false,
 ): Boolean {
     if (!hasLiveB) return false // Bez živých dat na mapě nepovažujeme spoj za zmeškaný (může mít zpoždění)
 
     val rides = rideIndices(legs)
     val b = rides.getOrNull(k + 1) ?: return false
+    if (onBoardRide >= b) return false          // uživatel už v navazujícím voze (nebo dál) sedí
+    if (vehicleBNotLeftStop) return false      // navazující vůz podle polohy ještě neodjel (čeká / dojíždí), ač jízdní řád říká jinak
     val depSec = legs[b].dep + (delays[b] ?: 0) * 60
     if (nowSec <= depSec + 60) return false // Spoj ještě neodjel nebo odjel teprve před minutou
 
@@ -192,8 +315,13 @@ internal fun isInitialDepartureMissed(
     boardLat: Double? = null,
     boardLng: Double? = null,
     hasLiveFirst: Boolean = true,
+    /** Uživatel podle [OnBoardTracker] sedí v první jízdě. */
+    userOnBoard: Boolean = false,
+    /** Vůz první jízdy podle své polohy na trase ještě z nástupní zastávky neodjel (nedojel na ni, nebo na ní stojí). */
+    vehicleNotLeftStop: Boolean = false,
 ): Boolean {
     if (!hasLiveFirst) return false // Bez živých dat nehodnotit odjezd jako zmeškaný
+    if (userOnBoard || vehicleNotLeftStop) return false   // v autobuse už jsem / autobus ještě nedojel (zpoždění, semafor před zastávkou)
 
     val rides = rideIndices(legs)
     val firstRide = rides.firstOrNull() ?: return false
