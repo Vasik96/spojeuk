@@ -121,4 +121,57 @@ class JourneyLogicTest {
         assertEquals(TrackPhase.Riding(3, h(11, 10)), trackPhase(legs, h(11, 5), emptyMap()))
         assertEquals(TrackPhase.Arrived(h(11, 10)), trackPhase(legs, h(11, 30), emptyMap()))
     }
+
+    // ───── upozornění na výstup ─────
+
+    @Test fun alightAlert_suppressedWhenFarByGps() {
+        // Zastávka Mírové náměstí 10 km daleko (dlouhý úsek, zbývá 8 minut) -> nesmí se vyvolat upozornění
+        val alightLat = 50.66
+        val alightLng = 14.00
+        val userLat = 50.75 // cca 10 km severně
+        val userLng = 14.00
+        val alert = shouldTriggerAlightAlert(
+            nowSec = h(10, 10), arrSec = h(10, 18), depSec = h(10, 0),
+            userLat = userLat, userLng = userLng,
+            alightLat = alightLat, alightLng = alightLng
+        )
+        assertTrue(!alert)
+    }
+
+    @Test fun alightAlert_triggeredWhenCloseByGps() {
+        // Zastávka 300m daleko a zbývá 2 minuty -> vyvolat upozornění
+        val alightLat = 50.66
+        val alightLng = 14.00
+        val userLat = 50.66 + 300.0 / Geo.M_PER_DEG_LAT
+        val userLng = 14.00
+        val alert = shouldTriggerAlightAlert(
+            nowSec = h(10, 16), arrSec = h(10, 18), depSec = h(10, 0),
+            userLat = userLat, userLng = userLng,
+            alightLat = alightLat, alightLng = alightLng
+        )
+        assertTrue(alert)
+    }
+
+    // ───── zmeškaný přestup ─────
+
+    @Test fun transfer_detectMissedWhenConnectionDeparted() {
+        // 10:00–10:20 jízda, 10:20–10:25 chůze, 10:30 odjezd navazujícího.
+        // V 10:32 navazující odjel, ale uživatel je stále u přestupní zastávky (0 m) -> přestup zmeškán
+        val missed = isTransferMissed(
+            legs = legs, k = 0, delays = emptyMap(), nowSec = h(10, 32),
+            userLat = 50.66, userLng = 14.00,
+            transferStopLat = 50.66, transferStopLng = 14.00
+        )
+        assertTrue(missed)
+    }
+
+    @Test fun transfer_notMissedIfAlreadyOnConnection() {
+        // V 10:35 uživatel v pořádku jede v navazujícím spoji (poloha už je pryč od přestupní zastávky) -> není zmeškáno
+        val missed = isTransferMissed(
+            legs = legs, k = 0, delays = emptyMap(), nowSec = h(10, 35),
+            userLat = 50.70, userLng = 14.00,
+            transferStopLat = 50.66, transferStopLng = 14.00
+        )
+        assertTrue(!missed)
+    }
 }

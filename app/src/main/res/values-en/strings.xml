@@ -345,8 +345,12 @@
     <string name="track_arrived_text">Arrival at %1$s</string>
     <string name="track_delay_note">(%1$d min late)</string>
     <string name="track_alert_alight">Next stop: %1$s</string>
+    <string name="track_alert_alight_dist">Next stop (%2$s): %1$s</string>
     <string name="track_alert_alight_final">Get off here, this is your destination.</string>
     <string name="track_alert_alight_transfer">Get off here, you change here.</string>
+    <string name="track_alert_reroute_title">Route update: new connection</string>
+    <string name="track_alert_reroute_text">Transfer missed. Found new connection %1$s from %2$s at %3$s.</string>
+    <string name="track_alert_reroute_failed">Transfer missed. No further connecting services available.</string>
     <string name="a11y_line_details">%1$s %2$s, ride details</string>
     <string name="a11y_line_details_plain">Line %1$s, ride details</string>
     <string name="a11y_stop">%1$s, %2$s</string>

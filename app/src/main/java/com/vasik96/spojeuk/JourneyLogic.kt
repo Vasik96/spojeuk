@@ -108,3 +108,106 @@ internal fun trackPhase(legs: List<Leg>, nowSec: Int, delays: Map<Int, Int>): Tr
     val last = rides.last()
     return TrackPhase.Arrived(legs[last].arr + (delays[last] ?: 0) * 60)
 }
+
+/**
+ * Vyhodnocení, zda se má vyvolat jednorázové upozornění na výstup ("Příští zastávka... vystupuješ").
+ * Upozornění se spustí pouze tehdy, když se uživatel/vozidlo reálně blíží k cílové zastávce
+ * (do ~500 m podle GPS), aby se nehlásilo hned po opuštění předchozí zastávky, pokud je úsek dlouhý (např. 10 minut).
+ */
+internal fun shouldTriggerAlightAlert(
+    nowSec: Int,
+    arrSec: Int,
+    depSec: Int,
+    userLat: Double? = null,
+    userLng: Double? = null,
+    alightLat: Double? = null,
+    alightLng: Double? = null,
+): Boolean {
+    val remainingSec = arrSec - nowSec
+    if (remainingSec < 0) return false
+
+    if (userLat != null && userLng != null && alightLat != null && alightLng != null) {
+        val distM = Geo.distanceM(userLat, userLng, alightLat, alightLng)
+        if (distM > 600.0) return false // Na dlouhých úsecích ještě daleko -> neupozorňovat
+        return distM <= 500.0 && remainingSec <= 180
+    }
+
+    // Bez souřadnic: upozornit jen v závěrečných 40 % úseku a nejvýše 90 sekund před příjezdem
+    val legDuration = maxOf(60, arrSec - depSec)
+    val elapsed = nowSec - depSec
+    val progressFrac = elapsed.toDouble() / legDuration
+    return remainingSec <= 90 && progressFrac >= 0.6
+}
+
+/**
+ * Zjištění, zda byl přestup zmeškán (navazující spoj odjel a cestující se na něj nedostal).
+ * Vyhodnocuje se POUZE tehdy, pokud navazující spoj má živá data na mapě (hasLiveB == true),
+ * aby se nepřeplánovávalo při pouhém zpoždění spoje bez GPS.
+ */
+internal fun isTransferMissed(
+    legs: List<Leg>,
+    k: Int,
+    delays: Map<Int, Int>,
+    nowSec: Int,
+    userLat: Double? = null,
+    userLng: Double? = null,
+    transferStopLat: Double? = null,
+    transferStopLng: Double? = null,
+    hasLiveB: Boolean = true,
+): Boolean {
+    if (!hasLiveB) return false // Bez živých dat na mapě nepovažujeme spoj za zmeškaný (může mít zpoždění)
+
+    val rides = rideIndices(legs)
+    val b = rides.getOrNull(k + 1) ?: return false
+    val depSec = legs[b].dep + (delays[b] ?: 0) * 60
+    if (nowSec <= depSec + 60) return false // Spoj ještě neodjel nebo odjel teprve před minutou
+
+    // Pokud máme GPS polohu uživatele a ten je po odjezdu spoje pořád u přestupní zastávky -> zmeškáno
+    if (userLat != null && userLng != null && transferStopLat != null && transferStopLng != null) {
+        val distM = Geo.distanceM(userLat, userLng, transferStopLat, transferStopLng)
+        if (distM < 400.0) return true
+    }
+
+    // Příjezdový spoj přijel až po odjezdu navazujícího
+    val a = rides.getOrNull(k) ?: return false
+    val arrSecA = legs[a].arr + (delays[a] ?: 0) * 60
+    if (arrSecA > depSec) return true
+
+    val currentPhase = trackPhase(legs, nowSec, delays)
+    if (currentPhase is TrackPhase.Riding && currentPhase.ride >= b) return false // Uživatel už podle JŘ jede v navazujícím nebo dalším spoji
+    if (currentPhase is TrackPhase.Arrived) return false
+
+    return nowSec > depSec + 120
+}
+
+/**
+ * Zjištění, zda byl zmeškán úplně první odjezd cesty.
+ */
+internal fun isInitialDepartureMissed(
+    legs: List<Leg>,
+    delays: Map<Int, Int>,
+    nowSec: Int,
+    userLat: Double? = null,
+    userLng: Double? = null,
+    boardLat: Double? = null,
+    boardLng: Double? = null,
+    hasLiveFirst: Boolean = true,
+): Boolean {
+    if (!hasLiveFirst) return false // Bez živých dat nehodnotit odjezd jako zmeškaný
+
+    val rides = rideIndices(legs)
+    val firstRide = rides.firstOrNull() ?: return false
+    val depSec = legs[firstRide].dep + (delays[firstRide] ?: 0) * 60
+    if (nowSec <= depSec + 90) return false
+
+    val currentPhase = trackPhase(legs, nowSec, delays)
+    if (currentPhase !is TrackPhase.BeforeDeparture) return false
+
+    if (userLat != null && userLng != null && boardLat != null && boardLng != null) {
+        val distM = Geo.distanceM(userLat, userLng, boardLat, boardLng)
+        if (distM > 300.0) return true
+    }
+
+    return nowSec > depSec + 180
+}
+

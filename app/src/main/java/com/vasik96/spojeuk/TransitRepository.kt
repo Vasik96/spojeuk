@@ -826,6 +826,16 @@ class TransitRepository(context: Context? = null) {
         return tt.stops[leg.fromStop]?.takeIf { it.hasCoords }?.let { it.lat to it.lng }
     }
 
+    fun stopCoords(stopId: Int): Pair<Double, Double>? {
+        val tt = store.current?.timetable ?: return null
+        return tt.stops[stopId]?.takeIf { it.hasCoords }?.let { it.lat to it.lng }
+    }
+
+    fun stopName(stopId: Int): String? {
+        val tt = store.current?.timetable ?: return null
+        return tt.stops[stopId]?.name?.let { prettyName(it) }
+    }
+
     // ───────── Plzeň (PMDP): spoj přímo od dopravce ─────────
     // Spoje PMDP jsou v celostátním jízdním řádu pod jinými čísly, takže zastávky, časy a tvar trasy dodává
     // feed server (/api/trip/pmdp, z mapy PMDP) podle čísla spoje ve [Vehicle.trip]. Stejně to dělá web.
