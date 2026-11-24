@@ -92,6 +92,7 @@
     <string name="setup_preparing">Preparing timetables…</string>
     <string name="setup_hint">Timetables (~18 MB) are downloaded on first launch. It usually takes just a few seconds.</string>
     <string name="vd_trip_info">Trip information:</string>
+    <string name="vd_christmas_vehicle">Christmas vehicle</string>
     <string name="vd_vehicle_id">Vehicle ID: %1$s</string>
     <string name="vd_vehicle_id_na">Vehicle ID: not available</string>
     <string name="vd_source">Position source: %1$s</string>

@@ -32,7 +32,9 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Accessible
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.DirectionsBus
+import androidx.compose.material.icons.filled.Park
 import androidx.compose.material.icons.filled.Train
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -119,27 +122,58 @@ internal fun VehicleDetailBottomSheet(
         ) {
             Text(stringResource(R.string.vd_trip_info), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.height(IntrinsicSize.Min),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 // barva podle druhu jako na mapě (tramvaj fialová, metro v barvě linky A / B / C); bus zůstává zelený
-                // i se zpožděním (zpoždění ukazuje řádek níž), vlak modrý
+                // i se zpožděním (zpoždění ukazuje řádek níž), vlak modrý. Vánoční vůz má tmavě červené pozadí.
                 val vs = vehicleStyle(vehicle)
-                val badgeStyle = when (vs) {
-                    VehicleStyle.BUS, VehicleStyle.BUS_LATE -> VehicleStyle.BUS
-                    VehicleStyle.TROLLEYBUS, VehicleStyle.TROLLEYBUS_LATE -> VehicleStyle.TROLLEYBUS
-                    else -> vs
+                val badgeColor = if (vehicle.christmas) Color(0xFF800000) else when (vs) {
+                    VehicleStyle.BUS, VehicleStyle.BUS_LATE -> Color(VehicleStyle.BUS.color)
+                    VehicleStyle.TROLLEYBUS, VehicleStyle.TROLLEYBUS_LATE -> Color(VehicleStyle.TROLLEYBUS.color)
+                    else -> Color(vs.color)
+                }
+                val badgeDarkText = if (vehicle.christmas) false else when (vs) {
+                    VehicleStyle.BUS, VehicleStyle.BUS_LATE -> VehicleStyle.BUS.darkText
+                    VehicleStyle.TROLLEYBUS, VehicleStyle.TROLLEYBUS_LATE -> VehicleStyle.TROLLEYBUS.darkText
+                    else -> vs.darkText
                 }
                 Surface(
+                    modifier = Modifier.fillMaxHeight(),
                     shape = RoundedCornerShape(12.dp),
-                    color = Color(badgeStyle.color),
-                    contentColor = if (badgeStyle.darkText) Color.Black else Color.White
+                    color = badgeColor,
+                    contentColor = if (badgeDarkText) Color.Black else Color.White
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.fillMaxHeight().padding(horizontal = 12.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Icon(vehicleKind(vehicle).second, null, Modifier.size(20.dp))
                         Text(vehicle.line, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
+                    }
+                }
+                if (vehicle.christmas) {
+                    Surface(
+                        modifier = Modifier.fillMaxHeight(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF800000),
+                        contentColor = Color.White
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxHeight().padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(Icons.Filled.Park, null, Modifier.size(20.dp))
+                            Text(
+                                stringResource(R.string.vd_christmas_vehicle),
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                        }
                     }
                 }
             }

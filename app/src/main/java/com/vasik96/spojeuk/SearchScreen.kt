@@ -342,6 +342,33 @@ internal fun SearchScreen(
         appState.walkRoute = route?.takeIf { it.minutes <= WALK_MAX_MIN }
     }
 
+    /** Pole "Odkud" / "Kam" nejsou nikým ani náhledem změněná (nebo jsou prázdná): smí se předvyplnit. */
+    fun fieldsUntouched(): Boolean {
+        val pv = appState.autoFillPreview
+        if (pv == null) return appState.from == null && appState.to == null && appState.fromQuery.isBlank() && appState.toQuery.isBlank()
+        val fromOk = appState.fromQuery == myLocLabel(pv.fromName) && (appState.from == null || appState.from?.name == pv.fromName)
+        val toOk = if (pv.toName == null) appState.to == null && appState.toQuery.isBlank()
+        else appState.toQuery == stopLabel(pv.toName) && (appState.to == null || appState.to?.name == pv.toName)
+        return fromOk && toOk
+    }
+
+    /**
+     * Okamžitý náhled z minulého předvyplnění pro stejné místo: jen texty polí. Nečeká na jízdní řád (ten se
+     * načítá sekundy), na hledání nejbližší zastávky ani na OSRM; vybraná zastávka se doplní, až je vše připravené.
+     */
+    fun showAutoFillPreview(lat: Double, lng: Double) {
+        if (appState.autoFillDone || appState.autoFillPreview != null) return
+        if (!(appState.from == null && appState.to == null && appState.fromQuery.isBlank() && appState.toQuery.isBlank())) return
+        val pv = appState.loadAutoFillPreview(lat, lng) ?: return
+        appState.autoFillPreview = pv
+        appState.fromQuery = myLocLabel(pv.fromName)
+        if (pv.toName != null) appState.toQuery = stopLabel(pv.toName)
+        // zastávky už načtené: rovnou i vybrané zastávky
+        appState.stops.firstOrNull { it.name == pv.fromName }?.let { appState.from = it }
+        pv.toName?.let { n -> appState.stops.firstOrNull { it.name == n }?.let { appState.to = it } }
+        endAutoFillIndicator()
+    }
+
     // Poloha se zjišťuje hned při otevření záložky (nečeká na načtení zastávek),
     // takže předvyplnění pak může začít okamžitě. Spustí se při každém návratu na záložku Spoje.
     LaunchedEffect(Unit) {
@@ -352,11 +379,15 @@ internal fun SearchScreen(
             val fresh = appState.userLoc != null &&
                     System.currentTimeMillis() - appState.userLocTime < FIX_MAX_AGE_MS
             if (fresh) {
-                appState.userLoc?.let { if (!appState.autoFillDone) nearestFor(it.first, it.second) }
+                appState.userLoc?.let {
+                    showAutoFillPreview(it.first, it.second)
+                    if (!appState.autoFillDone) nearestFor(it.first, it.second)
+                }
             } else requestFix(context, FIX_MAX_AGE_MS) { loc ->
                 if (loc != null) {
                     appState.userLoc = loc.latitude to loc.longitude
                     appState.userLocTime = System.currentTimeMillis()
+                    showAutoFillPreview(loc.latitude, loc.longitude)
                     if (!appState.autoFillDone) nearestFor(loc.latitude, loc.longitude)
                 }
             }
@@ -434,9 +465,7 @@ internal fun SearchScreen(
                 appState.userLoc = lat to lng
                 appState.userLocTime = System.currentTimeMillis()
                 if (appState.autoFillDone) return@launch
-                val untouched = appState.from == null && appState.to == null &&
-                        appState.fromQuery.isBlank() && appState.toQuery.isBlank()
-                if (!untouched) return@launch
+                if (!fieldsUntouched()) return@launch
 
                 // širší výběr kandidátů vzdušnou čarou, ať se nevyřadí zastávka, která je po cestě blíž
                 // (zpřesnění po silnici běží možná už od zjištění polohy; OsrmClient si při chybě sám zkusí víc pokusů)
@@ -465,8 +494,14 @@ internal fun SearchScreen(
                     if (to != null) {
                         appState.to = to
                         appState.toQuery = stopLabel(to.name)
+                    } else if (appState.autoFillPreview != null) {
+                        // náhled ukazoval cíl, který už historie nenavrhuje
+                        appState.to = null
+                        appState.toQuery = ""
                     }
                     appState.autoFillDone = true
+                    appState.autoFillPreview = null
+                    appState.saveAutoFillPreview(lat, lng, from.name, to?.name)
                     return true
                 }
 
@@ -491,6 +526,14 @@ internal fun SearchScreen(
                     }
                 }
             } finally {
+                // náhled, který se nepotvrdil (zastávka mimo dosah, nenalezená): nesmí v polích zůstat jako prázdná slupka
+                if (!appState.autoFillDone && appState.autoFillPreview != null && fieldsUntouched()) {
+                    appState.fromQuery = ""
+                    appState.toQuery = ""
+                    appState.from = null
+                    appState.to = null
+                    appState.autoFillPreview = null
+                }
                 // indikátor načítání vždy zmizí, ať skončí předvyplnění kdekoliv
                 endAutoFillIndicator()
             }
@@ -893,7 +936,7 @@ internal fun SearchScreen(
                     indexedStops = appState.indexedStops,
                     originLat = origin.first,
                     originLng = origin.second,
-                    stopsLoading = appState.stopsLoading || locatingTarget == "from" ||
+                    stopsLoading = (appState.stopsLoading && appState.autoFillPreview == null) || locatingTarget == "from" ||
                             (autoFillPending && appState.from == null && appState.fromQuery.isBlank()),
                     onRemoveUsed = { removeUsed(it) },
                     onMyLocation = {
@@ -1178,17 +1221,34 @@ internal fun SearchScreen(
 
     // odjezdy z nejbližší zastávky (podle polohy), obnova každou minutu
     val nearby by produceState<NearbyDepartures?>(null, appState.userLoc, appState.indexedStops.isNotEmpty()) {
+        // uložená karta z minula hned (jízdní řád se teprve načítá), čerstvý výpočet ji pak nahradí
+        val u0 = appState.userLoc
+        if (value == null && u0 != null) runCatching { api.cachedNearby(u0.first, u0.second) }.getOrNull()?.let { value = it }
         while (true) {
             val u = appState.userLoc
-            if (u != null) runCatching {
-                // stejná zastávka jako předvyplněné "Odkud": nejbližší po cestě (sdílený výpočet), ne vzdušnou čarou
-                val near = runCatching { nearestFor(u.first, u.second).await() }.getOrNull()
-                api.nearbyDepartures(u.first, u.second, near?.refined ?: near?.cands?.firstOrNull())
+            if (u != null) {
+                val res = runCatching {
+                    // stejná zastávka jako předvyplněné "Odkud": nejbližší po cestě (sdílený výpočet), ne vzdušnou čarou
+                    val near = runCatching { nearestFor(u.first, u.second).await() }.getOrNull()
+                    api.nearbyDepartures(u.first, u.second, near?.refined ?: near?.cands?.firstOrNull())
+                }
+                // zrušení (změna polohy restartuje výpočet) se nesmí tvářit jako "nic nenalezeno", jinak karta bliká
+                res.exceptionOrNull()?.let { if (it is kotlinx.coroutines.CancellationException) throw it }
+                res.onFailure { android.util.Log.w("Nearby", "odjezdy z blízké zastávky: ${it.message}") }
+                if (res.isSuccess) {
+                    val fresh = res.getOrNull()
+                    if (fresh != null) {
+                        value = fresh
+                        api.saveNearbySnapshot(u.first, u.second, fresh)
+                    } else if (value?.cached == true) {
+                        // čerstvý výpočet doběhl a nic nenašel (mimo dosah): uložená karta už neplatí
+                        value = null
+                    }
+                }
             }
-                .onFailure { android.util.Log.w("Nearby", "odjezdy z blízké zastávky: ${it.message}") }
-                .getOrNull()?.let { value = it }
-            // dokud není jízdní řád načtený (po startu), zkouší se často, pak jednou za minutu
-            delay(if (value == null) 3_000 else 60_000)
+            // na načtení jízdního řádu se čeká uvnitř nearbyDepartures (hned po dokončení), tady jen obnova za minutu;
+            // prázdný výsledek (mimo dosah, chyba) se zkusí o něco dřív
+            delay(if (value == null) 15_000 else 60_000)
         }
     }
 
@@ -1198,13 +1258,17 @@ internal fun SearchScreen(
                 NearbyDeparturesCard(
                     nb, now,
                     onPick = { d, platform ->
-                        appState.loadStopDepartureRoute(api, d, platform, scope)
-                        appState.selectedTab = 1
+                        if (!nb.cached) {   // uložená karta nemá skutečné zastávky, ťuknutí až s čerstvými daty
+                            appState.loadStopDepartureRoute(api, d, platform, scope)
+                            appState.selectedTab = 1
+                        }
                     },
                     onOpenStop = {
-                        appState.focusPoint = com.google.android.gms.maps.model.LatLng(nb.stop.lat, nb.stop.lng)
-                        appState.openStop(api, nb.stop, scope)
-                        appState.selectedTab = 1
+                        if (!nb.cached) {
+                            appState.focusPoint = com.google.android.gms.maps.model.LatLng(nb.stop.lat, nb.stop.lng)
+                            appState.openStop(api, nb.stop, scope)
+                            appState.selectedTab = 1
+                        }
                     },
                     modifier = Modifier.animateItem()
                 )
@@ -1382,7 +1446,7 @@ private fun NearbyDeparturesCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                TextButton(onClick = onOpenStop) { Text(stringResource(R.string.search_nearby_on_map)) }
+                FilledTonalButton(onClick = onOpenStop) { Text(stringResource(R.string.search_nearby_on_map)) }
             }
             if (nb.departures.isEmpty()) {
                 Text(

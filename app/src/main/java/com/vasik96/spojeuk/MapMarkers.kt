@@ -22,10 +22,11 @@ private val markerIconCache = ConcurrentHashMap<String, BitmapDrawable>()
 
 // ── štítky vozidel: bitmapa se kreslí na pozadí (prerenderMarker), overlay na mapě si bere hotové (cachedMarkerBitmap) ──
 
-internal fun labelKey(line: String, style: VehicleStyle, phase: Int, late: Int = 0): String {
+internal fun labelKey(line: String, style: VehicleStyle, phase: Int, late: Int = 0, christmas: Boolean = false): String {
     // zvýrazněné štítky závisí na barvách motivu: verze palety v klíči, ať se po změně motivu nevezme stará bitmapa
     val base = if (phase != 0) "$line:${style.name}:$phase:p${HighlightPalette.version}" else "$line:${style.name}:$phase"
-    return if (late > 0) "$base:late" else base
+    val xmas = if (christmas) ":xmas" else ""
+    return if (late > 0) "$base:late$xmas" else "$base$xmas"
 }
 
 /**
@@ -59,12 +60,12 @@ internal fun lateMinutes(v: Vehicle): Int {
 internal fun cachedMarkerBitmap(key: String): Bitmap? = markerIconCache[key]?.bitmap
 
 /** Nakreslí bitmapu štítku do cache. Bezpečné volat mimo hlavní vlákno. */
-internal fun prerenderMarker(ctx: Context, line: String, style: VehicleStyle, phase: Int, late: Int = 0) {
-    createLineMarkerDrawable(ctx, line, style, phase, late)
+internal fun prerenderMarker(ctx: Context, line: String, style: VehicleStyle, phase: Int, late: Int = 0, christmas: Boolean = false) {
+    createLineMarkerDrawable(ctx, line, style, phase, late, christmas)
 }
 
-internal fun markerBitmap(ctx: Context, line: String, style: VehicleStyle, phase: Int, late: Int = 0): Bitmap =
-    createLineMarkerDrawable(ctx, line, style, phase, late).bitmap
+internal fun markerBitmap(ctx: Context, line: String, style: VehicleStyle, phase: Int, late: Int = 0, christmas: Boolean = false): Bitmap =
+    createLineMarkerDrawable(ctx, line, style, phase, late, christmas).bitmap
 
 /**
  * Barevná skupina vozu (štítek i tečka). Autobusy podle zpoždění, ostatní druhy dopravy vlastní barvou
@@ -90,6 +91,7 @@ internal enum class VehicleStyle(
     METRO(0xFF37474F.toInt(), 0xFF263238.toInt(), 0xFF90A4AE.toInt()),
     FERRY(0xFF1565C0.toInt(), 0xFF0D47A1.toInt(), 0xFF64B5F6.toInt()),
     FUNICULAR(0xFF6D4C41.toInt(), 0xFF4E342E.toInt(), 0xFFA1887F.toInt()),
+    CHRISTMAS(0xFF800000.toInt(), 0xFF800000.toInt(), 0xFFEF5350.toInt()),
 }
 
 /** Druh dopravy spoje z jízdního řádu (kategorie + linka metra) jako styl vozu. */
@@ -105,6 +107,7 @@ internal fun tripStyle(category: MapCategory, line: String, agency: String = "")
 
 /** Druh dopravy: ze serveru (`mode`), u starších odpovědí odvozený z PID uid ("g0:…" tramvaj) a linek metra. */
 internal fun vehicleStyle(v: Vehicle): VehicleStyle {
+    if (v.christmas) return VehicleStyle.CHRISTMAS
     val mode = v.mode.ifEmpty {
         val rt = if (v.source == SourceIds.PID && v.serverUid.startsWith("g")) v.serverUid.substring(1).substringBefore(':') else ""
         when {
@@ -165,24 +168,30 @@ internal const val LATE_COLOR = 0xFFD32F2F.toInt()
 /**
  * Malá tečka (cca 9 dp) v barvě vozidla s jemným světlým okrajem, aby šla vidět na tmavé i světlé mapě.
  * [late] (tramvaj / metro se zpožděním): okraj červený a silnější.
+ * [christmas] (vánoční vůz): přidané vánoční zdobení.
  */
-internal fun dotBitmap(ctx: Context, color: Int, late: Boolean = false): Bitmap =
-    dotBitmapCache.getOrPut((color.toLong() shl 1) or (if (late) 1L else 0L)) {
+internal fun dotBitmap(ctx: Context, color: Int, late: Boolean = false, christmas: Boolean = false): Bitmap =
+    dotBitmapCache.getOrPut((color.toLong() shl 2) or (if (late) 1L else 0L) or (if (christmas) 2L else 0L)) {
         val density = ctx.resources.displayMetrics.density
-        val size = ((if (late) 11 else 9) * density).toInt().coerceAtLeast(9)
-        val bmp = createBitmap(size, size)
+        val baseSize = if (late) 11 else 9
+        val sizeW = (baseSize * density).toInt().coerceAtLeast(9)
+        val sizeH = (baseSize * density).toInt().coerceAtLeast(9)
+        val bmp = createBitmap(sizeW, sizeH)
         val c = Canvas(bmp)
-        val r = size / 2f
-        c.drawCircle(r, r, r, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = if (late) LATE_COLOR else 0xCCFFFFFF.toInt() })
-        c.drawCircle(r, r, r - (if (late) 2.2f else 1.2f) * density, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color })
+        val r = (baseSize * density) / 2f
+        val cx = sizeW / 2f
+        val cy = sizeH / 2f
+        val dotColor = if (christmas && !late) 0xFF800000.toInt() else color
+        c.drawCircle(cx, cy, r, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = if (late) LATE_COLOR else 0xCCFFFFFF.toInt() })
+        c.drawCircle(cx, cy, r - (if (late) 2.2f else 1.2f) * density, Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = dotColor })
         bmp
     }
 
 /** phase: 0 = normální, 1 = zvýraznění A (primary, velká), 2 = zvýraznění B (tertiary, menší); viz [HighlightPalette]. */
 private fun createLineMarkerDrawable(
-    context: Context, line: String, vs: VehicleStyle, phase: Int, late: Int = 0
+    context: Context, line: String, vs: VehicleStyle, phase: Int, late: Int = 0, christmas: Boolean = false
 ): BitmapDrawable {
-    val key = labelKey(line, vs, phase, late)
+    val key = labelKey(line, vs, phase, late, christmas)
     markerIconCache[key]?.let { return it }
 
     val density = context.resources.displayMetrics.density
@@ -224,25 +233,33 @@ private fun createLineMarkerDrawable(
     val pillWidthPx = maxOf((36 * density).toInt(), (textWidthPx + effectivePadDp * density).toInt())
     val pillHeightPx = (heightDp * density).toInt()
 
+    val xmasTopPx = if (christmas) (10 * density).toInt() else 0
     // zpožděná tramvaj / metro: červený rámeček KOLEM štítku (bitmapa se o něj zvětší, barevná část zůstane stejně velká)
     val lateRing = if (late > 0 && !highlighted) (4f * density).toInt() else 0
     val widthPx = pillWidthPx + 2 * lateRing
-    val heightPx = pillHeightPx + 2 * lateRing
+    val heightPx = pillHeightPx + 2 * lateRing + xmasTopPx
 
     val bitmap = createBitmap(widthPx, heightPx)
     val canvas = Canvas(bitmap)
 
-    val bgColor = vehicleColor(vs, phase)
+    // Vánoční bus / vůz používá tmavě červené dárkové pozadí (jako v aplikaci DPMÚL)
+    val bgColor = if (christmas && !highlighted) 0xFF800000.toInt() else vehicleColor(vs, phase)
 
     val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = bgColor
         style = Paint.Style.FILL
     }
     val inset = strokePx / 2f
-    val rect = RectF(lateRing + inset, lateRing + inset, lateRing + pillWidthPx - inset, lateRing + pillHeightPx - inset)
+    val pillTop = lateRing + xmasTopPx + inset
+    val rect = RectF(
+        lateRing + inset,
+        pillTop,
+        lateRing + pillWidthPx - inset,
+        pillTop + pillHeightPx - inset
+    )
     val radius = rect.height() / 2f
     if (lateRing > 0) {
-        val outer = RectF(0f, 0f, widthPx.toFloat(), heightPx.toFloat())
+        val outer = RectF(0f, xmasTopPx.toFloat(), (pillWidthPx + 2 * lateRing).toFloat(), heightPx.toFloat())
         canvas.drawRoundRect(outer, outer.height() / 2f, outer.height() / 2f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = LATE_COLOR })
     }
     canvas.drawRoundRect(rect, radius, radius, bgPaint)
@@ -256,8 +273,88 @@ private fun createLineMarkerDrawable(
         canvas.drawRoundRect(rect, radius, radius, strokePaint)
     }
 
-    val textY = (heightPx / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
-    canvas.drawText(displayLine, widthPx / 2f, textY, textPaint)
+    if (christmas) {
+        // Zlatá dárková mašle na horním okraji dárkového balíčku (nižší a širší, dle DPMÚL)
+        val centerX = lateRing + pillWidthPx / 2f
+        val knotY = pillTop + 0.5f * density
+
+        val d = density
+        val yellowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFC107.toInt()
+            style = Paint.Style.STROKE
+            strokeWidth = 3.2f * d
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        val yellowFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFC107.toInt()
+            style = Paint.Style.FILL
+        }
+
+        // Levá smyčka mašle (široká do strany, nižší na výšku, tlustý ribbon)
+        val leftLoop = android.graphics.Path().apply {
+            moveTo(centerX - 0.5f * d, knotY - 0.5f * d)
+            cubicTo(
+                centerX - 6f * d, knotY,
+                centerX - 13f * d, knotY - 2.5f * d,
+                centerX - 10f * d, knotY - 7.0f * d
+            )
+            cubicTo(
+                centerX - 7f * d, knotY - 8.5f * d,
+                centerX - 2f * d, knotY - 4.5f * d,
+                centerX - 0.5f * d, knotY - 0.5f * d
+            )
+            close()
+        }
+
+        // Pravá smyčka mašle (široká do strany, nižší na výšku, tlustý ribbon)
+        val rightLoop = android.graphics.Path().apply {
+            moveTo(centerX + 0.5f * d, knotY - 0.5f * d)
+            cubicTo(
+                centerX + 6f * d, knotY,
+                centerX + 13f * d, knotY - 2.5f * d,
+                centerX + 10f * d, knotY - 7.0f * d
+            )
+            cubicTo(
+                centerX + 7f * d, knotY - 8.5f * d,
+                centerX + 2f * d, knotY - 4.5f * d,
+                centerX + 0.5f * d, knotY - 0.5f * d
+            )
+            close()
+        }
+
+        // Stužky (nožičky mašle) přes horní okraj dárkové krabičky
+        val leftTail = android.graphics.Path().apply {
+            moveTo(centerX - 0.5f * d, knotY)
+            lineTo(centerX - 7.5f * d, knotY + 6.5f * d)
+            lineTo(centerX - 3.2f * d, knotY + 7.8f * d)
+            lineTo(centerX + 0.5f * d, knotY + 1.2f * d)
+            close()
+        }
+
+        val rightTail = android.graphics.Path().apply {
+            moveTo(centerX + 0.5f * d, knotY)
+            lineTo(centerX + 7.5f * d, knotY + 6.5f * d)
+            lineTo(centerX + 3.2f * d, knotY + 7.8f * d)
+            lineTo(centerX - 0.5f * d, knotY + 1.2f * d)
+            close()
+        }
+
+        // 1. Stužky dolů přes červenou krabičku
+        canvas.drawPath(leftTail, yellowFillPaint)
+        canvas.drawPath(rightTail, yellowFillPaint)
+
+        // 2. Široké, nižší a tlusté smyčky mašle nahoře
+        canvas.drawPath(leftLoop, yellowPaint)
+        canvas.drawPath(rightLoop, yellowPaint)
+
+        // 3. Středový uzlík
+        canvas.drawCircle(centerX, knotY - 1.2f * d, 3.5f * d, yellowFillPaint)
+    }
+
+    val textY = pillTop + (rect.height() / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
+    canvas.drawText(displayLine, lateRing + pillWidthPx / 2f, textY, textPaint)
 
     val drawable = bitmap.toDrawable(context.resources)
     markerIconCache[key] = drawable

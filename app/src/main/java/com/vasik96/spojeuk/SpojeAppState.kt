@@ -71,6 +71,8 @@ enum class SettingsSubscreen {
     DATA_UPDATES
 }
 
+private const val AUTOFILL_SNAPSHOT_RADIUS_M = 150.0
+
 class SpojeAppState(
     val context: Context,
     val usageManager: StopUsageManager = StopUsageManager(context),
@@ -235,6 +237,35 @@ class SpojeAppState(
     var nearestJob: Deferred<NearestResult>? = null
 
     var autoFillDone = false      // předvyplnění proběhlo
+
+    /**
+     * Poslední předvyplnění "Odkud" / "Kam" k poloze (do [AUTOFILL_SNAPSHOT_RADIUS_M]): ukáže se hned po zjištění polohy,
+     * bez čekání na načtení jízdního řádu, hledání nejbližší zastávky a OSRM (stejně jako uložená karta odjezdů).
+     * Skutečné předvyplnění ho pak potvrdí nebo opraví.
+     */
+    class AutoFillPreview(val fromName: String, val toName: String?)
+    private val autoFillPrefs = context.getSharedPreferences("autofill_snapshot", Context.MODE_PRIVATE)
+
+    /** Co se zobrazilo jako náhled; podle toho se pozná, že je uživatel od té doby nezměnil. */
+    var autoFillPreview: AutoFillPreview? = null
+
+    fun loadAutoFillPreview(lat: Double, lng: Double): AutoFillPreview? {
+        val p = autoFillPrefs
+        if (!p.contains("uLat")) return null
+        val d = Geo.distanceM(lat, lng, java.lang.Double.longBitsToDouble(p.getLong("uLat", 0)), java.lang.Double.longBitsToDouble(p.getLong("uLng", 0)))
+        if (d > AUTOFILL_SNAPSHOT_RADIUS_M) return null
+        val from = p.getString("from", null)?.takeIf { it.isNotBlank() } ?: return null
+        return AutoFillPreview(from, p.getString("to", null)?.takeIf { it.isNotBlank() })
+    }
+
+    fun saveAutoFillPreview(lat: Double, lng: Double, fromName: String, toName: String?) {
+        autoFillPrefs.edit {
+            putLong("uLat", java.lang.Double.doubleToRawLongBits(lat))
+            putLong("uLng", java.lang.Double.doubleToRawLongBits(lng))
+            putString("from", fromName)
+            if (toName != null) putString("to", toName) else remove("to")
+        }
+    }
     var autoFillAsked = false     // o oprávnění jsme už žádali
 
     var walkRoute by mutableStateOf<WalkRoute?>(null)
@@ -514,7 +545,18 @@ class SpojeAppState(
         settingsPrefs.edit { putString("map_provider", provider.name) }
     }
 
-    var focusedTripVehicle by mutableStateOf<Vehicle?>(null)
+    private var focusedTripVehicleState by mutableStateOf<Vehicle?>(null)
+
+    /**
+     * Vůz, který právě sledujeme na trase spoje. Barva trasy z jízdního řádu ([tripStyle]) o vánočním voze nic neví
+     * (je to jen příznak živého vozu), takže jakmile se vánoční vůz najde, přebije barvu trasy jeho stylem (červená).
+     */
+    var focusedTripVehicle: Vehicle?
+        get() = focusedTripVehicleState
+        set(value) {
+            focusedTripVehicleState = value
+            if (value != null && value.christmas) routeStyle = vehicleStyle(value)
+        }
     var focusedTripRef by mutableStateOf<TripRef?>(null)
 
     /** Najde v novém seznamu stejný vůz jako [cur]. Primárně podle uid ze serveru, pak source + id nebo sameVehicleId. */

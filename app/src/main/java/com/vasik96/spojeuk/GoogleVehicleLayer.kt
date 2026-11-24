@@ -54,6 +54,8 @@ internal class GoogleVehicleLayer(private val context: Context) {
         private set
     var late = BooleanArray(0)       // tramvaj / metro se zpožděním: červený okraj tečky
         private set
+    var christmas = BooleanArray(0)  // vánoční ozdoba
+        private set
     var label = arrayOfNulls<Bitmap>(0)   // štítek s číslem linky; null = tečka
         private set
     private var lat = DoubleArray(0)
@@ -226,7 +228,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
 
         /** Bitmapa štítku, pokud je hotová; jinak se objedná kreslení na pozadí. */
         fun labelOf(v: Vehicle): Bitmap? {
-            val key = labelKey(v.line, vehicleStyle(v), 0, lateMinutes(v))
+            val key = labelKey(v.line, vehicleStyle(v), 0, lateMinutes(v), v.christmas)
             cachedMarkerBitmap(key)?.let { return it }
             if (missingLabels.size < MAX_MISSING) missingLabels[key] = v
             pending = true
@@ -236,13 +238,17 @@ internal class GoogleVehicleLayer(private val context: Context) {
         val cap = activeVehicles.size
         if (wx.size < cap) {
             val sz = cap + cap / 4 + 16
-            wx = DoubleArray(sz); wy = DoubleArray(sz); vwx = DoubleArray(sz); vwy = DoubleArray(sz); color = IntArray(sz); late = BooleanArray(sz); label = arrayOfNulls(sz)
+            wx = DoubleArray(sz); wy = DoubleArray(sz); vwx = DoubleArray(sz); vwy = DoubleArray(sz); color = IntArray(sz); late = BooleanArray(sz); christmas = BooleanArray(sz); label = arrayOfNulls(sz)
             lat = DoubleArray(sz); lng = DoubleArray(sz); vehicles = arrayOfNulls(sz)
         }
         var n = 0
         var h = -1
         var anyMoving = false
-        for ((key, v) in activeVehicles) {
+        val sortedVehicles = if (activeVehicles.any { it.second.christmas }) {
+            activeVehicles.sortedBy { (_, v) -> if (v.christmas) 1 else 0 }
+        } else activeVehicles
+
+        for ((key, v) in sortedVehicles) {
             val e = hub.entryOf(key)
             val p = e?.pos
             val la = p?.latitude ?: v.lat
@@ -260,13 +266,14 @@ internal class GoogleVehicleLayer(private val context: Context) {
             color[n] = vehicleColor(style, if (isHl) phase else 0)
             val lateMin = lateMinutes(v)
             late[n] = lateMin > 0
+            christmas[n] = v.christmas
             lat[n] = la; lng[n] = lo; vehicles[n] = v
             val inView = view == null || view.contains(la, lo)
             label[n] = when {
                 // zvýrazněné: pulzující štítek (jen pár variant, kreslí se hned)
-                isHl && !dot -> markerBitmap(context, v.line, style, phase, lateMin)
+                isHl && !dot -> markerBitmap(context, v.line, style, phase, lateMin, v.christmas)
                 isHl -> null
-                !dot -> if (inView) labelOf(v) else cachedMarkerBitmap(labelKey(v.line, style, 0, lateMin))
+                !dot -> if (inView) labelOf(v) else cachedMarkerBitmap(labelKey(v.line, style, 0, lateMin, v.christmas))
                 else -> { if (prewarm && inView) labelOf(v); null }
             }
             if (isHl) h = n

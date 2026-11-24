@@ -93,6 +93,7 @@
     <string name="setup_preparing">Připravuji jízdní řády…</string>
     <string name="setup_hint">Při prvním spuštění se stahují jízdní řády (~18 MB). Obvykle to trvá jen pár sekund.</string>
     <string name="vd_trip_info">Informace o spoji:</string>
+    <string name="vd_christmas_vehicle">Vánoční vůz</string>
     <string name="vd_vehicle_id">ID vozidla: %1$s</string>
     <string name="vd_vehicle_id_na">ID vozidla: není dostupné</string>
     <string name="vd_source">Zdroj polohy: %1$s</string>

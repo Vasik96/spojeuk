@@ -48,23 +48,64 @@ data class VehicleSourceOption(
     val desc: String = "",
 )
 
-/** Směr jízdy z posunu polohy, pro vozy, které azimut nedávají (nebo dávají 0). */
-class HeadingTracker(private val minMoveM: Double = 15.0) {
-    private val lastPos = HashMap<String, Pair<Double, Double>>()
-    private val headings = HashMap<String, Double>()
+/**
+ * Směr jízdy z posunu polohy, pro vozy, které azimut nedávají (nebo dávají 0).
+ *
+ * Drží krátkou historii poloh každého vozu. Směr se počítá z nejnovějšího bodu historie vzdáleného aspoň
+ * [minMoveM] od aktuální polohy (tedy lokálně, ne z hrubé tětivy přes zatáčku) a ten bod se vozu přikládá
+ * jako [Vehicle.trail] pro určení směru po trase spoje.
+ *
+ * Azimut DPMÚL je směr k nejbližší zastávce, ne směr jízdy, proto se u DPMÚL nikdy nepoužije.
+ */
+class HeadingTracker(private val minMoveM: Double = 20.0) {
+    private class State {
+        val pts = ArrayList<Pair<Double, Double>>()
+        var heading: Double? = null
+        var trail: Pair<Double, Double>? = null
+        var seenMs = 0L
+    }
+
+    private val states = HashMap<String, State>()
 
     @Synchronized
-    fun track(v: Vehicle): Vehicle {
-        val effectiveHeading = v.heading?.takeIf { it != 0.0 }
-        val prev = lastPos[v.uid]
-        if (prev == null) {
-            lastPos[v.uid] = v.lat to v.lng
-        } else if (Geo.distanceM(prev.first, prev.second, v.lat, v.lng) >= minMoveM) {
-            headings[v.uid] = Geo.bearingDeg(prev.first, prev.second, v.lat, v.lng)
-            lastPos[v.uid] = v.lat to v.lng
+    fun track(v: Vehicle, nowMs: Long = System.currentTimeMillis()): Vehicle {
+        if (states.size > MAX_STATES) states.entries.removeAll { nowMs - it.value.seenMs > STATE_TTL_MS }
+        val st = states.getOrPut(v.uid) { State() }
+        st.seenMs = nowMs
+        val here = v.lat to v.lng
+
+        val last = st.pts.lastOrNull()
+        if (last != null && Geo.distanceM(last.first, last.second, v.lat, v.lng) > JUMP_M) {
+            // skok (jiný vůz pod stejným klíčem, výpadek GPS): stará stopa neplatí
+            st.pts.clear(); st.heading = null; st.trail = null
         }
-        val h = effectiveHeading ?: headings[v.uid]
-        return if (h != v.heading) v.copy(heading = h) else v
+        val tail = st.pts.lastOrNull()
+        if (tail == null || Geo.distanceM(tail.first, tail.second, v.lat, v.lng) >= STEP_M) {
+            st.pts.add(here)
+            if (st.pts.size > MAX_POINTS) st.pts.removeAt(0)
+        }
+
+        val anchor = st.pts.lastOrNull { Geo.distanceM(it.first, it.second, v.lat, v.lng) >= minMoveM }
+        if (anchor != null) {
+            // přesně 0° by zbytek appky bral jako „azimut neznámý“
+            st.heading = Geo.bearingDeg(anchor.first, anchor.second, v.lat, v.lng).let { if (it == 0.0) 0.1 else it }
+            st.trail = anchor
+        } else if (st.trail?.let { Geo.distanceM(it.first, it.second, v.lat, v.lng) > TRAIL_KEEP_M } == true) {
+            st.trail = null
+        }
+
+        val own = if (v.source == SourceIds.DPMUL) null else v.heading?.takeIf { it != 0.0 }
+        val h = own ?: st.heading
+        return if (h != v.heading || st.trail != v.trail) v.copy(heading = h, trail = st.trail) else v
+    }
+
+    private companion object {
+        const val STEP_M = 8.0
+        const val JUMP_M = 800.0
+        const val TRAIL_KEEP_M = 300.0
+        const val MAX_POINTS = 12
+        const val MAX_STATES = 3_000
+        const val STATE_TTL_MS = 10 * 60_000L
     }
 }
 
