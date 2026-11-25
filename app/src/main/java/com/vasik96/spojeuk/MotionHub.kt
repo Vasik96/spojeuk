@@ -8,6 +8,7 @@ import kotlinx.coroutines.launch
 
 internal class ViewBox(val s: Double, val w: Double, val n: Double, val e: Double) {
     fun contains(lat: Double, lng: Double) = lat in s..n && lng in w..e
+    fun contains(o: ViewBox) = o.s >= s && o.n <= n && o.w >= w && o.e <= e
 
     fun expanded(f: Double): ViewBox {
         val dy = (n - s) * f

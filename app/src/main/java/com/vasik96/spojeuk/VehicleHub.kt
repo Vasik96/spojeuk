@@ -66,10 +66,16 @@ class HeadingTracker(private val minMoveM: Double = 20.0) {
     }
 
     private val states = HashMap<String, State>()
+    private var prunedAt = 0L
 
     @Synchronized
     fun track(v: Vehicle, nowMs: Long = System.currentTimeMillis()): Vehicle {
-        if (states.size > MAX_STATES) states.entries.removeAll { nowMs - it.value.seenMs > STATE_TTL_MS }
+        // úklid nejvýš jednou za minutu: dřív běžel při KAŽDÉM volání, jakmile bylo vozů víc než MAX_STATES
+        // (s Prahou ~3600) => při každé obnově 3600 × 3600 průchodů mapou, na hlavním vlákně zásek ~150 ms
+        if (states.size > MAX_STATES && nowMs - prunedAt > PRUNE_EVERY_MS) {
+            prunedAt = nowMs
+            states.entries.removeAll { nowMs - it.value.seenMs > STATE_TTL_MS }
+        }
         val st = states.getOrPut(v.uid) { State() }
         st.seenMs = nowMs
         val here = v.lat to v.lng
@@ -105,6 +111,7 @@ class HeadingTracker(private val minMoveM: Double = 20.0) {
         const val TRAIL_KEEP_M = 300.0
         const val MAX_POINTS = 12
         const val MAX_STATES = 3_000
+        const val PRUNE_EVERY_MS = 60_000L
         const val STATE_TTL_MS = 10 * 60_000L
     }
 }
@@ -230,7 +237,8 @@ class VehicleHub(
             }
             try {
                 val raw = withContext(Dispatchers.IO) { api.fetch() }
-                val snap = raw.copy(vehicles = raw.vehicles.map { headings.track(it) })
+                // směry tisíců vozů mimo hlavní vlákno
+                val snap = withContext(Dispatchers.Default) { raw.copy(vehicles = raw.vehicles.map { headings.track(it) }) }
                 snapshot = snap
                 lastError = null
                 initialFetchDone = true

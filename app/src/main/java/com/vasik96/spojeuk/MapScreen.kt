@@ -151,6 +151,8 @@ import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1127,6 +1129,11 @@ private const val VEHICLE_UPDATE_INTERVAL_MS = 33L
 private const val VEHICLE_UPDATE_INTERVAL_MID_MS = 66L      // štítky, 300–800 vozidel v záběru
 private const val VEHICLE_UPDATE_INTERVAL_MANY_MS = 100L    // štítky, víc než 800 vozidel (Praha)
 private const val GESTURE_QUIET_MS = 200L
+// okraj kolem záběru, jehož vozidla jsou v GeoJSON (podíl rozměru záběru na každou stranu; 0,3 = 2,6× plocha).
+// Větší = víc štítků k rozmístění při každé dávce, menší = při rychlém posunu se častěji posílá během gesta.
+private const val VEH_VIEW_MARGIN = 0.3
+// během gesta se posílá, jakmile záběr (+ tahle rezerva) přesáhne pokrytou oblast
+private const val VEH_COVER_SLACK = 0.1
 private const val LOCATION_ANIMATION_FPS = 10              // animace modrého bodu (kompas) v MapLibre                  // tak dlouho po pohybu kamery se vozidla neposílají
 // oddáleno (tečky): pohyb o pixel trvá dlouho, stačí řídké aktualizace
 private const val DOT_UPDATE_INTERVAL_MS = 250L
@@ -1151,7 +1158,7 @@ private const val GOOGLE_VEHICLE_INTERVAL_MS = 33L     // Google: pohyb vozidel 
 private const val GOOGLE_DOT_INTERVAL_MS = 250L         // oddálené tečky (pod DOT_SMOOTH_ZOOM) se hýbou o zlomky pixelu
 private const val DOT_SMOOTH_ZOOM = 10.5f
 private const val LABEL_PREWARM_ZOOM = 1.0f            // o kolik úrovní před přepnutím na štítky se začnou kreslit
-private const val MAX_NEW_IMAGES_PER_PUSH = 10
+private const val MAX_NEW_IMAGES_PER_PUSH = 600   // Praha: ~300 různých štítků v záběru
 
 // popis vozidla pro vykreslení: ikona + řazení, přepočítá se jen při změně vozidel / zvýraznění
 private class VehicleDraw(
@@ -1254,7 +1261,7 @@ private fun buildVehicleJson(
                 north = (merc(lat) - a[2]) * worldPx / (2 * Math.PI)
             }
             if (a == null || hypot(east, north) > VEH_ANCHOR_MAX_PX) {
-                a = doubleArrayOf(lat, lng, merc(lat))
+                a = snappedAnchor(lat, lng)
                 anchors[d.key] = a
                 east = 0.0; north = 0.0
             }
@@ -1293,7 +1300,32 @@ private fun buildVehicleJson(
     return VehicleJson(sb.toString(), count, pending)
 }
 
-private const val VEH_SRC_MAX_ZOOM = 13
+/**
+ * Velké dlaždice zdroje vozidel (z8 ≈ 100 km, celá Praha v jedné). MapLibre kreslí symboly PO DLAŽDICÍCH: vůz
+ * v jiné dlaždici je vždy nad / pod sousedem bez ohledu na pořadí features, takže když tramvaj přejela hranici
+ * dlaždice (u z13 ~3 km, v Praze pořád), prohodilo se překrytí. Méně dlaždic = i méně práce při každé dávce.
+ * Hrubší mřížka souřadnic v dlaždici (~12 m) nevadí: kotvy štítků se přichytávají přímo na ni ([snappedAnchor])
+ * a jemnou polohu nese posun ikony; tečky (do zoomu 11) se posouvají nejvýš o půl pixelu.
+ */
+private const val VEH_SRC_MAX_ZOOM = 8
+private const val VEH_TILE_EXTENT = 8192.0   // MapLibre (geojson-vt) extent dlaždice
+
+/**
+ * Kotva [lat, lng, merc] přichycená na mřížku souřadnic dlaždice úrovně [VEH_SRC_MAX_ZOOM]: MapLibre ji
+ * pak zobrazí přesně tam, kde ji počítáme, a posun ikony k ní je přesný. Nikdy přesně na hranici dlaždice
+ * (bod na hranici by byl v obou dlaždicích => duplicita).
+ */
+private fun snappedAnchor(lat: Double, lng: Double): DoubleArray {
+    val n = VEH_TILE_EXTENT * (1 shl VEH_SRC_MAX_ZOOM)
+    fun off(v: Double) = if (v % VEH_TILE_EXTENT == 0.0) v + 1 else v
+    val gx = off(Math.round((lng + 180.0) / 360.0 * n).toDouble())
+    val m0 = ln(tan(Math.PI / 4 + Math.toRadians(lat) / 2))
+    val gy = off(Math.round((1.0 - m0 / Math.PI) / 2.0 * n).toDouble())
+    val sLng = gx / n * 360.0 - 180.0
+    val sMerc = (1.0 - 2.0 * gy / n) * Math.PI
+    val sLat = Math.toDegrees(2.0 * kotlin.math.atan(kotlin.math.exp(sMerc)) - Math.PI / 2)
+    return doubleArrayOf(sLat, sLng, sMerc)
+}
 private const val VEH_DOT_LAYER = "vehicles-dots"
 private const val VEH_HL_LAYER = "vehicles-hl"
 private const val VEH_OLD_LAYER = "vehicles-old"   // štítky vozidel se starou polohou (ztlumené)
@@ -1366,13 +1398,16 @@ private fun SymbolLayer.noOpacityTransition() = also { it.iconOpacityTransition 
  */
 private fun ensureVehicleLayer(style: Style) {
     if (style.getSource(VEH_SRC) == null) {
-        // maxZoom 13: nad ním MapLibre jen zvětšuje dlaždice z úrovně 13 (při zoomu ~15 jsou v záběru 2–4 dlaždice
-        // místo ~15). Méně hranic dlaždic = méně míst, kde se překrývající vozy přehazují (vůz u hranice je v obou
-        // dlaždicích a kreslí ho ta, která je zrovna hotová) a méně dlaždic k rozřezání a rozmístění při každé
-        // dávce poloh a při zoomu. Přesnost kotvy na úrovni 13 ~0,4 m (pod pixel až do zoomu 17).
+        // maxZoom viz VEH_SRC_MAX_ZOOM: nad ním MapLibre jen zvětšuje dlaždice z té úrovně.
         style.addSource(GeoJsonSource(
             VEH_SRC, FeatureCollection.fromFeatures(emptyList<Feature>()),
-            org.maplibre.android.style.sources.GeoJsonOptions().withMaxZoom(VEH_SRC_MAX_ZOOM),
+            org.maplibre.android.style.sources.GeoJsonOptions().withMaxZoom(VEH_SRC_MAX_ZOOM)
+                // buffer 0: bod patří jen do JEDNÉ dlaždice. S výchozím bufferem (128) je vůz u hranice v obou
+                // dlaždicích a CrossTileSymbolIndex duplicity páruje jen podle polohy (ikony nemají text => stejný
+                // klíč) – překrývající se vozy (tramvaje v Praze) se při každé dávce zaměnily a jeden na snímek
+                // zmizel / přeskočil nad druhý. Symboly se ořezávají jen podle kotvy, ne podle dlaždice, takže
+                // ikona přes hranici se kreslí celá.
+                .withBuffer(0),
         ))
         // bez animací umísťování symbolů: každá nová dávka poloh vozidel (GeoJSON) by štítky znovu „prolínala“
         // (300 ms) a mapa by se kvůli tomu překreslovala pořád dokola (render vlákno MapLibre ~80 % v Praze)
@@ -2013,7 +2048,8 @@ private fun MapLibreScreenContent(
 
         var draws: List<VehicleDraw> = emptyList()
         var lastPush = 0L
-        var view: ViewBox? = null
+        var view: ViewBox? = null    // oblast, jejíž vozidla jdou do GeoJSON (záběr + okraj)
+        var screen: ViewBox? = null  // samotný záběr
         var viewAt = 0L
         var dotMode = false          // oddáleno: kreslí se jen tečky (vrstva přepíná GPU, tady jen šetříme práci)
         var needImages = true        // štítky se budou kreslit (nebo jsou těsně před tím)
@@ -2024,6 +2060,7 @@ private fun MapLibreScreenContent(
         var alphaStyle: Style? = null
         var lastDotA = -1f; var lastLabelA = -1f; var lastHlA = -1f
         var deferred = false         // aktualizace odložená kvůli gestu
+        var covered: ViewBox? = null // oblast posledního GeoJSON
         var zoomNow = 11.0           // zoom a azimut z posledního čtení kamery (pro přepočet posunu ikony na pixely)
         var bearingNow = 0.0
         // pevná kotva symbolu každého vozu: [lat, lng]. MapLibre páruje symboly mezi dávkami dat podle polohy
@@ -2061,7 +2098,7 @@ private fun MapLibreScreenContent(
                 ViewBox(
                     corners.minOf { it.latitude }, corners.minOf { it.longitude },
                     corners.maxOf { it.latitude }, corners.maxOf { it.longitude }
-                ).expanded(0.15)   // menší okraj = méně štítků k rozmístění (při 0,4 to byla 3,2× plocha záběru)
+                )
             }
         }.getOrNull()
 
@@ -2097,7 +2134,9 @@ private fun MapLibreScreenContent(
                 var modeFlipped = false
                 // viditelná oblast a zoom (JNI volání) jen při pohybu kamery, jinak max. 1x za vteřinu
                 if (camChanged || view == null || now - viewAt >= 1000L) {
-                    view = currentView()
+                    screen = currentView()
+                    // okraj se posouvá se záběrem, jen dokud ho kamera nevyčerpá (viz needCover níž)
+                    view = screen?.expanded(VEH_VIEW_MARGIN)
                     viewAt = now
                     runCatching { m.cameraPosition }.getOrNull()?.let { cp -> zoomNow = cp.zoom; bearingNow = cp.bearing; cp.zoom }?.let { z ->
                         val nowDot = z < DOT_ZOOM_ML
@@ -2126,7 +2165,11 @@ private fun MapLibreScreenContent(
                 if (!moved && !metaChanged && !camChanged && !pending && !deferred) continue
                 // během gesta (zoom, posun) jen kamera: běžné posuny vozidel počkají na konec gesta, aby se MapLibre
                 // nepral s překreslováním mapy. Přepnutí tečky ↔ štítky (a chybějící štítky při něm) projde hned.
-                if (now - cameraMovedAt.get() < GESTURE_QUIET_MS && !metaChanged && !(pending && fade.switching())) {
+                // Výjimka: záběr vyjel z oblasti, kterou pokrývá poslední GeoJSON (rychlý posun / oddálení) =>
+                // poslat hned, jinak by tam markery naskočily až po konci gesta (0,5–1 s).
+                val sc = screen
+                val needCover = sc != null && covered?.contains(sc.expanded(VEH_COVER_SLACK)) != true
+                if (now - cameraMovedAt.get() < GESTURE_QUIET_MS && !metaChanged && !needCover && !(pending && fade.switching())) {
                     deferred = true
                     continue
                 }
@@ -2164,7 +2207,7 @@ private fun MapLibreScreenContent(
                 }
 
                 // obrázky štítků jen pro vozidla ve viditelné oblasti a jen když se štítky kreslí
-                // (zvýrazněné vozidlo je štítek vždy). Za jeden průchod nejvýš pár kusů, ať se hlavní vlákno nezasekne.
+                // (zvýrazněné vozidlo je štítek vždy).
                 val missing = LinkedHashMap<String, VehicleDraw>()
                 for (d in draws) {
                     if (!needImages && d.iconPhase == 0) continue
@@ -2175,18 +2218,21 @@ private fun MapLibreScreenContent(
                     if (missing.size >= MAX_NEW_IMAGES_PER_PUSH) break
                 }
                 if (missing.isNotEmpty()) {
+                    // paralelně na všech jádrech a do MapLibre jedním voláním (každé addImage zvlášť = JNI
+                    // a nové rozmístění štítků, které na obrázek čekají)
+                    val dpi = context.resources.displayMetrics.densityDpi
                     val newBitmaps = withContext(Dispatchers.Default) {
-                        missing.map { (imgId, d) ->
-                            val bmp = markerBitmap(context, d.v.line, d.style, d.iconPhase, d.late, d.v.christmas)
-                                .copy(Bitmap.Config.ARGB_8888, false).apply {
-                                    setDensity(context.resources.displayMetrics.densityDpi)
-                                }
-                            imgId to bmp
-                        }
+                        missing.entries.map { (imgId, d) ->
+                            async {
+                                val bmp = markerBitmap(context, d.v.line, d.style, d.iconPhase, d.late, d.v.christmas)
+                                    .copy(Bitmap.Config.ARGB_8888, false).apply { setDensity(dpi) }
+                                imgId to bmp
+                            }
+                        }.awaitAll()
                     }
-                    for ((imgId, bmp) in newBitmaps) {
-                        if (addedImages.add(imgId)) style.addImage(imgId, bmp)
-                    }
+                    val batch = HashMap<String, Bitmap>(newBitmaps.size * 2)
+                    for ((imgId, bmp) in newBitmaps) if (addedImages.add(imgId)) batch[imgId] = bmp
+                    if (batch.isNotEmpty()) style.addImages(batch)
                 }
                 pending = false
 
@@ -2210,6 +2256,7 @@ private fun MapLibreScreenContent(
                 // první dávka se štítky po přepnutí: prolínání počká, až je MapLibre zpracuje (viz labelsLoading)
                 if (modeFlipped && !fade.dotMode && fade.switching()) labelsLoading.set(1)
                 style.getSourceAs<GeoJsonSource>(VEH_SRC)?.setGeoJson(built.json)
+                covered = view
                 if (built.count > 0) fade.startAppear()
                 lastCount = built.count
                 lastPush = now
