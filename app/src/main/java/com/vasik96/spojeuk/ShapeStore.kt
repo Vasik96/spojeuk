@@ -102,7 +102,7 @@ class ShapeStore(
     }
 
     private fun routePrefix(gid: String): String? =
-        Regex("^jdf:trip:([^:]+):").find(gid)?.let { "jdf:trip:${it.groupValues[1]}" }
+        ROUTE_PREFIX_RE.find(gid)?.let { "jdf:trip:${it.groupValues[1]}" }
 
     private fun openDb(): SQLiteDatabase? =
         db ?: runCatching { SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY) }
@@ -110,7 +110,7 @@ class ShapeStore(
 
     /** (verze yymmdd, výluka?) z gid `jdf:trip:<linka>:<yymmdd>[:det]…`, nebo null. */
     private fun gidVersion(gid: String): Pair<String, Boolean>? =
-        Regex("^jdf:trip:[^:]+:(\\d{6})(:det)?(?::|$)").find(gid)?.let { it.groupValues[1] to it.groupValues[2].isNotEmpty() }
+        GID_VERSION_RE.find(gid)?.let { it.groupValues[1] to it.groupValues[2].isNotEmpty() }
 
     private fun matchByRoute(gid: String, stops: List<Pair<Double, Double>>): List<Pair<Double, Double>>? {
         val prefix = routePrefix(gid) ?: return null
@@ -396,3 +396,6 @@ class ShapeStore(
         }
     }
 }
+
+private val ROUTE_PREFIX_RE = Regex("^jdf:trip:([^:]+):")
+private val GID_VERSION_RE = Regex("^jdf:trip:[^:]+:(\\d{6})(:det)?(?::|$)")

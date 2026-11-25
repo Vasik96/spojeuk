@@ -42,6 +42,19 @@ class JourneyOnBoardTest {
         assertFalse(isInitialDepartureMissed(legs, mapOf(0 to 0), now, north(180.0), lng0, lat0, lng0, vehicleNotLeftStop = true))
     }
 
+    @Test fun transfer_notMissedWhenUserIsWithVehicleBButTrackerNotLockedYet() {
+        // B odjel před 70 s, uživatel je 300 m od zastávky (ve voze B, horší GPS => OnBoardTracker se nechytil)
+        val now = h(10, 31) + 10
+        val u = north(300.0)
+        assertTrue(isTransferMissed(legs, 0, mapOf(0 to 0, 1 to 0), now, u, lng0, lat0, lng0))          // dřív: zmeškáno
+        assertFalse(isTransferMissed(legs, 0, mapOf(0 to 0, 1 to 0), now, u, lng0, lat0, lng0, userWithVehicleB = true))
+    }
+
+    @Test fun initial_notMissedWhenUserMovesWithVehicle() {
+        val now = h(10, 4)
+        assertFalse(isInitialDepartureMissed(legs, mapOf(0 to 0), now, north(400.0), lng0, lat0, lng0, userWithVehicle = true))
+    }
+
     // ───── poznání, že jsem ve voze ─────
 
     @Test fun onBoard_movingWithVehicleIsDetectedAfterTwoSamples() {

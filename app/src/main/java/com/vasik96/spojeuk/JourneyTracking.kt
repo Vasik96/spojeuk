@@ -57,6 +57,12 @@ object JourneyTracker {
     }
 
     internal fun clear() { _current.value = null }
+
+    /**
+     * Přeplánování ze služby: jen vymění sledované spojení, službu znovu nespouští (restart by vynuloval ochranu proti
+     * opakovanému přeplánování a nechal chvíli běžet i starou smyčku).
+     */
+    internal fun replace(j: Journey) { _current.value = j }
 }
 
 /**
@@ -79,25 +85,41 @@ class JourneyTrackingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val j = JourneyTracker.current.value
-        if (intent?.action == ACTION_STOP || j == null) {
-            finish()
-            return START_NOT_STICKY
-        }
-        ensureChannels(this)
-        val repo = TransitRepository.get(this)
-        startLocationUpdates()
-        // startForeground musí proběhnout hned (do 5 s od startu služby)
-        val first = buildNotification(this, j, repo.journeyDetailNow(j).orEmpty(), repo.journeyLiveNow(j))
-        val fgsType = if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+    private fun fgsType(): Int =
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         ) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         } else {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         }
-        ServiceCompat.startForeground(this, NOTIF_ID, first, fgsType)
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val j = JourneyTracker.current.value
+        if (intent?.action == ACTION_STOP) {
+            finish()
+            return START_NOT_STICKY
+        }
+        ensureChannels(this)
+        if (j == null) {
+            // Start přes startForegroundService, ale sledování se mezitím vypnulo (rychlé zapnout + vypnout): služba
+            // musí i tak zavolat startForeground, jinak ji systém shodí (ForegroundServiceDidNotStartInTimeException)
+            runCatching {
+                val placeholder = NotificationCompat.Builder(this, CHANNEL)
+                    .setSmallIcon(R.drawable.ic_stat_transit)
+                    .setContentTitle(tr(R.string.track_channel))
+                    .setSilent(true)
+                    .build()
+                ServiceCompat.startForeground(this, NOTIF_ID, placeholder, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            }
+            finish()
+            return START_NOT_STICKY
+        }
+        val repo = TransitRepository.get(this)
+        startLocationUpdates()
+        // startForeground musí proběhnout hned (do 5 s od startu služby)
+        val first = buildNotification(this, j, repo.journeyDetailNow(j).orEmpty(), repo.journeyLiveNow(j))
+        ServiceCompat.startForeground(this, NOTIF_ID, first, fgsType())
         alightAlerted = -1
         lastRerouteMs = 0L
         onBoard.reset()
@@ -137,8 +159,8 @@ class JourneyTrackingService : Service() {
         val nm = NotificationManagerCompat.from(this)
         var j = initialJ
         while (JourneyTracker.current.value?.key == j.key) {
-            val detail = repo.journeyDetailNow(j) ?: runCatching { repo.journeyDetail(j) }.getOrDefault(emptyList())
-            val live = runCatching { repo.journeyLive(j) }.getOrDefault(emptyMap())
+            val detail = repo.journeyDetailNow(j) ?: catchingNonCancel { repo.journeyDetail(j) } ?: emptyList()
+            val live = catchingNonCancel { repo.journeyLive(j) } ?: emptyMap()
             val delays = live.mapValues { it.value.delay }
             val nowSec = secondsSinceMidnight(j.day)
 
@@ -257,6 +279,15 @@ class JourneyTrackingService : Service() {
         val rides = rideIndices(j.rawLegs)
         var isMissed = false
         var transferStopId: Int? = null
+        val userLoc = latestLocation
+        val accuracy = userLoc?.takeIf { it.hasAccuracy() }?.accuracy
+        /** Uživatel je u živého vozu jízdy [ride] nebo jede rychlostí vozidla (pak zastávku nezmeškal, jede). */
+        fun withVehicle(ride: Int): Boolean {
+            if (onBoard.movingLikeVehicle) return true
+            val v = live[ride] ?: return false
+            if (userLoc == null) return false
+            return isNearVehicle(userLoc.latitude, userLoc.longitude, accuracy, VehiclePos(v.lat, v.lng, v.ageSec()))
+        }
 
         // 1. Kontrola jednotlivých přestupů v cestě
         for (k in 0 until rides.size - 1) {
@@ -272,6 +303,7 @@ class JourneyTrackingService : Service() {
                 hasLiveB = hasLiveB,
                 onBoardRide = onBoardRide,
                 vehicleBNotLeftStop = notYet,
+                userWithVehicleB = withVehicle(b),
             )
             if (missed) {
                 isMissed = true
@@ -295,6 +327,7 @@ class JourneyTrackingService : Service() {
                         hasLiveFirst = hasLiveFirst,
                         userOnBoard = onBoardRide >= r0,
                         vehicleNotLeftStop = notYet,
+                        userWithVehicle = withVehicle(r0),
                     )
                 ) {
                     isMissed = true
@@ -307,7 +340,6 @@ class JourneyTrackingService : Service() {
 
         lastRerouteMs = nowMs
 
-        val userLoc = latestLocation
         val fromStopName: String? = if (userLoc != null) {
             val cand = repo.nearestCandidates(userLoc.latitude, userLoc.longitude, limit = 3).firstOrNull()
             if (cand != null && cand.second < 1000.0) prettyName(cand.first.name)
@@ -319,16 +351,19 @@ class JourneyTrackingService : Service() {
 
         if (fromStopName == null || toStopName == null) return null
 
-        val altJourneys = runCatching {
-            repo.searchConnections(fromStopName, toStopName, startTime = nowPrague(), count = 5)
-        }.getOrDefault(emptyList())
+        val searchFrom = nowPrague()
+        val altJourneys = catchingNonCancel {
+            repo.searchConnections(fromStopName, toStopName, startTime = searchFrom, count = 5)
+        } ?: emptyList()
 
-        val newJ = altJourneys.firstOrNull { it.key != j.key && it.dep >= nowSec - 60 }
+        // jen spoj, který ještě neodjel. Časy jsou v sekundách od půlnoci VLASTNÍHO dne spojení (po půlnoci / přes ni
+        // se dny liší), proto porovnání v absolutním čase
+        val newJ = altJourneys.firstOrNull { it.key != j.key && !absDep(it).isBefore(searchFrom) }
         val nm = NotificationManagerCompat.from(this)
 
         if (newJ != null) {
-            JourneyTracker.start(this, newJ)
-            val newDetail = repo.journeyDetailNow(newJ) ?: runCatching { repo.journeyDetail(newJ) }.getOrNull()
+            JourneyTracker.replace(newJ)
+            val newDetail = repo.journeyDetailNow(newJ) ?: catchingNonCancel { repo.journeyDetail(newJ) }
             val lineName = newDetail?.filterIsInstance<DetailLeg.Ride>()?.firstOrNull()?.line ?: "?"
             val n = NotificationCompat.Builder(this, CHANNEL_ALERTS)
                 .setSmallIcon(R.drawable.ic_stat_transit)
@@ -358,6 +393,18 @@ class JourneyTrackingService : Service() {
             runCatching { nm.notify(ALERT_ID, n) }
             return null
         }
+    }
+
+    /** Odjezd spojení jako datum a čas (dep = sekundy od půlnoci dne spojení, může přesáhnout 24 h). */
+    private fun absDep(j: Journey): java.time.LocalDateTime = j.day.atStartOfDay().plusSeconds(j.dep.toLong())
+
+    /** runCatching, který nespolkne zrušení coroutiny (jinak by zrušená smyčka ještě chvíli běžela a posílala notifikace). */
+    private inline fun <T> catchingNonCancel(block: () -> T): T? = try {
+        block()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
     }
 
     private fun finish() {

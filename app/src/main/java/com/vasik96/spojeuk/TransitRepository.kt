@@ -489,7 +489,7 @@ class TransitRepository(context: Context? = null) {
 
         fun norm(name: String): String {
             val label = splitStopName(prettyName(name)).first.ifBlank { name }
-            return foldText(label).replace(Regex("\\bhl\\.?n\\.?\\b"), "hlavni nadrazi").replace(Regex("\\s+"), "")
+            return foldText(label).replace(HL_N_RE, "hlavni nadrazi").replace(SPACES_RE, "")
         }
 
         for (journey in journeys) {
@@ -1045,12 +1045,28 @@ class JourneySearch(
             // dnešní cíl: do minulosti se nehledá (větší okno by už nic nového nepřineslo)
             val clamped = deadline.isAfter(now) && from.isBefore(now)
             if (clamped) from = now
-            val found = api.searchConnections(fromName, toName, from, (want * 2).coerceAtLeast(12), modeFilter = modeFilter)
+            var found = api.searchConnections(fromName, toName, from, (want * 2).coerceAtLeast(12), modeFilter = modeFilter)
+            // Nejlepší odpovědi jsou NEJPOZDĚJI odjíždějící spoje, které ještě stihnou příjezd. Prvních 12 výsledků od
+            // začátku okna na častých linkách leží jen v jeho začátku: dokud i nejpozději odjíždějící nalezený spoj
+            // dojede včas, může jet ještě pozdější => stránkovat dál (nejvýš pár stránek).
+            var pages = 0
+            while (pages < ARRIVE_BY_MAX_PAGES && found.isNotEmpty()) {
+                val latest = found.maxBy { it.depDt }
+                if (latest.depDt >= deadline || arrivalDt(latest) > deadline) break
+                val more = api.searchMoreLater(fromName, toName, found, modeFilter = modeFilter)
+                if (more.size <= found.size) break
+                found = more
+                pages++
+            }
             val ok = found.filter { arrivalDt(it) <= deadline }
             if (ok.size > best.size) best = ok
             if (ok.size >= 3 || clamped) break
         }
         return best.sortedBy { it.depDt }.takeLast(want.coerceAtLeast(4))
+    }
+
+    private companion object {
+        const val ARRIVE_BY_MAX_PAGES = 8
     }
 
     private fun arrivalDt(j: Journey): LocalDateTime = j.day.atStartOfDay().plusSeconds(j.arr.toLong())
@@ -1074,3 +1090,7 @@ class JourneySearch(
         }
     }
 }
+
+// předkompilované (dřív se kompilovaly pro každou zastávku každého spojení)
+private val HL_N_RE = Regex("\\bhl\\.?n\\.?\\b")
+private val SPACES_RE = Regex("\\s+")

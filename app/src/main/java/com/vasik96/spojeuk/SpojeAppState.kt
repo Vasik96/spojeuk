@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -162,6 +163,7 @@ class SpojeAppState(
         android.util.Log.d("SheetLag", "selectVehicle: +${vehicleSelectedAtMs - TouchDiag.lastUpAt} ms od zvednutí prstu")
         selectedVehicle = v
         selectedStop = null
+        stopOpenSeq++   // čekající otevření zastávky (openStop) už neplatí
     }
 
     /** Odjezdy spočítané před otevřením panelu (panel naběhne rovnou s nimi), null = panel si je načte sám. */
@@ -169,6 +171,11 @@ class SpojeAppState(
     private var stopOpenSeq = 0
 
     fun selectStop(s: MapStop, deps: List<StopDeparture>? = null) {
+        stopOpenSeq++
+        showStop(s, deps)
+    }
+
+    private fun showStop(s: MapStop, deps: List<StopDeparture>?) {
         selectedVehicle = null
         selectedStopDeps = deps
         selectedStop = s
@@ -180,11 +187,17 @@ class SpojeAppState(
      */
     fun openStop(api: TransitRepository, s: MapStop, scope: CoroutineScope) {
         val seq = ++stopOpenSeq
+        val tab = selectedTab
         scope.launch {
-            val deps = kotlinx.coroutines.withTimeoutOrNull(1_200) {
+            // výpočet běží zvlášť (async): withTimeoutOrNull nepřeruší výpočet bez bodů přerušení, ale await ano,
+            // takže panel se po 1,2 s opravdu otevře a odjezdy si dočte sám
+            val calc = scope.async(Dispatchers.Default) {
                 runCatching { api.stopDepartures(s, STOP_DEPARTURE_HOURS) }.getOrNull()
             }
-            if (seq == stopOpenSeq) selectStop(s, deps)
+            val deps = kotlinx.coroutines.withTimeoutOrNull(1_200) { calc.await() }
+            if (deps == null) calc.cancel()
+            // mezitím uživatel vybral něco jiného (vůz, jinou zastávku, trasu, záložku, vypnul zastávky): nic nepřebíjet
+            if (seq == stopOpenSeq && selectedTab == tab && showMapStops) showStop(s, deps)
         }
     }
     var tripRoute by mutableStateOf<List<LatLng>>(emptyList())
@@ -363,6 +376,7 @@ class SpojeAppState(
     /** Odjezd ze zastávky na mapě: celá trasa spoje, nalezení vozu (přiblížení / zvýraznění) jako u spojení. */
     fun loadStopDepartureRoute(api: TransitRepository, d: StopDeparture, stop: MapStop, scope: CoroutineScope) {
         routeJob?.cancel()
+        stopOpenSeq++
         // panel zastávky zavírá volající s animací (selectedStop = null až po ní)
         selectedVehicle = null
         focusedTripVehicle = null
@@ -479,7 +493,7 @@ class SpojeAppState(
     fun updateShowMapStops(show: Boolean) {
         showMapStops = show
         settingsPrefs.edit().putBoolean("show_map_stops", show).apply()
-        if (!show) selectedStop = null
+        if (!show) { selectedStop = null; stopOpenSeq++ }
     }
 
     fun updateShowOnlyMapFilters(showOnly: Boolean) {

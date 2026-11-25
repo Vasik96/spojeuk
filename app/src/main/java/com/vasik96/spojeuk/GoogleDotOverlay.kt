@@ -100,9 +100,24 @@ private class DotPainter(private val context: Context) {
     private var lastBmp: Bitmap? = null
     private val stopPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
+    // Tečky podle (barva, zpoždění, Vánoce): různých kombinací je jen pár desítek. Malá tabulka bez alokací místo
+    // dotBitmap() pro každé vozidlo v každém snímku (ConcurrentHashMap s klíčem zabaleným do Long).
+    private var dotKeys = LongArray(32)
+    private var dotBmps = arrayOfNulls<Bitmap>(32)
+    private var dotN = 0
+
     private fun dotFor(color: Int, late: Boolean, christmas: Boolean): Bitmap {
         if (color == lastColor && late == lastLate && christmas == lastChristmas) lastBmp?.let { return it }
-        return dotBitmap(context, color, late, christmas).also { lastColor = color; lastLate = late; lastChristmas = christmas; lastBmp = it }
+        val key = (color.toLong() shl 2) or (if (late) 1L else 0L) or (if (christmas) 2L else 0L)
+        var bmp: Bitmap? = null
+        for (i in 0 until dotN) if (dotKeys[i] == key) { bmp = dotBmps[i]; break }
+        if (bmp == null) {
+            bmp = dotBitmap(context, color, late, christmas)
+            if (dotN == dotKeys.size) { dotKeys = dotKeys.copyOf(dotN * 2); dotBmps = dotBmps.copyOf(dotN * 2) }
+            dotKeys[dotN] = key; dotBmps[dotN] = bmp; dotN++
+        }
+        lastColor = color; lastLate = late; lastChristmas = christmas; lastBmp = bmp
+        return bmp
     }
 
     private fun batch(page: Int): Batch {
@@ -236,12 +251,10 @@ private class DotPainter(private val context: Context) {
         for (i in 0 until n) {
             if (i == hl) continue
             val lb = labels[i]
-            val bmp = when (mode) {
-                PASS_ALL -> lb ?: dotFor(colors[i], lates[i], christmases[i])
-                PASS_DOTS -> dotFor(colors[i], lates[i], christmases[i])
-                PASS_DOTS_UNLABELED -> if (lb == null) dotFor(colors[i], lates[i], christmases[i]) else continue
-                PASS_DOTS_LABELED -> if (lb != null) dotFor(colors[i], lates[i], christmases[i]) else continue
-                else -> lb ?: continue
+            // průchod, do kterého vozidlo nepatří, nic nepočítá
+            when (mode) {
+                PASS_DOTS_UNLABELED -> if (lb != null) continue
+                PASS_DOTS_LABELED, PASS_LABELS -> if (lb == null) continue
             }
             val mv = vwx[i] != 0.0 || vwy[i] != 0.0
             val dx = (wx[i] + vwx[i] * ext - cwx) * world
@@ -249,7 +262,13 @@ private class DotPainter(private val context: Context) {
             // otočení mapy (bearing): bod na východě je při bearing 90° nahoře
             val x = (dx * c + dy * s + cx).toFloat()
             val y = (-dx * s + dy * c + cy).toFloat()
+            // ořez před výběrem bitmapy (hranice nezávisí na bitmapě): tečka se hledá v cache jen pro viditelná vozidla
             if (x < minX || x > maxX || y < minY || y > maxY) continue
+            val bmp = when (mode) {
+                PASS_ALL -> lb ?: dotFor(colors[i], lates[i], christmases[i])
+                PASS_LABELS -> lb!!
+                else -> dotFor(colors[i], lates[i], christmases[i])
+            }
             // stojící vozidlo na celé pixely => bitmapa 1:1, ostrá; jedoucí sub-pixelově (zaokrouhlení by pomalý vůz
             // posouvalo po skocích o pixel, viditelné trhání)
             val left = if (mv) x - bmp.width / 2f else Math.round(x - bmp.width / 2f).toFloat()

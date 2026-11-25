@@ -194,6 +194,9 @@ class StopIndex private constructor(
 
         /** Místo s menším podílem odjezdů zastávky se sloučí s nejbližším jiným místem (občasné zastavení jinde). */
         private const val TINY_PLACE_SHARE = 0.05
+        private val EMPTY_LONGS = LongArray(0)
+        private val EMPTY_INTS = IntArray(0)
+        private val EMPTY_DOUBLES = DoubleArray(0)
 
         /** Průjezd spojů místem: předchozí → další zastávka, váha = počet jízd, součet směrů. */
         private class Call(val prev: Int, val next: Int, val prevName: String, val nextName: String) {
@@ -203,13 +206,76 @@ class StopIndex private constructor(
         /** Místo (stanoviště) zastávky: záznamy jízdního řádu blízko sebe. */
         private class Place(stops: List<Stop>) {
             val stops = stops.toMutableList()
-            val ids get() = stops.map { it.id.toInt() }.sorted().toIntArray()
+            val ids: IntArray get() = IntArray(stops.size) { stops[it].id.toInt() }.also { it.sort() }   // bez zabalení
             val lat = stops.sumOf { it.lat } / stops.size
             val lng = stops.sumOf { it.lng } / stops.size
             val binW = DoubleArray(DirGroups.BINS)   // váha (počet jízd) směrů po výsečích
             val calls = HashMap<Long, Call>()
             var w = 0.0
             var bus = false
+
+            // Průjezdy při stavbě: (předchozí, další) → součty, v primitivních polích (stovky tisíc průjezdů; dřív
+            // HashMap s klíčem zabaleným do Long a Pair pro směr = stovky MB odpadu při startu). Do [calls] se přelijí
+            // jednou na konci ve stejném pořadí prvního výskytu, takže výsledek je stejný jako dřív.
+            // alokují se až při prvním průjezdu (většina míst žádný nemá: jen výstup, vlaky)
+            private var bKeys = EMPTY_LONGS
+            private var bSlot = EMPTY_INTS
+            private var bN = 0
+            private var bPrev = EMPTY_INTS
+            private var bNext = EMPTY_INTS
+            private var bW = EMPTY_DOUBLES
+            private var bX = EMPTY_DOUBLES
+            private var bY = EMPTY_DOUBLES
+
+            fun addCall(prev: Int, next: Int, w: Double, dx: Double, dy: Double) {
+                if (bKeys.isEmpty()) {
+                    bKeys = LongArray(8); bSlot = IntArray(8) { -1 }
+                    bPrev = IntArray(4); bNext = IntArray(4); bW = DoubleArray(4); bX = DoubleArray(4); bY = DoubleArray(4)
+                }
+                val key = DirGroups.callKey(prev, next)
+                val mask = bKeys.size - 1
+                var h = (key xor (key ushr 29)).toInt() * -0x61c88647 and mask
+                while (true) {
+                    val slot = bSlot[h]
+                    if (slot < 0) break
+                    if (bKeys[h] == key) { bW[slot] += w; bX[slot] += dx * w; bY[slot] += dy * w; return }
+                    h = (h + 1) and mask
+                }
+                if (bN == bPrev.size) {
+                    val n = bN * 2
+                    bPrev = bPrev.copyOf(n); bNext = bNext.copyOf(n); bW = bW.copyOf(n); bX = bX.copyOf(n); bY = bY.copyOf(n)
+                }
+                bPrev[bN] = prev; bNext[bN] = next; bW[bN] = w; bX[bN] = dx * w; bY[bN] = dy * w
+                bKeys[h] = key; bSlot[h] = bN; bN++
+                if (bN * 2 > bKeys.size) rehash()
+            }
+
+            private fun rehash() {
+                val oldKeys = bKeys
+                val oldSlot = bSlot
+                bKeys = LongArray(oldKeys.size * 2)
+                bSlot = IntArray(oldKeys.size * 2) { -1 }
+                val mask = bKeys.size - 1
+                for (i in oldKeys.indices) {
+                    val slot = oldSlot[i]
+                    if (slot < 0) continue
+                    val key = oldKeys[i]
+                    var h = (key xor (key ushr 29)).toInt() * -0x61c88647 and mask
+                    while (bSlot[h] >= 0) h = (h + 1) and mask
+                    bKeys[h] = key; bSlot[h] = slot
+                }
+            }
+
+            /** Přelije průjezdy do [calls] (v pořadí prvního výskytu, jako dřív getOrPut). */
+            fun flushCalls(nameOf: (Int) -> String) {
+                for (i in 0 until bN) {
+                    val c = calls.getOrPut(DirGroups.callKey(bPrev[i], bNext[i])) { Call(bPrev[i], bNext[i], nameOf(bPrev[i]), nameOf(bNext[i])) }
+                    c.w += bW[i]; c.x += bX[i]; c.y += bY[i]
+                }
+                bKeys = EMPTY_LONGS; bSlot = EMPTY_INTS; bN = 0
+                bPrev = EMPTY_INTS; bNext = EMPTY_INTS; bW = EMPTY_DOUBLES; bX = EMPTY_DOUBLES; bY = EMPTY_DOUBLES
+            }
+
             fun absorb(o: Place) {
                 stops += o.stops
                 for (i in binW.indices) binW[i] += o.binW[i]
@@ -223,13 +289,14 @@ class StopIndex private constructor(
         }
 
         private class Cluster(val name: String, val stops: List<Stop>, val places: List<Place>) {
-            val ids = stops.map { it.id.toInt() }.sorted().toIntArray()
+            val ids = IntArray(stops.size) { stops[it].id.toInt() }.also { it.sort() }
             val railIds = HashSet<Int>()
         }
 
         /** Shluky podle vzdálenosti (jednoduché spojení: do [maxM] od kteréhokoli člena). */
-        private fun <T> groupNear(items: List<T>, maxM: Double, lat: (T) -> Double, lng: (T) -> Double): List<List<T>> {
-            val out = ArrayList<List<T>>()
+        // jen pro zastávky: generické lambdy (T) -> Double zabalovaly každou souřadnici (desítky MB odpadu při startu)
+        private fun groupNear(items: List<Stop>, maxM: Double): List<List<Stop>> {
+            val out = ArrayList<List<Stop>>()
             val left = items.toMutableList()
             while (left.isNotEmpty()) {
                 val group = mutableListOf(left.removeAt(0))
@@ -239,7 +306,7 @@ class StopIndex private constructor(
                     val iter = left.iterator()
                     while (iter.hasNext()) {
                         val c = iter.next()
-                        if (group.any { g -> Geo.distanceM(lat(g), lng(g), lat(c), lng(c)) <= maxM }) {
+                        if (group.any { g -> Geo.distanceM(g.lat, g.lng, c.lat, c.lng) <= maxM }) {
                             group += c; iter.remove(); grew = true
                         }
                     }
@@ -302,17 +369,19 @@ class StopIndex private constructor(
         fun build(tt: Timetable, cache: NetCache): StopIndex {
             // 1. zastávka = stejný název do MERGE_M; uvnitř místa (stanoviště) do PLACE_M
             val clusters = ArrayList<Cluster>()
-            val clusterOf = HashMap<Int, Cluster>()
-            val placeOf = HashMap<Int, Place>()
+            // místa a shluky podle id zastávky v polích (průjezdů jsou stovky tisíc, HashMap<Int, …> zabaloval každé id)
+            val idLimit = tt.stopIdLimit
+            val placeArr = arrayOfNulls<Place>(idLimit)
+            val clusterArr = arrayOfNulls<Cluster>(idLimit)
             val byName = HashMap<String, MutableList<Stop>>()
             for (st in tt.stops.values) if (st.hasCoords) byName.getOrPut(st.name) { mutableListOf() } += st
             for ((name, list) in byName) {
-                for (group in groupNear(list, MERGE_M, { it.lat }, { it.lng })) {
-                    val places = groupNear(group, PLACE_M, { it.lat }, { it.lng }).map { Place(it) }
+                for (group in groupNear(list, MERGE_M)) {
+                    val places = groupNear(group, PLACE_M).map { Place(it) }
                     val cl = Cluster(name, group, places)
                     clusters += cl
-                    for (id in cl.ids) clusterOf[id] = cl
-                    for (pl in places) for (id in pl.ids) placeOf[id] = pl
+                    for (id in cl.ids) if (id in 0 until idLimit) clusterArr[id] = cl
+                    for (pl in places) for (id in pl.ids) if (id in 0 until idLimit) placeArr[id] = pl
                 }
             }
 
@@ -327,30 +396,38 @@ class StopIndex private constructor(
                 patW[p]++
                 if (tt.trips.isTrain(tid)) patTrain[p] = true
             }
-            val patStops = arrayOfNulls<IntArray>(cache.nPat)
-            fun forEachBusCall(action: (Place, Int, Int, Pair<Double, Double>, Int) -> Unit) {
-                for (p in 0 until cache.nPat) {
-                    if (patW[p] == 0) continue
-                    val train = patTrain[p]
-                    val st = patStops[p] ?: cache.patStops(p).also { patStops[p] = it }
-                    for (pos in 0 until st.size - 1) {
-                        val s = st[pos]
-                        if (train) { clusterOf[s]?.railIds?.add(s); continue }
-                        val pl = placeOf[s] ?: continue
-                        pl.bus = true
-                        val prev = if (pos > 0) st[pos - 1] else s
-                        val d = travelDir(tt, s, prev, st[pos + 1]) ?: continue
-                        action(pl, prev, st[pos + 1], d, patW[p])
-                    }
+            for (p in 0 until cache.nPat) {
+                val w = patW[p]
+                if (w == 0) continue
+                val train = patTrain[p]
+                val st = cache.patStops(p)
+                for (pos in 0 until st.size - 1) {
+                    val s = st[pos]
+                    if (s < 0 || s >= idLimit) continue
+                    if (train) { clusterArr[s]?.railIds?.add(s); continue }
+                    val pl = placeArr[s] ?: continue
+                    pl.bus = true
+                    val prev = if (pos > 0) st[pos - 1] else s
+                    val next = st[pos + 1]
+                    // směr jízdy předchozí → další (jako travelDir, bez Pair)
+                    val here = tt.stop(s)?.takeIf { it.hasCoords } ?: continue
+                    val a = tt.stop(prev)?.takeIf { it.hasCoords } ?: here
+                    val b = tt.stop(next)?.takeIf { it.hasCoords } ?: here
+                    val k = cos(Math.toRadians(here.lat))
+                    val ddx = (b.lng - a.lng) * k
+                    val ddy = b.lat - a.lat
+                    val len = hypot(ddx, ddy)
+                    if (len < 1e-7) continue
+                    val dx = ddx / len
+                    val dy = ddy / len
+                    val wd = w.toDouble()
+                    pl.binW[DirGroups.bin(atan2(dy, dx))] += wd
+                    pl.addCall(prev, next, wd, dx, dy)
+                    pl.w += w
                 }
             }
             fun nameOf(id: Int) = tt.stop(id)?.name ?: ""
-            forEachBusCall { pl, prev, next, d, w ->
-                pl.binW[DirGroups.bin(atan2(d.second, d.first))] += w.toDouble()
-                val c = pl.calls.getOrPut(DirGroups.callKey(prev, next)) { Call(prev, next, nameOf(prev), nameOf(next)) }
-                c.w += w; c.x += d.first * w; c.y += d.second * w
-                pl.w += w
-            }
+            for (cl in clusters) for (pl in cl.places) pl.flushCalls(::nameOf)
 
             // 3. ikony
             val all = ArrayList<MapStop>(clusters.size + clusters.size / 2)
@@ -428,7 +505,7 @@ class StopIndex private constructor(
                 }
                 // zastávka, odkud nikdy nic neodjíždí (jen výstup, zrušený záznam), se nezobrazuje
             }
-            all.sortBy { it.lat }
+            all.sortWith { a, b -> a.lat.compareTo(b.lat) }   // bez zabalení Double (sortBy { it.lat } balil každé porovnání)
             return StopIndex(tt, all.toTypedArray(), dirStopsOf)
         }
     }
@@ -472,9 +549,17 @@ internal fun stopDepartures(planner: Planner, stop: MapStop, from: LocalDateTime
             if (!seen.add((tid.toLong() shl 20) xor dep.toLong())) continue
             val head = tt.trips.head[tid]?.takeIf { it.isNotBlank() }
                 ?: tt.stop(pat.stops.last())?.name ?: ""
-            out += StopDeparture(tid, dep, day, line, prettyName(head), tt.trips.category(tid), tt.trips.agency[tid].orEmpty())
+            // Síť dne obsahuje i noční spoje ze včerejška (časy posunuté o −24 h) a ranní zítřka (+24 h): odjezd patří
+            // ke dni, ve kterém spoj jede (čas spoje leží v jeho t0..t1), ať trasa a živá data hledají správný den.
+            // Absolutní čas (day + depSec) zůstává stejný.
+            val (dDay, dSec) = when {
+                dep < tt.trips.t0[tid] - 3600 -> day.minusDays(1) to dep + 86400
+                dep > tt.trips.t1[tid] + 3600 -> day.plusDays(1) to dep - 86400
+                else -> day to dep
+            }
+            out += StopDeparture(tid, dSec, dDay, line, prettyName(head), tt.trips.category(tid), tt.trips.agency[tid].orEmpty())
         }
     }
-    out.sortBy { it.depSec }
+    out.sortBy { it.day.atStartOfDay().plusSeconds(it.depSec.toLong()) }
     return out
 }

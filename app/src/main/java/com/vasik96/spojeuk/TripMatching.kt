@@ -113,7 +113,13 @@ class TripLocator(private val tt: Timetable) : TripProgress {
 
     private class Polyline(val lat: DoubleArray, val lng: DoubleArray, val cum: DoubleArray)
 
-    private val polylines = ConcurrentHashMap<Int, Polyline>()
+    // Trasy spojů pro postup po trase (směr jízdy při párování). Omezená LRU cache: párování podle polohy sahá přes
+    // den na tisíce různých spojů a neomezená mapa rostla o desítky MB, které se nikdy neuvolnily.
+    private val polylines: MutableMap<Int, Polyline> = java.util.Collections.synchronizedMap(
+        object : LinkedHashMap<Int, Polyline>(256, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Polyline>?) = size > POLYLINE_CACHE_MAX
+        }
+    )
 
     // Přiřazení podle polohy je odhad a bez paměti by se u každého dotazu (a u každého kliknutí na „zobrazit trasu“)
     // mohlo rozhodnout jinak. Spoj, který vozu už byl přiřazen, proto dostává bonus a drží se, dokud vůz
@@ -308,5 +314,6 @@ class TripLocator(private val tt: Timetable) : TripProgress {
         const val STICKY_BONUS = 150.0
         const val STICKY_MS = 10 * 60_000L
         const val STICKY_MAX = 6_000
+        const val POLYLINE_CACHE_MAX = 2_000   // ~1 kB na spoj
     }
 }

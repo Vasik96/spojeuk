@@ -72,8 +72,9 @@ class TripHistory(context: Context) {
     /** Připne / odepne spojení (připnout jde i dvojici, která v historii není, třeba opačný směr). */
     @Synchronized
     fun setPinned(from: String, to: String, pinned: Boolean) {
-        val e = entries.firstOrNull { it.from == from && it.to == to }
-            ?: Entry(from, to, System.currentTimeMillis()).also { entries.add(it) }
+        val existing = entries.firstOrNull { it.from == from && it.to == to }
+        if (existing == null && !pinned) return   // odepnutí neexistující dvojice nemá zakládat záznam v historii
+        val e = existing ?: Entry(from, to, System.currentTimeMillis()).also { entries.add(it) }
         e.pinnedAt = if (pinned) System.currentTimeMillis() else 0L
         save()
     }
@@ -98,10 +99,10 @@ class TripHistory(context: Context) {
         save()
     }
 
-    /** Smaže všechny dvojice, ve kterých je zastávka odkud i kam. */
+    /** Smaže dvojice se zastávkou (odkud i kam), kromě připnutých oblíbených: ty se mažou jen výslovně. */
     @Synchronized
     fun forget(name: String) {
-        if (entries.removeAll { it.from == name || it.to == name }) save()
+        if (entries.removeAll { (it.from == name || it.to == name) && it.pinnedAt <= 0L }) save()
     }
 }
 

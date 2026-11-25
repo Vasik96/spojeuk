@@ -77,7 +77,14 @@ fun foldText(s: String): String {
 
 fun normalize(text: String): String = foldText(text)
 
-fun prettyName(name: String): String = name.replace(Regex(",(?=\\S)"), ", ").replace("null", "").trim()
+/** Čárka hned následovaná nemezerou (předkompilováno: prettyName se volá pro každou zastávku, odjezd a spojení). */
+private val COMMA_NO_SPACE = Regex(",(?=\\S)")
+
+fun prettyName(name: String): String {
+    // bez čárky není co doplňovat: regex se nespouští (výsledek stejný)
+    val spaced = if (name.indexOf(',') >= 0) name.replace(COMMA_NO_SPACE, ", ") else name
+    return (if (spaced.contains("null")) spaced.replace("null", "") else spaced).trim()
+}
 
 fun pluralTransfers(n: Int): String =
     if (n == 0) tr(R.string.transfers_none) else trPlural(R.plurals.transfers, n, n)

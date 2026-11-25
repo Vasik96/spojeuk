@@ -124,6 +124,9 @@ class Timetable(val dbFile: File) {
 
     fun stop(id: Int): Stop? = if (id >= 0 && id < stopArr.size) stopArr[id] else null
 
+    /** Horní mez id zastávek (výlučná): pro pole indexovaná id zastávky. */
+    val stopIdLimit: Int get() = stopArr.size
+
     private val foldedHeads = ConcurrentHashMap<String, String>()
 
     /** foldText cíle spoje, jednou pro každý text (cílů jsou tisíce, kandidátních spojů při párování statisíce). */

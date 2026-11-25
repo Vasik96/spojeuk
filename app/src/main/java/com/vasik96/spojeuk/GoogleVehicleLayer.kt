@@ -207,6 +207,39 @@ internal class GoogleVehicleLayer(private val context: Context) {
         return out
     }
 
+    // ── údaje vozidel, které se mění jen s novou dávkou dat (~6 s), ne s každým snímkem ──
+    // Dřív se pro všech ~2 300 vozidel každých 33 ms znovu počítal styl (řetězcové operace), barva, zpoždění a skládal
+    // se klíč štítku (nový řetězec) + hledal v cache: většina CPU hlavního vlákna na otevřené mapě.
+    private var metaSrc: List<Pair<String, Vehicle>>? = null
+    private var mSorted: List<Pair<String, Vehicle>> = emptyList()
+    private var mStyle = arrayOfNulls<VehicleStyle>(0)
+    private var mColor = IntArray(0)
+    private var mLate = IntArray(0)
+    private var mKey = arrayOfNulls<String>(0)
+    private var mLabel = arrayOfNulls<Bitmap>(0)         // nalezená bitmapa štítku (fáze 0), null = ještě není
+
+    private fun ensureMeta(list: List<Pair<String, Vehicle>>) {
+        if (list === metaSrc) return
+        metaSrc = list
+        mSorted = if (list.any { it.second.christmas }) list.sortedBy { (_, v) -> if (v.christmas) 1 else 0 } else list
+        val n = mSorted.size
+        if (mStyle.size < n) {
+            val sz = n + n / 4 + 16
+            mStyle = arrayOfNulls(sz); mColor = IntArray(sz); mLate = IntArray(sz); mKey = arrayOfNulls(sz); mLabel = arrayOfNulls(sz)
+        }
+        for (i in 0 until n) {
+            val v = mSorted[i].second
+            val style = vehicleStyle(v)
+            val late = lateMinutes(v)
+            mStyle[i] = style
+            mColor[i] = vehicleColor(style, 0)
+            mLate[i] = late
+            mKey[i] = labelKey(v.line, style, 0, late, v.christmas)
+            mLabel[i] = null
+        }
+        for (i in n until mStyle.size) { mStyle[i] = null; mKey[i] = null; mLabel[i] = null }
+    }
+
     /**
      * Připraví snímek všech vozidel pro overlay (polohy z hubu, barva, štítek). Levné: žádné volání mapy.
      *
@@ -221,17 +254,28 @@ internal class GoogleVehicleLayer(private val context: Context) {
         phase: Int,
         view: ViewBox?,
         prewarm: Boolean,
+        /**
+         * Plynulý pohyb po snímcích (overlay dopočítává polohu v každém snímku). false u oddálených teček: posouvají se
+         * o zlomky pixelu a stačí jim snímek poloh po 250 ms; překreslování každý snímek (60–120×/s tisíců teček) bylo
+         * zbytečné.
+         */
+        smooth: Boolean = true,
     ): Boolean {
         // během mizení štítků (přepnutí na tečky) se štítky pořád chystají, overlay je prolíná
         val dot = isDotMode && !fade.switching()
         var pending = false
 
-        /** Bitmapa štítku, pokud je hotová; jinak se objedná kreslení na pozadí. */
-        fun labelOf(v: Vehicle): Bitmap? {
-            val key = labelKey(v.line, vehicleStyle(v), 0, lateMinutes(v), v.christmas)
-            cachedMarkerBitmap(key)?.let { return it }
-            if (missingLabels.size < MAX_MISSING) missingLabels[key] = v
-            pending = true
+        ensureMeta(activeVehicles)
+
+        /** Bitmapa štítku vozidla [i], pokud je hotová (jednou nalezená se pamatuje); jinak se objedná kreslení na pozadí. */
+        fun labelOf(i: Int, v: Vehicle, order: Boolean): Bitmap? {
+            mLabel[i]?.let { return it }
+            val key = mKey[i]!!
+            cachedMarkerBitmap(key)?.let { mLabel[i] = it; return it }
+            if (order) {
+                if (missingLabels.size < MAX_MISSING) missingLabels[key] = v
+                pending = true
+            }
             return null
         }
 
@@ -244,27 +288,30 @@ internal class GoogleVehicleLayer(private val context: Context) {
         var n = 0
         var h = -1
         var anyMoving = false
-        val sortedVehicles = if (activeVehicles.any { it.second.christmas }) {
-            activeVehicles.sortedBy { (_, v) -> if (v.christmas) 1 else 0 }
-        } else activeVehicles
-
-        for ((key, v) in sortedVehicles) {
+        val sortedVehicles = mSorted
+        for (idx in sortedVehicles.indices) {
+            val (key, v) = sortedVehicles[idx]
             val e = hub.entryOf(key)
             val p = e?.pos
             val la = p?.latitude ?: v.lat
             val lo = p?.longitude ?: v.lng
             val isHl = targetUid != null && v.uid == targetUid
-            wx[n] = (lo + 180.0) / 360.0
-            val sn = sin(Math.toRadians(la)).coerceIn(-0.9999, 0.9999)
-            wy[n] = 0.5 - ln((1 + sn) / (1 - sn)) / (4 * PI)
+            // Web Mercator (sin + ln) jen při změně polohy: vozidla mimo záběr se posouvají jen jednou za vteřinu
+            // a stojící vůbec, přepočet pro všechna každých 33 ms byl zbytečný (pořadí je pro dávku pevné: n == idx)
+            if (lat[n] != la || lng[n] != lo || vehicles[n] !== v) {
+                wx[n] = (lo + 180.0) / 360.0
+                val sn = sin(Math.toRadians(la)).coerceIn(-0.9999, 0.9999)
+                wy[n] = 0.5 - ln((1 + sn) / (1 - sn)) / (4 * PI)
+            }
             // d(wx)/d(lng) = 1/360, d(wy)/d(lat) = -1/(360·cos φ)
+            val vLat = e?.velLat ?: 0.0
             val vx = (e?.velLng ?: 0.0) / 360.0
-            val vy = -(e?.velLat ?: 0.0) / (360.0 * kotlin.math.cos(Math.toRadians(la)).coerceAtLeast(0.01))
+            val vy = if (vLat == 0.0) 0.0 else -vLat / (360.0 * kotlin.math.cos(Math.toRadians(la)).coerceAtLeast(0.01))
             vwx[n] = vx; vwy[n] = vy
             if (vx != 0.0 || vy != 0.0) anyMoving = true
-            val style = vehicleStyle(v)
-            color[n] = vehicleColor(style, if (isHl) phase else 0)
-            val lateMin = lateMinutes(v)
+            val style = mStyle[idx]!!
+            color[n] = if (isHl) vehicleColor(style, phase) else mColor[idx]
+            val lateMin = mLate[idx]
             late[n] = lateMin > 0
             christmas[n] = v.christmas
             lat[n] = la; lng[n] = lo; vehicles[n] = v
@@ -273,8 +320,8 @@ internal class GoogleVehicleLayer(private val context: Context) {
                 // zvýrazněné: pulzující štítek (jen pár variant, kreslí se hned)
                 isHl && !dot -> markerBitmap(context, v.line, style, phase, lateMin, v.christmas)
                 isHl -> null
-                !dot -> if (inView) labelOf(v) else cachedMarkerBitmap(labelKey(v.line, style, 0, lateMin, v.christmas))
-                else -> { if (prewarm && inView) labelOf(v); null }
+                !dot -> labelOf(idx, v, order = inView)
+                else -> { if (prewarm && inView) labelOf(idx, v, order = true); null }
             }
             if (isHl) h = n
             n++
@@ -282,7 +329,8 @@ internal class GoogleVehicleLayer(private val context: Context) {
         for (i in n until count) { vehicles[i] = null; label[i] = null }
         count = n
         hl = h
-        if (moving.value != anyMoving) moving.value = anyMoving
+        val mv = anyMoving && smooth
+        if (moving.value != mv) moving.value = mv
         if (n > 0 && fade.startAppear()) fadeKick.intValue++
         labelsPending = pending
         version.intValue++

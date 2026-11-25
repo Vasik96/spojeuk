@@ -203,7 +203,14 @@ internal class OnBoardTracker {
     private var misses = 0
     private var prev: Triple<Double, Double, Long>? = null
 
-    fun reset() { ride = -1; cand = -1; hits = 0; misses = 0; prev = null }
+    /** Poslední změřená rychlost uživatele (m/s), NaN = neznámá. */
+    var lastSpeedMs = Double.NaN
+        private set
+
+    /** Pohybuje se rychlostí vozidla (nad chůzi): jede v něčem. */
+    val movingLikeVehicle: Boolean get() = !lastSpeedMs.isNaN() && lastSpeedMs >= MOVING_MS
+
+    fun reset() { ride = -1; cand = -1; hits = 0; misses = 0; prev = null; lastSpeedMs = Double.NaN }
 
     fun update(nowMs: Long, userLat: Double?, userLng: Double?, accuracyM: Float?, live: Map<Int, VehiclePos>) {
         if (userLat == null || userLng == null) return
@@ -211,6 +218,7 @@ internal class OnBoardTracker {
         val speed = if (p != null && nowMs - p.third in 3_000L..60_000L)
             Geo.distanceM(p.first, p.second, userLat, userLng) / ((nowMs - p.third) / 1000.0) else Double.NaN
         prev = Triple(userLat, userLng, nowMs)
+        if (!speed.isNaN()) lastSpeedMs = speed
 
         if (ride >= 0) {
             val v = live[ride]
@@ -275,8 +283,15 @@ internal fun isTransferMissed(
     onBoardRide: Int = -1,
     /** Navazující vůz podle své polohy na trase ještě z přestupní zastávky neodjel (nedojel na ni, nebo na ní ještě stojí). */
     vehicleBNotLeftStop: Boolean = false,
+    /**
+     * Uživatel je teď u živého navazujícího vozu ([isNearVehicle]) nebo se pohybuje rychlostí vozidla. [OnBoardTracker]
+     * potřebuje dvě shodná měření, a s horším GPS se nechytne: bez téhle pojistky by "jsem pořád do 400 m od zastávky"
+     * po odjezdu vozu B znamenalo "zmeškáno" i pro člověka, který v autobuse sedí, a přeplánovalo by ho z něj.
+     */
+    userWithVehicleB: Boolean = false,
 ): Boolean {
     if (!hasLiveB) return false // Bez živých dat na mapě nepovažujeme spoj za zmeškaný (může mít zpoždění)
+    if (userWithVehicleB) return false
 
     val rides = rideIndices(legs)
     val b = rides.getOrNull(k + 1) ?: return false
@@ -319,9 +334,12 @@ internal fun isInitialDepartureMissed(
     userOnBoard: Boolean = false,
     /** Vůz první jízdy podle své polohy na trase ještě z nástupní zastávky neodjel (nedojel na ni, nebo na ní stojí). */
     vehicleNotLeftStop: Boolean = false,
+    /** Uživatel je teď u živého vozu první jízdy nebo se pohybuje rychlostí vozidla (viz [isTransferMissed]). */
+    userWithVehicle: Boolean = false,
 ): Boolean {
     if (!hasLiveFirst) return false // Bez živých dat nehodnotit odjezd jako zmeškaný
     if (userOnBoard || vehicleNotLeftStop) return false   // v autobuse už jsem / autobus ještě nedojel (zpoždění, semafor před zastávkou)
+    if (userWithVehicle) return false   // daleko od zastávky, protože jede s vozem (OnBoardTracker se ještě nechytil)
 
     val rides = rideIndices(legs)
     val firstRide = rides.firstOrNull() ?: return false

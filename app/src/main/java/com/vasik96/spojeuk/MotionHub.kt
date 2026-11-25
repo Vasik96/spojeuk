@@ -39,6 +39,16 @@ internal class MotionHub(
 
     private val entries = HashMap<String, Entry>()
 
+    /**
+     * Vozy, které chtějí trasu, kterou ještě nemají (wantKey != routeKey). [ensureRoutes] běží každých 33 ms a dřív
+     * kvůli tomu procházel všech ~2 300 vozidel (porovnání řetězců); teď jen tyhle.
+     */
+    private val needRoute = LinkedHashSet<Entry>()
+
+    private fun markRouteNeed(e: Entry) {
+        if (e.wantKey != null && e.wantKey != e.routeKey) needRoute.add(e) else needRoute.remove(e)
+    }
+
     /** Kdy přišla poslední dávka vozidel (0 = ještě žádná). */
     private var lastUpdateAt = 0L
 
@@ -87,6 +97,7 @@ internal class MotionHub(
                 e.routeJob?.cancel()
                 e.motion.setRoute(null)
             }
+            markRouteNeed(e)
         }
         val iter = entries.iterator()
         while (iter.hasNext()) {
@@ -95,6 +106,7 @@ internal class MotionHub(
                 // trasa i pohyb se pamatují (načítání trasy dobíhá), vůz se může za chvíli vrátit
                 gone[k] = e to now
                 iter.remove()
+                needRoute.remove(e)
             }
         }
         val g = gone.iterator()
@@ -112,11 +124,14 @@ internal class MotionHub(
     fun ensureRoutes(view: ViewBox?, enabled: Boolean) {
         if (!enabled) return
         var launched = 0
-        for (e in entries.values) {
-            val want = e.wantKey ?: continue
-            if (e.routeKey == want) continue
+        val it = needRoute.iterator()
+        while (it.hasNext()) {
+            val e = it.next()
+            val want = e.wantKey
+            if (want == null || e.routeKey == want) { it.remove(); continue }
             if (view != null && !view.contains(e.pos.latitude, e.pos.longitude)) continue
             e.routeKey = want
+            it.remove()
             e.routeJob?.cancel()
             e.routeJob = scope.launch {
                 repeat(4) {
@@ -173,6 +188,7 @@ internal class MotionHub(
     fun clear() {
         entries.values.forEach { it.routeJob?.cancel() }
         entries.clear()
+        needRoute.clear()
         gone.values.forEach { it.first.routeJob?.cancel() }
         gone.clear()
     }

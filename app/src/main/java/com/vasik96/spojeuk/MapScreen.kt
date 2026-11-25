@@ -1072,7 +1072,8 @@ private fun GoogleVehicleOverlay(
 
             // štítky se chystají už kousek před přepnutím z teček, ať se při přepnutí jen vymění
             val prewarm = layer.isDotMode && cam.zoom >= DOT_ZOOM_GOOGLE - LABEL_PREWARM_ZOOM
-            pending = layer.updateVehicles(vehicles, hub, tgt, ph, view, prewarm)
+            val smooth = !(layer.isDotMode && cam.zoom < DOT_SMOOTH_ZOOM)
+            pending = layer.updateVehicles(vehicles, hub, tgt, ph, view, prewarm, smooth)
             val missing = layer.takeMissingLabels()
             if (missing.isNotEmpty()) {
                 withContext(Dispatchers.Default) {
@@ -1292,6 +1293,7 @@ private fun buildVehicleJson(
     return VehicleJson(sb.toString(), count, pending)
 }
 
+private const val VEH_SRC_MAX_ZOOM = 13
 private const val VEH_DOT_LAYER = "vehicles-dots"
 private const val VEH_HL_LAYER = "vehicles-hl"
 private const val VEH_OLD_LAYER = "vehicles-old"   // štítky vozidel se starou polohou (ztlumené)
@@ -1364,7 +1366,14 @@ private fun SymbolLayer.noOpacityTransition() = also { it.iconOpacityTransition 
  */
 private fun ensureVehicleLayer(style: Style) {
     if (style.getSource(VEH_SRC) == null) {
-        style.addSource(GeoJsonSource(VEH_SRC, FeatureCollection.fromFeatures(emptyList<Feature>())))
+        // maxZoom 13: nad ním MapLibre jen zvětšuje dlaždice z úrovně 13 (při zoomu ~15 jsou v záběru 2–4 dlaždice
+        // místo ~15). Méně hranic dlaždic = méně míst, kde se překrývající vozy přehazují (vůz u hranice je v obou
+        // dlaždicích a kreslí ho ta, která je zrovna hotová) a méně dlaždic k rozřezání a rozmístění při každé
+        // dávce poloh a při zoomu. Přesnost kotvy na úrovni 13 ~0,4 m (pod pixel až do zoomu 17).
+        style.addSource(GeoJsonSource(
+            VEH_SRC, FeatureCollection.fromFeatures(emptyList<Feature>()),
+            org.maplibre.android.style.sources.GeoJsonOptions().withMaxZoom(VEH_SRC_MAX_ZOOM),
+        ))
         // bez animací umísťování symbolů: každá nová dávka poloh vozidel (GeoJSON) by štítky znovu „prolínala“
         // (300 ms) a mapa by se kvůli tomu překreslovala pořád dokola (render vlákno MapLibre ~80 % v Praze)
         style.transition = TransitionOptions(0, 0, false)

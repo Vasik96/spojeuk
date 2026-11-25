@@ -21,12 +21,9 @@ import androidx.compose.animation.core.EaseInOutCubic
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -1274,7 +1271,8 @@ internal fun SearchScreen(
                 )
             }
         }
-        if (history.isEmpty() && favorites.isEmpty()) {
+        // „Kam dnes vyrazíš?“ jen na úplně prázdné obrazovce: stačí karta odjezdů, oblíbené nebo historie a skryje se
+        if (nearby == null && history.isEmpty() && favorites.isEmpty()) {
             item(key = "empty") { SearchEmptyState(Modifier.padding(top = 40.dp, bottom = 24.dp)) }
         }
         fun section(key: String, title: Int, list: List<Pair<String, String>>, pinned: Boolean) {
@@ -1474,19 +1472,17 @@ private fun NearbyDeparturesCard(
 /** Prázdná hlavní obrazovka (zatím žádná historie): poskakující autobus a nápověda. */
 @Composable
 private fun SearchEmptyState(modifier: Modifier = Modifier) {
-    val infiniteTransition = rememberInfiniteTransition(label = "busFloating")
-    val busFloatY by infiniteTransition.animateFloat(
-        initialValue = -5f,
-        targetValue = 5f,
-        animationSpec = infiniteRepeatable(tween(1400, easing = EaseInOutCubic), RepeatMode.Reverse),
-        label = "busFloatY"
-    )
-    val busScale by infiniteTransition.animateFloat(
-        initialValue = 0.97f,
-        targetValue = 1.03f,
-        animationSpec = infiniteRepeatable(tween(1400, easing = EaseInOutCubic), RepeatMode.Reverse),
-        label = "busScale"
-    )
+    // Pár zhoupnutí po zobrazení, pak klid. Nekonečná animace (dřív rememberInfiniteTransition) nutila celé okno
+    // překreslovat se každý snímek (~120×/s), dokud appka stála na záložce Spoje bez hledání: autobus často jen
+    // vykukuje nad spodní lištou, a stálo to desítky procent CPU, GPU a baterii.
+    val phase = remember { Animatable(0.5f) }   // 0 / 1 = krajní polohy, 0,5 = klid uprostřed
+    LaunchedEffect(Unit) {
+        val half = tween<Float>(BUS_SWING_MS / 2, easing = EaseInOutCubic)
+        val full = tween<Float>(BUS_SWING_MS, easing = EaseInOutCubic)
+        phase.animateTo(1f, half)
+        repeat(BUS_SWINGS) { i -> phase.animateTo(if (i % 2 == 0) 0f else 1f, full) }
+        phase.animateTo(0.5f, half)
+    }
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -1498,9 +1494,10 @@ private fun SearchEmptyState(modifier: Modifier = Modifier) {
                 Modifier
                     .size(48.dp)
                     .graphicsLayer {
-                        translationY = busFloatY
-                        scaleX = busScale
-                        scaleY = busScale
+                        val t = phase.value          // čte se jen při kreslení vrstvy, bez rekompozice
+                        translationY = -5f + 10f * t
+                        scaleX = 0.97f + 0.06f * t
+                        scaleY = scaleX
                     },
                 tint = MaterialTheme.colorScheme.primary
             )
@@ -1513,6 +1510,9 @@ private fun SearchEmptyState(modifier: Modifier = Modifier) {
         }
     }
 }
+
+private const val BUS_SWING_MS = 1_400
+private const val BUS_SWINGS = 3            // ~5,6 s pohybu po zobrazení prázdné obrazovky
 
 /** Jakou část šířky řádku je potřeba přetáhnout, aby se odebral z historie. */
 private const val DISMISS_FRACTION = 0.5f
@@ -1654,7 +1654,7 @@ private fun getStopMatches(
             .take(15)
             .toList()
     }
-    val terms = normalize(trimmed).split(Regex("\\s+")).filter { it.isNotBlank() }
+    val terms = normalize(trimmed).split(SPACES_REGEX).filter { it.isNotBlank() }
     if (terms.isEmpty()) return emptyList()
 
     return indexedStops.asSequence()
@@ -2348,13 +2348,15 @@ private val HL_N_REGEX = Regex("\\bhl\\.?n\\.?\\b")
 private val SPACES_REGEX = Regex("\\s+")
 
 
+private val AGENCY_FORM_RE = Regex(
+    pattern = """(?i)\b(a\.?\s*s\.?|s\.?\s*r\.?\s*o\.?|spol\.?\s*s\s*r\.?\s*o\.?|příspěvková\s+organizace|p\.o\.?|o\.p\.s\.?|v\.o\.s\.?|z\.s\.?|gmbh|inc\.?|ltd\.?)\b""",
+    option = RegexOption.IGNORE_CASE
+)
+private val TRAILING_PUNCT_RE = Regex("""[.,\s]+$""")
+
 fun cleanAgencyName(name: String): String {
-    val regex = Regex(
-        pattern = """(?i)\b(a\.?\s*s\.?|s\.?\s*r\.?\s*o\.?|spol\.?\s*s\s*r\.?\s*o\.?|příspěvková\s+organizace|p\.o\.?|o\.p\.s\.?|v\.o\.s\.?|z\.s\.?|gmbh|inc\.?|ltd\.?)\b""",
-        option = RegexOption.IGNORE_CASE
-    )
     return name
-        .replace(regex, "")
-        .replace(Regex("""[.,\s]+$"""), "") // Odstraní tečky, čárky i mezery na konci řetězce
+        .replace(AGENCY_FORM_RE, "")
+        .replace(TRAILING_PUNCT_RE, "") // Odstraní tečky, čárky i mezery na konci řetězce
         .trim()
 }
