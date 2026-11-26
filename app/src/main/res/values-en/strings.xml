@@ -396,4 +396,5 @@
     <string name="about_libs">Open-source libraries</string>
     <string name="about_libs_text">Jetpack Compose and Material 3, MapLibre Native, Google Maps SDK and Maps Compose, OkHttp.</string>
     <string name="about_disclaimer">Unofficial app, not affiliated with DÚK or the operators. Times, delays and positions come without warranty.</string>
+    <string name="update_dont_show_again">Don\'t show again</string>
 </resources>

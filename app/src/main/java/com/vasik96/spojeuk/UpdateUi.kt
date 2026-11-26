@@ -2,6 +2,18 @@ package com.vasik96.spojeuk
 
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.Checkbox
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -27,22 +39,41 @@ internal fun openReleasePage(context: Context, release: AppRelease) {
     }
 }
 
-/** Dialog po spuštění: vyšla novější verze. */
+/**
+ * Dialog po spuštění: vyšla novější verze. [onDismiss] dostane, jestli uživatel zaškrtl „Znovu neukazovat“
+ * (vypne upozornění v nastavení).
+ */
 @Composable
-internal fun AppUpdateDialog(release: AppRelease, onDismiss: () -> Unit) {
+internal fun AppUpdateDialog(release: AppRelease, onDismiss: (dontShowAgain: Boolean) -> Unit) {
     val context = LocalContext.current
+    var dontShow by remember { mutableStateOf(false) }
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { onDismiss(dontShow) },
         icon = { Icon(Icons.Default.NewReleases, contentDescription = null) },
         title = { Text(stringResource(R.string.update_dialog_title, release.version)) },
-        text = { Text(stringResource(R.string.update_dialog_text, APP_VERSION)) },
+        text = {
+            Column {
+                Text(stringResource(R.string.update_dialog_text, APP_VERSION))
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .toggleable(value = dontShow, role = Role.Checkbox, onValueChange = { dontShow = it }),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = dontShow, onCheckedChange = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.update_dont_show_again), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
         confirmButton = {
-            TextButton(onClick = { openReleasePage(context, release); onDismiss() }) {
+            TextButton(onClick = { openReleasePage(context, release); onDismiss(dontShow) }) {
                 Text(stringResource(R.string.update_download))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.update_later)) }
+            TextButton(onClick = { onDismiss(dontShow) }) { Text(stringResource(R.string.update_later)) }
         }
     )
 }

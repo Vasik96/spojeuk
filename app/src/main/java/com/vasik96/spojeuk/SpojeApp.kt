@@ -115,9 +115,6 @@ internal fun SpojeApp() {
         val rel = runCatching { UpdateChecker.fetchLatest() }.getOrNull() ?: return@LaunchedEffect
         if (UpdateChecker.shouldNotify(rel, APP_VERSION, UpdateChecker.buildTimeMs)) appState.appUpdateOffer = rel
     }
-    appState.appUpdateOffer?.let { rel ->
-        AppUpdateDialog(rel, onDismiss = { appState.appUpdateOffer = null })
-    }
 
     // živé polohy rovnou při startu, ať jsou na mapě hned při jejím otevření
     LaunchedEffect(api, appState.disabledVehicleSources) {
@@ -337,6 +334,13 @@ internal fun SpojeApp() {
     }
 
     MaterialTheme(colorScheme = scheme) {
+        // uvnitř motivu aplikace, jinak by dialog měl výchozí (světlé) barvy i v tmavém režimu
+        appState.appUpdateOffer?.let { rel ->
+            AppUpdateDialog(rel, onDismiss = { dontShowAgain ->
+                appState.appUpdateOffer = null
+                if (dontShowAgain) appState.updateNotifyAppUpdates(false)
+            })
+        }
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Box(Modifier.fillMaxSize()) {
                 Scaffold(

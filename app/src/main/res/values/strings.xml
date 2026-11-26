@@ -421,4 +421,5 @@
     <string name="about_libs">Použité knihovny</string>
     <string name="about_libs_text">Jetpack Compose a Material 3, MapLibre Native, Google Maps SDK a Maps Compose, OkHttp.</string>
     <string name="about_disclaimer">Neoficiální aplikace, není spojená s DÚK ani s dopravci. Časy, zpoždění a polohy jsou bez záruky.</string>
+    <string name="update_dont_show_again">Znovu neukazovat</string>
 </resources>
