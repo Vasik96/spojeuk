@@ -108,6 +108,18 @@ internal fun SettingsScreen(
             SettingsMain(modifier = Modifier.fillMaxSize(), appState = appState, api = api)
         }
         PredictiveBackLayer(
+            visible = appState.settingsSubscreen == SettingsSubscreen.ABOUT,
+            onBack = { appState.settingsSubscreen = SettingsSubscreen.MAIN },
+            enabled = appState.selectedTab == 2
+        ) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                AboutScreen(
+                    modifier = Modifier.fillMaxSize(),
+                    onBack = { appState.settingsSubscreen = SettingsSubscreen.MAIN }
+                )
+            }
+        }
+        PredictiveBackLayer(
             visible = appState.settingsSubscreen == SettingsSubscreen.DATA_UPDATES,
             onBack = { appState.settingsSubscreen = SettingsSubscreen.MAIN },
             enabled = appState.selectedTab == 2
@@ -383,208 +395,34 @@ private fun SettingsMain(
 
 
 
-        val checked = appState.hideOtherVehiclesOnMap
-
-        OutlinedCard(
-            onClick = { appState.setHideOtherVehicles(!checked) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .semantics { role = Role.Switch }
-        ) {
-            Row(
-                modifier = Modifier
-                    .padding(16.dp)
-                    .fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.FilterList,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        stringResource(R.string.settings_hide_others),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        stringResource(R.string.settings_hide_others_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = checked,
-                    onCheckedChange = null,
-                    thumbContent = {
-                        Icon(
-                            imageVector = if (checked) Icons.Default.Check else Icons.Default.Close,
-                            contentDescription = null,
-                            modifier = Modifier.size(SwitchDefaults.IconSize),
-                            tint = if (checked) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.surfaceContainerHighest
-                        )
-                    }
-                )
-            }
-        }
-
-        val predictChecked = appState.predictVehiclePositions
-
-        OutlinedCard(
-            onClick = { appState.updatePredictVehiclePositions(!predictChecked) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .semantics { role = Role.Switch }
-        ) {
-            Row(
-                modifier = Modifier
-                    .padding(16.dp)
-                    .fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Route,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        stringResource(R.string.settings_predict),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        stringResource(R.string.settings_predict_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = predictChecked,
-                    onCheckedChange = null,
-                    thumbContent = {
-                        Icon(
-                            imageVector = if (predictChecked) {
-                                Icons.Default.Check
-                            } else {
-                                Icons.Default.Close
-                            },
-                            contentDescription = null,
-                            modifier = Modifier.size(SwitchDefaults.IconSize),
-                            tint = if (predictChecked) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.surfaceContainerHighest
-                            }
-                        )
-                    }
-                )
-            }
-        }
-
-        val compactBannerChecked = appState.showOnlyMapFilters
-
-        OutlinedCard(
-            onClick = { appState.updateShowOnlyMapFilters(!compactBannerChecked) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .semantics { role = Role.Switch }
-        ) {
-            Row(
-                modifier = Modifier
-                    .padding(16.dp)
-                    .fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.FilterList,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        stringResource(R.string.settings_compact_banner),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        stringResource(R.string.settings_compact_banner_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = compactBannerChecked,
-                    onCheckedChange = null,
-                    thumbContent = {
-                        Icon(
-                            imageVector = if (compactBannerChecked) Icons.Default.Check else Icons.Default.Close,
-                            contentDescription = null,
-                            modifier = Modifier.size(SwitchDefaults.IconSize),
-                            tint = if (compactBannerChecked) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.surfaceContainerHighest
-                        )
-                    }
-                )
-            }
-        }
-
-        val mapStopsChecked = appState.showMapStops
-
-        OutlinedCard(
-            onClick = { appState.updateShowMapStops(!mapStopsChecked) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .semantics { role = Role.Switch }
-        ) {
-            Row(
-                modifier = Modifier
-                    .padding(16.dp)
-                    .fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Place,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        stringResource(R.string.settings_map_stops),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        stringResource(R.string.settings_map_stops_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = mapStopsChecked,
-                    onCheckedChange = null,
-                    thumbContent = {
-                        Icon(
-                            imageVector = if (mapStopsChecked) Icons.Default.Check else Icons.Default.Close,
-                            contentDescription = null,
-                            modifier = Modifier.size(SwitchDefaults.IconSize),
-                            tint = if (mapStopsChecked) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.surfaceContainerHighest
-                        )
-                    }
-                )
-            }
-        }
+        SettingSwitchCard(
+            icon = Icons.Default.FilterList,
+            title = stringResource(R.string.settings_hide_others),
+            description = stringResource(R.string.settings_hide_others_desc),
+            checked = appState.hideOtherVehiclesOnMap,
+            onCheckedChange = { appState.setHideOtherVehicles(it) },
+        )
+        SettingSwitchCard(
+            icon = Icons.Default.Route,
+            title = stringResource(R.string.settings_predict),
+            description = stringResource(R.string.settings_predict_desc),
+            checked = appState.predictVehiclePositions,
+            onCheckedChange = { appState.updatePredictVehiclePositions(it) },
+        )
+        SettingSwitchCard(
+            icon = Icons.Default.FilterList,
+            title = stringResource(R.string.settings_compact_banner),
+            description = stringResource(R.string.settings_compact_banner_desc),
+            checked = appState.showOnlyMapFilters,
+            onCheckedChange = { appState.updateShowOnlyMapFilters(it) },
+        )
+        SettingSwitchCard(
+            icon = Icons.Default.Place,
+            title = stringResource(R.string.settings_map_stops),
+            description = stringResource(R.string.settings_map_stops_desc),
+            checked = appState.showMapStops,
+            onCheckedChange = { appState.updateShowMapStops(it) },
+        )
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
@@ -638,30 +476,47 @@ private fun SettingsMain(
 
         SectionTitle(stringResource(R.string.settings_section_about))
 
+        // ťuknutím podobrazovka O aplikaci (ikona, autor, odkazy, licence)
         OutlinedCard(
+            onClick = { appState.settingsSubscreen = SettingsSubscreen.ABOUT },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+            Row(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Text(
-                    stringResource(id = R.string.app_name),
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    stringResource(R.string.app_tagline),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    stringResource(R.string.settings_version, APP_VERSION),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        stringResource(id = R.string.app_name),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        stringResource(R.string.app_tagline),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        stringResource(R.string.settings_version, APP_VERSION),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = stringResource(R.string.about_open),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
+
+        AppUpdateSettings(appState)
 
         Spacer(Modifier.height(24.dp))
     }
@@ -839,16 +694,6 @@ private fun LanguageSettingsCard() {
             )
         }
     }
-}
-
-@Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.Bold,
-        color = MaterialTheme.colorScheme.primary
-    )
 }
 
 @Composable

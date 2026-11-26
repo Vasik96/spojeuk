@@ -463,7 +463,7 @@ class Timetable(val dbFile: File) {
         return candidates.minByOrNull { tid ->
             if (!trips.has(tid)) return@minByOrNull Int.MAX_VALUE
             val t0 = trips.t0[tid]; val t1 = trips.t1[tid]
-            val gap = when { rel < t0 -> t0 - rel; rel > t1 -> rel - t1; else -> 0 }.toInt()
+            val gap = when { rel < t0 -> t0 - rel; rel > t1 -> rel - t1; else -> 0 }
             minOf(gap, 86_400 - gap)
         }
     }

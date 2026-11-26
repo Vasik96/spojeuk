@@ -878,7 +878,7 @@ class TransitRepository(context: Context? = null) {
         val trip = try {
             val req = Request.Builder().url("$SERVER_IP/api/trip/pmdp?conn=${java.net.URLEncoder.encode(v.trip, "UTF-8")}").build()
             http.newCall(req).execute().use { r ->
-                if (!r.isSuccessful) null else parseRemoteTrip(r.body?.string().orEmpty())
+                if (!r.isSuccessful) null else parseRemoteTrip(r.body.string())
             }
         } catch (e: CancellationException) {
             throw e

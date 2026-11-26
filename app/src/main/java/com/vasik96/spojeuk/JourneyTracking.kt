@@ -187,7 +187,7 @@ class JourneyTrackingService : Service() {
 
             val alight = (phase as? TrackPhase.Riding)?.let { alightState(j, it.ride, live, repo) }
             val alightNear = alight == null || alightImminent(
-                (phase as TrackPhase.Riding).arrSec - nowSec, alight.nextStopIsAlight, alight.distM,
+                phase.arrSec - nowSec, alight.nextStopIsAlight, alight.distM,
             )
             runCatching { nm.notify(NOTIF_ID, buildNotification(this, j, detail, live, phase, alightNear)) }
             maybeAlertAlighting(j, detail, phase, nowSec, alight, repo)

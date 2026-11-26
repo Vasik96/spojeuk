@@ -29,6 +29,8 @@ android {
         versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // jen ARM: x86 / x86_64 (~27 MB knihovny MapLibre) jsou pro emulátory, ne pro telefony
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         manifestPlaceholders["MAPS_API_KEY"] = localProperties.getProperty("MAPS_API_KEY") ?: ""
         buildConfigField(
             "String",

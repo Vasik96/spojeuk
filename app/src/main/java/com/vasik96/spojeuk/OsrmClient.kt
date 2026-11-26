@@ -129,7 +129,7 @@ class OsrmClient(private val cacheDir: File, private val context: android.conten
                         Log.w(TAG, "route r=$radius HTTP ${resp.code} za ${SystemClock.elapsedRealtime() - t0} ms (${chunk.size} bodů)")
                         return@use null     // typicky 400 NoSegment: zkusí se větší poloměr
                     }
-                    val body = resp.body?.string() ?: return@use null
+                    val body = resp.body.string()
                     val routes = JSONObject(body).optJSONArray("routes")
                     if (routes == null || routes.length() == 0) return@use null
                     val coords = routes.getJSONObject(0).optJSONObject("geometry")?.optJSONArray("coordinates")
@@ -229,10 +229,10 @@ class OsrmClient(private val cacheDir: File, private val context: android.conten
                     Log.w(TAG, "$label HTTP ${resp.code} za ${took()} ms")
                     return null
                 }
-                val body = resp.body?.string()
-                val row = body?.let { JSONObject(it).optJSONArray("distances")?.optJSONArray(0) }
+                val body = resp.body.string()
+                val row = body.let { JSONObject(it).optJSONArray("distances")?.optJSONArray(0) }
                 if (row == null || row.length() < n) {
-                    Log.w(TAG, "$label odpověď bez vzdáleností za ${took()} ms: ${body?.take(120)}")
+                    Log.w(TAG, "$label odpověď bez vzdáleností za ${took()} ms: ${body.take(120)}")
                     return null
                 }
                 val list = List(n) { i -> if (row.isNull(i)) null else row.getDouble(i) }
@@ -305,7 +305,7 @@ class OsrmClient(private val cacheDir: File, private val context: android.conten
                     Log.w(TAG, "walk HTTP ${resp.code} za ${SystemClock.elapsedRealtime() - t0} ms")
                     return null
                 }
-                val body = resp.body?.string() ?: return null
+                val body = resp.body.string()
                 val routes = JSONObject(body).optJSONArray("routes") ?: return null
                 if (routes.length() == 0) return null
                 val r = routes.getJSONObject(0)

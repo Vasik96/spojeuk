@@ -69,9 +69,12 @@ enum class MapProvider(val label: String) {
 
 enum class SettingsSubscreen {
     MAIN,
-    DATA_UPDATES
+    DATA_UPDATES,
+    ABOUT
 }
 
+/** Zoom (Google) mapy otevřené poprvé na poloze uživatele: okolí se štítky vozů. */
+private const val USER_LOC_MAP_ZOOM = 14f
 private const val AUTOFILL_SNAPSHOT_RADIUS_M = 150.0
 
 class SpojeAppState(
@@ -229,9 +232,17 @@ class SpojeAppState(
     var highlightedTrip by mutableStateOf<TripRef?>(null)
     var pulsePhase by mutableIntStateOf(0) // 0 = nic, 1 / 2 = střídání zvýraznění
 
-    // Poslední pozice kamery (aby mapa po přepnutí tabu neskákala zpět)
-    var mapCenter: LatLng = UstiCenter
-    var mapZoom: Float = 11f
+    // Poslední pozice kamery (aby mapa po přepnutí tabu neskákala zpět). Než ji mapa poprvé uloží, otevře se
+    // na poloze uživatele (pokud je známá), jinak na Ústí.
+    private var savedMapCenter: LatLng? = null
+    private var savedMapZoom: Float? = null
+
+    var mapCenter: LatLng
+        get() = savedMapCenter ?: userLoc?.let { LatLng(it.first, it.second) } ?: UstiCenter
+        set(v) { savedMapCenter = v }
+    var mapZoom: Float
+        get() = savedMapZoom ?: if (savedMapCenter == null && userLoc != null) USER_LOC_MAP_ZOOM else 11f
+        set(v) { savedMapZoom = v }
 
     var heldCount by mutableIntStateOf(0)
 
@@ -495,6 +506,19 @@ class SpojeAppState(
         settingsPrefs.edit().putBoolean("show_map_stops", show).apply()
         if (!show) { selectedStop = null; stopOpenSeq++ }
     }
+
+    /** Po spuštění upozornit na novou verzi aplikace (GitHub release); jde vypnout v nastavení. */
+    var notifyAppUpdates by mutableStateOf(settingsPrefs.getBoolean("notify_app_updates", true))
+        private set
+
+    fun updateNotifyAppUpdates(on: Boolean) {
+        notifyAppUpdates = on
+        settingsPrefs.edit().putBoolean("notify_app_updates", on).apply()
+        if (!on) appUpdateOffer = null
+    }
+
+    /** Novější verze nalezená po spuštění: zobrazí se dialog (null = nic). */
+    internal var appUpdateOffer by mutableStateOf<AppRelease?>(null)
 
     fun updateShowOnlyMapFilters(showOnly: Boolean) {
         showOnlyMapFilters = showOnly

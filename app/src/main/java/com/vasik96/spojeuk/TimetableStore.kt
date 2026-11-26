@@ -154,7 +154,7 @@ class TimetableStore(
     /** Vrací true i když je vše aktuální (nic se nestahuje). */
     private fun downloadRegion(target: File, log: (String) -> Unit, progress: (Float) -> Unit): Boolean {
         log(tr(R.string.dl_checking_latest))
-        val remote = JSONObject(open("$REGION_BASE_URL/gtfs.json").use { it.body?.string().orEmpty() })
+        val remote = JSONObject(open("$REGION_BASE_URL/gtfs.json").use { it.body.string() })
         val tag = remote.optString("tag").ifBlank { return false }
         val stagedTag = if (pendingFile.exists()) runCatching { Timetable.readMeta(pendingFile)["tag"] }.getOrNull() else null
         if (target == pendingFile && (meta()["tag"] == tag || stagedTag == tag)) { log(tr(R.string.dl_up_to_date)); return true }
@@ -193,7 +193,7 @@ class TimetableStore(
             val f = File(dir, if (rail) "gtfs_rail.zip" else "gtfs.zip")
             val job = pool.submit {
                 open("$REGION_BASE_URL/$name").use { resp ->
-                    val body = resp.body ?: error("Prázdná odpověď")
+                    val body = resp.body
                     total.set(i, body.contentLength().coerceAtLeast(0L))
                     log(tr(R.string.dl_downloading_file, name, (body.contentLength().coerceAtLeast(0L) / 1048576).toInt()))
                     body.byteStream().use { input ->
@@ -246,7 +246,7 @@ class TimetableStore(
         try {
             val md = MessageDigest.getInstance("SHA-256")
             open("$REGION_BASE_URL/$name").use { resp ->
-                val body = resp.body ?: error("Prázdná odpověď")
+                val body = resp.body
                 val total = body.contentLength().takeIf { it > 0 } ?: info.optLong("size", -1L)
                 val totalMb = if (total > 0) "%.1f".format(total / 1048576.0) else "?"
                 var read = 0L
@@ -304,7 +304,7 @@ class TimetableStore(
 
     private fun downloadFromObehy(target: File, log: (String) -> Unit, progress: (Float) -> Unit) {
         log(tr(R.string.dl_checking_github))
-        val release = JSONObject(open(RELEASES_API).use { it.body?.string().orEmpty() })
+        val release = JSONObject(open(RELEASES_API).use { it.body.string() })
         val tag = release.optString("tag_name", "latest")
         val assets = release.optJSONArray("assets") ?: JSONArray()
         fun asset(name: String) = (0 until assets.length())
@@ -347,7 +347,7 @@ class TimetableStore(
     /** Streamuje tar z GitHubu a vytáhne z něj gtfs.zip (zbytek, třeba parquet, se nestahuje). */
     private fun fetchGtfsZip(url: String, dest: File, log: (String) -> Unit) {
         open(url).use { resp ->
-            val body = resp.body ?: error("Prázdná odpověď")
+            val body = resp.body
             log(tr(R.string.dl_unpacking))
             if (!TarUtils.streamGtfsZipToFile(body.byteStream(), dest) || !dest.exists()) {
                 error("V souboru nebylo nalezeno gtfs.zip ($url)")

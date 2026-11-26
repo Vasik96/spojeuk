@@ -217,7 +217,7 @@ class VehicleApi(private val url: String = API_VEHICLES_URL) {
                     try {
                         call.execute().use { resp ->
                             if (!resp.isSuccessful) error("HTTP ${resp.code}")
-                            val body = resp.body?.string().orEmpty()
+                            val body = resp.body.string()
                             Outcome(parse(body, System.currentTimeMillis()), body, null)
                         }
                     } catch (e: Exception) {

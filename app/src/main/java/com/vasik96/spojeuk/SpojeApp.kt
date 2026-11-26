@@ -109,6 +109,16 @@ internal fun SpojeApp() {
     // spojení na routovací servery rovnou při startu (první hledání nejbližší zastávky pak není pomalé)
     LaunchedEffect(Unit) { runCatching { api.warmUpRouting() } }
 
+    // nová verze aplikace: jednou po spuštění (ne v debug buildu, viz UpdateChecker)
+    LaunchedEffect(appState.notifyAppUpdates) {
+        if (!appState.notifyAppUpdates || BuildConfig.DEBUG) return@LaunchedEffect
+        val rel = runCatching { UpdateChecker.fetchLatest() }.getOrNull() ?: return@LaunchedEffect
+        if (UpdateChecker.shouldNotify(rel, APP_VERSION, UpdateChecker.buildTimeMs)) appState.appUpdateOffer = rel
+    }
+    appState.appUpdateOffer?.let { rel ->
+        AppUpdateDialog(rel, onDismiss = { appState.appUpdateOffer = null })
+    }
+
     // živé polohy rovnou při startu, ať jsou na mapě hned při jejím otevření
     LaunchedEffect(api, appState.disabledVehicleSources) {
         api.prewarmVehicles()

@@ -171,7 +171,7 @@ object TrainLines {
             .build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) error("GitHub API HTTP ${resp.code}")
-            val o = JSONObject(resp.body?.string() ?: error("prázdná odpověď"))
+            val o = JSONObject(resp.body.string())
             val tag = o.getString("tag_name")
             val assets = o.getJSONArray("assets")
             var url: String? = null
@@ -190,7 +190,7 @@ object TrainLines {
         val req = Request.Builder().url(url).build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) error("HTTP ${resp.code}")
-            val body = resp.body ?: error("prázdná odpověď")
+            val body = resp.body
             dest.outputStream().use { out -> body.byteStream().copyTo(out) }
         }
     }

@@ -134,7 +134,7 @@ private fun pickMostPlausible(cands: List<Vehicle>, ref: TripRef, route: List<La
     var boardIdx = -1
     var cum: FloatArray? = null
     if (haveGeometry) {
-        val board = LatLng(bLat!!, bLng!!)
+        val board = LatLng(bLat, bLng)
         boardIdx = route.indices.minByOrNull { distanceMeters(board, route[it]) } ?: -1
         val c = FloatArray(route.size)
         for (i in 1 until route.size) c[i] = c[i - 1] + distanceMeters(route[i - 1], route[i])

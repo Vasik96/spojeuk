@@ -316,7 +316,7 @@ class ShapeStore(
                 val req = Request.Builder().url("$SHAPES_BASE_URL/$name.sqlite").header("User-Agent", USER_AGENT).build()
                 http.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) error("shapes.sqlite HTTP ${resp.code}")
-                    val body = resp.body ?: error("prázdná odpověď")
+                    val body = resp.body
                     body.byteStream().use { input ->
                         FileOutputStream(tmp).use { out ->
                             val buf = ByteArray(65536)
@@ -360,7 +360,7 @@ class ShapeStore(
         val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
         http.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) error("HTTP ${resp.code} ($url)")
-            return resp.body?.string() ?: error("prázdná odpověď")
+            return resp.body.string()
         }
     }
 
