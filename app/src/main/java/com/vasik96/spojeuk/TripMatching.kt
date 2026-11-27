@@ -89,6 +89,10 @@ object TripEnricher {
             return v
         }
         val trip = tt.trips[m.tid] ?: return v
+        // druh linky (trolejbus, tramvaj…) ze serveru pro barvy odjezdů a tras z jízdního řádu
+        if (v.mode.isNotEmpty() && (m.exact || v.line.trim().equals(trip.line.trim(), ignoreCase = true))) {
+            LineKinds.learn(trip.agency, trip.line, v.mode)
+        }
         var out = v.copy(tid = m.tid, tripMatch = if (m.exact) TripMatch.EXACT else TripMatch.HEURISTIC)
         // PMDP: trip je číslo spoje dopravce, podle něj se stahuje trasa (TransitRepository.pmdpTrip); nepřepisovat
         if (!m.exact && v.source != SourceIds.PMDP) out = out.copy(cis = trip.cis.ifBlank { v.cis }, trip = trip.num.ifBlank { v.trip })

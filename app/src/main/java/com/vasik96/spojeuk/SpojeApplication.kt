@@ -11,6 +11,7 @@ class SpojeApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         I18n.init(this)
+        LineKinds.init(this)
         MapLibre.getInstance(this)
         // Google Maps: načtení modulu a rendereru z Play Services trvá stovky ms; uděláme to na pozadí hned při startu,
         // ať první GoogleMap v UI nic takového nepočítá (MapLibre se předehřívá řádkem výše)

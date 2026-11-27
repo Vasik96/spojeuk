@@ -206,6 +206,12 @@ class SpojeAppState(
     var tripRoute by mutableStateOf<List<LatLng>>(emptyList())
     /** Druh dopravy zobrazené trasy (barva čáry podle motivu mapy), null = barva motivu. */
     internal var routeStyle by mutableStateOf<VehicleStyle?>(null)
+
+    /**
+     * Ostatní jízdy zobrazeného spojení (tid, bez té, ke které se hledá vůz v [focusTrip]). Při "Skrýt ostatní
+     * vozidla" zůstávají na mapě i jejich vozy, ale jen spárované přesně podle čísla spoje (odhad jen u aktuální jízdy).
+     */
+    internal var journeyOtherRideTids by mutableStateOf<Set<Int>>(emptySet())
     var tripRouteSegments by mutableStateOf<List<List<LatLng>>>(emptyList())
     var tripStops by mutableStateOf<List<LatLng>>(emptyList())
 
@@ -314,6 +320,7 @@ class SpojeAppState(
         routeJob?.cancel()
         routeJob = null
         routeStyle = null
+        journeyOtherRideTids = emptySet()
         tripRoute = emptyList()
         tripRouteSegments = emptyList()
         fullRoute = emptyList()
@@ -344,6 +351,8 @@ class SpojeAppState(
         focusTrip = ref
         highlightedTrip = ref
         selectedTab = 1
+
+        journeyOtherRideTids = journey.rawLegs.filter { it.kind == "ride" && it.tid != 0 && it.tid != ref.tid }.mapTo(HashSet()) { it.tid }
 
         // barva trasy podle první jízdy spojení (autobus, vlak, tramvaj, metro)
         routeStyle = journey.rawLegs.firstOrNull { it.kind == "ride" }?.let { api.tripStyleOf(it.tid) }
@@ -388,6 +397,7 @@ class SpojeAppState(
     fun loadStopDepartureRoute(api: TransitRepository, d: StopDeparture, stop: MapStop, scope: CoroutineScope) {
         routeJob?.cancel()
         stopOpenSeq++
+        journeyOtherRideTids = emptySet()
         // panel zastávky zavírá volající s animací (selectedStop = null až po ní)
         selectedVehicle = null
         focusedTripVehicle = null
@@ -425,6 +435,7 @@ class SpojeAppState(
     fun loadVehicleRoute(api: TransitRepository, vehicle: Vehicle, scope: CoroutineScope, ctx: Context, onDismiss: () -> Unit) {
         routeJob?.cancel()
         routeLoading = true
+        journeyOtherRideTids = emptySet()
         val job = scope.launch {
             try {
                 walkRoute = null
@@ -586,14 +597,14 @@ class SpojeAppState(
     private var focusedTripVehicleState by mutableStateOf<Vehicle?>(null)
 
     /**
-     * Vůz, který právě sledujeme na trase spoje. Barva trasy z jízdního řádu ([tripStyle]) o vánočním voze nic neví
-     * (je to jen příznak živého vozu), takže jakmile se vánoční vůz najde, přebije barvu trasy jeho stylem (červená).
+     * Vůz, který právě sledujeme na trase spoje. Barva trasy z jízdního řádu ([tripStyle]) nemusí znát druh vozu
+     * (trolejbus, vánoční vůz), takže jakmile se vůz s druhem ze serveru najde, přebije barvu trasy jeho stylem.
      */
     var focusedTripVehicle: Vehicle?
         get() = focusedTripVehicleState
         set(value) {
             focusedTripVehicleState = value
-            if (value != null && value.christmas) routeStyle = vehicleStyle(value)
+            if (value != null && (value.christmas || value.mode.isNotEmpty()) && routeStyle != null) routeStyle = vehicleStyle(value)
         }
     var focusedTripRef by mutableStateOf<TripRef?>(null)
 

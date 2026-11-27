@@ -411,12 +411,18 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     val hideOthers = appState.hideOtherVehiclesOnMap
     val mapCats = appState.mapCategories
     val allCats = mapCats.size == MapCategory.entries.size
+    val otherRides = appState.journeyOtherRideTids
     val activeVehicles: List<Pair<String, Vehicle>> = remember(
-        keyed, strictMode, hideOthers, locked, mapCats
+        keyed, strictMode, hideOthers, locked, mapCats, otherRides
     ) {
         if (strictMode && hideOthers && locked != null) {
             val match = keyed.firstOrNull { it.second.uid == locked.uid }
-            listOf(match ?: ("locked_${locked.uid}" to locked))
+            val main = match ?: ("locked_${locked.uid}" to locked)
+            // spojení s přestupem: i vozy dalších jízd, ale jen přesně spárované (odhad platí jen pro aktuální jízdu)
+            if (otherRides.isEmpty()) listOf(main)
+            else listOf(main) + keyed.filter { (_, x) ->
+                x.uid != locked.uid && x.state != 255 && x.tripMatch == TripMatch.EXACT && x.tid in otherRides
+            }
         } else {
             keyed.filter { (_, x) ->
                 (allCats || mapCategory(x) in mapCats) && (
@@ -825,6 +831,7 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                 onClick = {
                     appState.tripRoute = emptyList()
                     appState.routeStyle = null
+                    appState.journeyOtherRideTids = emptySet()
                     appState.tripRouteSegments = emptyList()
                     appState.fullRoute = emptyList()
                     appState.tripStops = emptyList()

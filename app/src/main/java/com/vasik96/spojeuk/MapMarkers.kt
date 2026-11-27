@@ -94,8 +94,24 @@ internal enum class VehicleStyle(
     CHRISTMAS(0xFF800000.toInt(), 0xFF800000.toInt(), 0xFFEF5350.toInt()),
 }
 
-/** Druh dopravy spoje z jízdního řádu (kategorie + linka metra) jako styl vozu. */
-internal fun tripStyle(category: MapCategory, line: String, agency: String = ""): VehicleStyle = when (category) {
+/**
+ * Druh dopravy spoje z jízdního řádu (kategorie + linka metra) jako styl vozu. Trolejbusy a tramvaje mimo Prahu
+ * jízdní řád nezná: ty doplní [LineKinds] podle druhu, který server posílá u živých vozů téže linky.
+ */
+internal fun tripStyle(category: MapCategory, line: String, agency: String = ""): VehicleStyle {
+    if (category == MapCategory.BUS || category == MapCategory.TRAM) {
+        when (LineKinds.modeOf(agency, line)) {
+            "trolleybus" -> return VehicleStyle.TROLLEYBUS
+            "tram" -> return VehicleStyle.TRAM
+            "ferry" -> return VehicleStyle.FERRY
+            "funicular" -> return VehicleStyle.FUNICULAR
+            "metro" -> return tripStyleOfCategory(MapCategory.METRO, line)
+        }
+    }
+    return tripStyleOfCategory(category, line)
+}
+
+private fun tripStyleOfCategory(category: MapCategory, line: String): VehicleStyle = when (category) {
     MapCategory.TRAIN -> VehicleStyle.TRAIN
     MapCategory.BUS -> VehicleStyle.BUS
     MapCategory.TRAM -> VehicleStyle.TRAM
