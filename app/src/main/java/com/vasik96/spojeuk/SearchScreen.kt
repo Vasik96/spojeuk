@@ -2,6 +2,8 @@
 
 package com.vasik96.spojeuk
 
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -121,6 +123,7 @@ import java.time.LocalTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
+private const val SEARCH_BUTTON_FADE_MS = 250   // prolnutí tlačítka Najít spojení (aktivní ↔ neaktivní)
 private const val FIRST_PAGE = 8
 private const val MORE_PAGE = 6
 
@@ -978,10 +981,26 @@ internal fun SearchScreen(
                     )
                 }
 
+                val canSearch = appState.from != null && appState.to != null &&
+                        appState.from?.name != appState.to?.name && !appState.searchLoading
+                // aktivní ↔ neaktivní plynule (Button sám barvy přepne okamžitě): po spuštění, když se doplní
+                // zastávky, i po ťuknutí (hledání tlačítko na chvíli vypne)
+                val btnDefaults = ButtonDefaults.buttonColors()
+                val btnContainer by animateColorAsState(
+                    if (canSearch) btnDefaults.containerColor else btnDefaults.disabledContainerColor,
+                    animationSpec = tween(SEARCH_BUTTON_FADE_MS), label = "searchButtonContainer"
+                )
+                val btnContent by animateColorAsState(
+                    if (canSearch) btnDefaults.contentColor else btnDefaults.disabledContentColor,
+                    animationSpec = tween(SEARCH_BUTTON_FADE_MS), label = "searchButtonContent"
+                )
                 Button(
                     onClick = { runSearch() },
-                    enabled = appState.from != null && appState.to != null &&
-                            appState.from?.name != appState.to?.name && !appState.searchLoading,
+                    enabled = canSearch,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = btnContainer, contentColor = btnContent,
+                        disabledContainerColor = btnContainer, disabledContentColor = btnContent,
+                    ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 54.dp),
