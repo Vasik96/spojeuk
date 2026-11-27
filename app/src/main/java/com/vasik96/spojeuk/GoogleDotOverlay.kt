@@ -89,7 +89,7 @@ internal fun GoogleDotOverlay(
  * (Skia každé převádí a slučuje zvlášť), batch = pár operací bez ohledu na počet vozidel.
  * Pořadí v batchi = pořadí kreslení => okraj horní tečky leží přes výplň spodní (i dvě stejné tečky jdou rozlišit).
  */
-private class DotPainter(private val context: Context) {
+internal class DotPainter(private val context: Context) {
     private val atlas = SpriteAtlas()
     private val batches = ArrayList<Batch>()
     private val hlPaint = Paint(Paint.ANTI_ALIAS_FLAG)

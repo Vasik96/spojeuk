@@ -15,6 +15,17 @@ plugins {
 
 val appVersionName = providers.gradleProperty("appVersionName").getOrElse("3.0")
 
+/**
+ * Čas sestavení (s) pro versionCode. Přes ValueSource: s configuration cache se jinak čas spočítal jen při
+ * konfiguraci a další sestavení z cache dostala STARÝ versionCode (nižší než už nainstalovaný = APK nejde
+ * nainstalovat jako aktualizace). Hodnotu ValueSource Gradle při každém sestavení načte znovu, a když se liší,
+ * konfiguraci z cache nepoužije.
+ */
+abstract class BuildTimeSource : ValueSource<Long, ValueSourceParameters.None> {
+    override fun obtain(): Long = System.currentTimeMillis() / 1000
+}
+val buildTimeSec: Long = providers.of(BuildTimeSource::class.java) {}.get()
+
 android {
     namespace = "com.vasik96.spojeuk"
     compileSdk {
@@ -25,7 +36,7 @@ android {
         applicationId = "com.vasik96.spojeuk"
         minSdk = 33
         targetSdk = 37
-        versionCode = (System.currentTimeMillis() / 1000).toInt()
+        versionCode = buildTimeSec.toInt()
         versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

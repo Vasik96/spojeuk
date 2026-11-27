@@ -9,8 +9,8 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.os.SystemClock
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -20,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -37,7 +38,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.maplibre.android.camera.CameraPosition as MapLibreCameraPosition
@@ -96,24 +96,12 @@ private fun cartoStyleUrl(dark: Boolean): String {
 /*******
  * map libre render: ******/
 
-internal const val VEH_SRC = "vehicles-src"
-internal const val VEH_LAYER = "vehicles-layer"
+// TextureView místo SurfaceView (všude): mapa se skládá do okna appky ve STEJNÉM snímku jako overlay vozidel.
+// SurfaceView jde na displej vlastní cestou o snímek dřív než okno appky => vozidla při tažení zaostávala za mapou.
+// (Navíc řeší "BLASTBufferQueue ... Can't acquire next buffer" a vykreslování na Vivo/Funtouch.)
+private const val USE_TEXTURE_MODE = true
 
-// TextureView místo SurfaceView: řeší "BLASTBufferQueue ... Can't acquire next buffer"
-// a rozbité vykreslování na Vivo/Funtouch v kombinaci s Compose AndroidView.
-private val USE_TEXTURE_MODE = android.os.Build.MANUFACTURER.lowercase() in setOf("vivo", "iqoo")
-
-// max. frekvence předávání pozic vozidel do MapLibre (~30 Hz), animace A -> B je počítaná z času
-private const val VEHICLE_UPDATE_INTERVAL_MS = 33L
-private const val VEHICLE_UPDATE_INTERVAL_MID_MS = 66L      // štítky, 300–800 vozidel v záběru
-private const val VEHICLE_UPDATE_INTERVAL_MANY_MS = 100L    // štítky, víc než 800 vozidel (Praha)
-// okraj kolem záběru, jehož vozidla jsou v GeoJSON (podíl rozměru záběru na každou stranu; 0,3 = 2,6× plocha).
-// Větší = víc štítků k rozmístění při každé dávce, menší = při rychlém posunu víc vozů naskočí až další dávkou.
-private const val VEH_VIEW_MARGIN = 0.3
 private const val LOCATION_ANIMATION_FPS = 10              // animace modrého bodu (kompas) v MapLibre
-// oddáleno (tečky): pohyb o pixel trvá dlouho, stačí řídké aktualizace
-private const val DOT_UPDATE_INTERVAL_MS = 250L
-private const val DOT_UPDATE_INTERVAL_FAR_MS = 500L
 /** Tolerance při čekání na další snímek poloh (polovina snímku při 120 Hz). */
 internal const val FRAME_SLACK_NS = 4_000_000L
 
@@ -134,13 +122,12 @@ internal const val GOOGLE_VEHICLE_INTERVAL_MS = 33L     // Google: pohyb vozidel
 internal const val GOOGLE_DOT_INTERVAL_MS = 250L         // oddálené tečky (pod DOT_SMOOTH_ZOOM) se hýbou o zlomky pixelu
 internal const val DOT_SMOOTH_ZOOM = 10.5f
 internal const val LABEL_PREWARM_ZOOM = 1.0f            // o kolik úrovní před přepnutím na štítky se začnou kreslit
-private const val MAX_NEW_IMAGES_PER_PUSH = 600   // Praha: ~300 různých štítků v záběru
 
 
 // vrstvy trasy vždy POD vrstvou vozidel
 private fun addBelowMarkers(style: Style, layer: Layer) {
-    ensureVehicleLayer(style)
-    style.addLayerBelow(layer, VEH_DOT_LAYER)
+    ensureRouteAnchor(style)
+    style.addLayerBelow(layer, ROUTE_ANCHOR_LAYER)
 }
 
 @SuppressLint("MissingPermission")
@@ -226,18 +213,22 @@ internal fun MapLibreScreenContent(
 
     // ── stav vozidel ──
     val latestVehicles by rememberUpdatedState(activeVehicles)
-    val latestPhase by rememberUpdatedState(phase)
-    val latestTarget by rememberUpdatedState(targetUid)
 
-    val dirty = remember { AtomicBoolean(true) }
-    // kamera se pohnula => přepočítat, která vozidla jsou ve viditelné oblasti
-    val cameraDirty = remember { AtomicBoolean(true) }
     // zastávky: přepočet výřezu po zastavení kamery; ťuknutí hledá v tom, co je nakreslené
     val stopsDirty = remember { AtomicBoolean(true) }
     var shownStops by remember { mutableStateOf<List<MapStop>>(emptyList()) }
-    // obrázky přidané do aktuálního stylu (při změně stylu se začíná od nuly)
-    val addedImages = remember(styleVersion) { mutableSetOf<String>() }
 
+    // overlay vozidel (stejný jako u Google mapy) a počítadlo pohybu kamery, které ho překresluje
+    val overlayLayer = remember(context) { GoogleVehicleLayer(context) }
+    val camTick = remember { mutableLongStateOf(0L) }
+    var cameraMoving by remember { mutableStateOf(false) }
+    // Během pohybu kamery (gesto, animace) se overlay překreslí v KAŽDÉM snímku a kameru si přečte až při kreslení:
+    // poloha vozidel pak odpovídá transformaci, kterou MapLibre v tom snímku vykreslí (ne o snímek starší z události).
+    LaunchedEffect(cameraMoving) {
+        while (cameraMoving) { withFrameNanos { }; camTick.longValue++ }
+    }
+
+    Box(modifier) {
     AndroidView(
         factory = {
             mapView.apply {
@@ -256,10 +247,14 @@ internal fun MapLibreScreenContent(
                     m.uiSettings.isLogoEnabled = false
                     m.uiSettings.isCompassEnabled = false
 
-                    m.addOnCameraMoveListener { cameraDirty.set(true) }
+                    // overlay vozidel počítá s pohledem shora (jako Google mapa): bez náklonu
+                    m.uiSettings.isTiltGesturesEnabled = false
+                    m.addOnCameraMoveStartedListener { cameraMoving = true }
+                    m.addOnCameraMoveListener { camTick.longValue++ }
                     // stav kamery se ukládá až když se mapa zastaví, ne při každém framu pohybu
                     m.addOnCameraIdleListener {
-                        cameraDirty.set(true)
+                        cameraMoving = false
+                        camTick.longValue++
                         stopsDirty.set(true)
                         val cp = m.cameraPosition
                         cp.target?.let {
@@ -270,7 +265,6 @@ internal fun MapLibreScreenContent(
 
                     // klik na vozidlo: výpočet vzdálenosti v Kotlinu (zcela async / neblokující, žádné queryRenderedFeatures)
                     fun pickVehicle(latLng: MapLibreLatLng): Boolean {
-                        if (m.style?.getLayer(VEH_LAYER) == null) return false
                         // POZOR: toScreenLocation je JNI volání do nativní mapy a při každém vozidle blokovalo hlavní vlákno
                         // (soupeří s renderem, který každých 33 ms dostává nový GeoJSON) => ~1 s lagu po kliku.
                         // Projekci proto voláme jen 3x (klik + dva posuny) a zbytek počítáme lokální lineární aproximací.
@@ -367,11 +361,15 @@ internal fun MapLibreScreenContent(
                 }
             }
         },
-        modifier = modifier
+        modifier = Modifier.fillMaxSize()
     )
+    // vozidla: GPU overlay přímo nad mapou (pod ovládacími prvky, které kreslí MapScreen nad tímhle Boxem)
+    VehicleCanvasOverlay(overlayLayer, Modifier.fillMaxSize()) {
+        camTick.longValue   // odběr pohybu kamery: překreslit při každém snímku pohybu
+        map?.let { overlayCamera(it) }
+    }
+    }
 
-    // změna vozidel / zvýraznění => překreslit zdroj
-    LaunchedEffect(activeVehicles, phase) { dirty.set(true) }
 
     // ── ZASTÁVKY: ikony v záběru (jen přiblížená mapa), přepočet po zastavení kamery ──
     LaunchedEffect(map, styleVersion, stopIndex, stopIcons) {
@@ -399,7 +397,7 @@ internal fun MapLibreScreenContent(
             if (style.getSource(STOPS_SRC) == null) {
                 style.addSource(GeoJsonSource(STOPS_SRC, FeatureCollection.fromFeatures(emptyList<Feature>())))
                 // zastávky pod vozidly
-                ensureVehicleLayer(style)
+                ensureRouteAnchor(style)
                 style.addLayerBelow(
                     SymbolLayer(STOPS_LAYER, STOPS_SRC).withProperties(
                         PropertyFactory.iconImage(Expression.get("img")),
@@ -414,7 +412,7 @@ internal fun MapLibreScreenContent(
                             )
                         ),
                     ).also { it.iconOpacityTransition = TransitionOptions(STOP_FADE_MS, 0, false) },
-                    VEH_DOT_LAYER
+                    ROUTE_ANCHOR_LAYER
                 )
                 stopsShown = null
                 stopsDirty.set(true)
@@ -465,8 +463,7 @@ internal fun MapLibreScreenContent(
         appliedStyleKey = key
         m.setStyle(mapStyleBuilder(provider, useDarkMap)) { style ->
             if (useDarkMap && !rasterMapy) softenDark(style)
-            ensureVehicleLayer(style)
-            dirty.set(true)
+            ensureRouteAnchor(style)
             styleVersion++
             onStyleLoaded()
         }
@@ -526,7 +523,7 @@ internal fun MapLibreScreenContent(
         val style = m.style ?: return@LaunchedEffect
         if (!style.isFullyLoaded) return@LaunchedEffect
 
-        ensureVehicleLayer(style) // vrstva vozidel musí existovat dřív než trasy a být nad nimi
+        ensureRouteAnchor(style) // kotva musí existovat dřív než trasy (vkládají se pod ni)
         val hadRoute = style.getLayer("route-line") != null
         // zrušená trasa nejdřív plynule zmizí, teprve pak se vrstvy odeberou
         if (tripRoute.size < 2 && hadRoute) {
@@ -687,214 +684,33 @@ internal fun MapLibreScreenContent(
         }
     }
 
-    // ── VOZIDLA: jedna smyčka synchronizovaná s vykreslováním, nikdy se nezastavuje (ani při pohybu kamery) ──
-    LaunchedEffect(map, styleVersion, active) {
-        val m = map ?: return@LaunchedEffect
-        if (!active) return@LaunchedEffect
-
-        var draws: List<VehicleDraw> = emptyList()
-        var lastPush = 0L
-        var view: ViewBox? = null    // oblast, jejíž vozidla jdou do GeoJSON (záběr + okraj)
-        var viewAt = 0L
-        var dotMode = false          // oddáleno: kreslí se jen tečky (vrstva přepíná GPU, tady jen šetříme práci)
-        var needImages = true        // štítky se budou kreslit (nebo jsou těsně před tím)
-        var interval = VEHICLE_UPDATE_INTERVAL_MS
-        var pending = false          // některému vozidlu ještě chybí obrázek štítku
-        val fade = VehicleFade()     // objevení po otevření mapy a prolínání tečky ↔ štítky
-        var modeKnown = false
-        var alphaStyle: Style? = null
-        var lastDotA = -1f; var lastLabelA = -1f; var lastHlA = -1f
-        var zoomNow = 11.0           // zoom a azimut z posledního čtení kamery (pro přepočet posunu ikony na pixely)
-        var bearingNow = 0.0
-        // naposledy zobrazený štítek každého vozu: při změně obrázku (zpoždění tramvaje / metra zapne / vypne červený
-        // okraj, zvýraznění) se do vygenerování nového ukazuje starý, jinak vůz na chvíli zmizí
-        val shownImg = HashMap<String, String>()
-        // Po přepnutí na štítky musí MapLibre nové štítky nejdřív rozmístit (v Praze přes tisíc, pracovní vlákna);
-        // prolínání do té doby počká, jinak by proběhlo dřív, než jsou štítky vidět (zpožděné / přeskočené snímky).
-        // 0 = nic, 1 = čeká se na zpracování dat zdroje, 2 = na první plně vykreslený snímek (štítky rozmístěné)
-        val labelsLoading = java.util.concurrent.atomic.AtomicInteger(0)
-        val sourceListener = MapLibreMapView.OnSourceChangedListener { id ->
-            if (id == VEH_SRC) labelsLoading.compareAndSet(1, 2)
-        }
-        val frameListener = MapLibreMapView.OnDidFinishRenderingFrameListener { fully, _, _ ->
-            if (fully) labelsLoading.compareAndSet(2, 0)
-        }
-        mapView.addOnSourceChangedListener(sourceListener)
-        mapView.addOnDidFinishRenderingFrameListener(frameListener)
-        var lastCount = 0            // počet vozidel v posledním GeoJSON (řídí interval)
-
-        fun currentView(): ViewBox? = runCatching {
-            val w = mapView.width.toFloat()
-            val h = mapView.height.toFloat()
-            if (w <= 0f || h <= 0f) null
-            else {
-                val proj = m.projection
-                val corners = listOf(
-                    proj.fromScreenLocation(android.graphics.PointF(0f, 0f)),
-                    proj.fromScreenLocation(android.graphics.PointF(w, 0f)),
-                    proj.fromScreenLocation(android.graphics.PointF(0f, h)),
-                    proj.fromScreenLocation(android.graphics.PointF(w, h))
-                )
-                ViewBox(
-                    corners.minOf { it.latitude }, corners.minOf { it.longitude },
-                    corners.maxOf { it.latitude }, corners.maxOf { it.longitude }
-                )
+    // ── VOZIDLA: overlay nad mapou (viz VehicleCanvasOverlay / VehicleOverlayLoop), mapa o nich neví ──
+    // Dřív GeoJSON zdroj: každá dávka poloh (až 30× za sekundu) = nové rozřezání zdroje na dlaždice a rozmístění
+    // všech štítků v MapLibre (render + pracovní vlákna). Overlay je stejný jako u Google mapy (sprite batch na GPU).
+    VehicleOverlayLoop(
+        layer = overlayLayer, hub = hub, active = active, appState = appState,
+        activeVehicles = activeVehicles, targetUid = targetUid, phase = phase,
+        stopIndex = null,   // zastávky kreslí MapLibre (vlastní vrstva a ťuknutí)
+        stopMinZoom = Float.MAX_VALUE,
+        camera = { map?.let { overlayCamera(it) } },
+        visibleBounds = {
+            map?.let { m ->
+                runCatching { m.projection.visibleRegion.latLngBounds }.getOrNull()?.let { b ->
+                    ViewBox(b.latitudeSouth, b.longitudeWest, b.latitudeNorth, b.longitudeEast)
+                }
             }
-        }.getOrNull()
+        },
+    )
 
-        try {
-            while (true) {
-                val ft = withFrameNanos { it }
-                // čas snímku, ne okamžik probuzení: polohy v GeoJSON odpovídají pravidelným okamžikům
-                val now = frameElapsedMs(ft)
-
-                // průhlednost vrstev každý snímek (jen při změně), i mimo interval aktualizace poloh
-                fade.tick(now, pending || labelsLoading.get() != 0)
-                m.style?.takeIf { it.isFullyLoaded && it.getLayer(VEH_LAYER) != null }?.let { st ->
-                    val ap = fade.appearAlpha()
-                    val da = ap * fade.dotAlpha()
-                    val la = ap * fade.labelAlpha()
-                    if (st !== alphaStyle) { lastDotA = Float.NaN; lastLabelA = Float.NaN; lastHlA = Float.NaN }
-                    if (da != lastDotA) applyLayerAlpha(st, VEH_DOT_LAYER, da)
-                    if (la != lastLabelA) {
-                        for (g in 0 until Z_LAYERS) {
-                            applyLayerAlpha(st, freshLayerId(g), la)
-                            applyLayerAlpha(st, oldLayerId(g), la)
-                        }
-                    }
-                    if (ap != lastHlA) applyLayerAlpha(st, VEH_HL_LAYER, ap)
-                    alphaStyle = st; lastDotA = da; lastLabelA = la; lastHlA = ap
-                }
-
-                if (now - appState.vehicleSelectedAtMs < SHEET_OPEN_GRACE_MS) continue
-                // tolerance půl snímku: jinak se (33 ms vs. 33,3 ms snímku) občas přeskočí snímek a rytmus poskakuje
-                if (now - lastPush < interval - FRAME_SLACK_NS / 1_000_000L) continue
-
-                val camChanged = cameraDirty.getAndSet(false)
-                var modeFlipped = false
-                // viditelná oblast a zoom (JNI volání) jen při pohybu kamery, jinak max. 1x za vteřinu
-                if (camChanged || view == null || now - viewAt >= 1000L) {
-                    view = currentView()?.expanded(VEH_VIEW_MARGIN)
-                    viewAt = now
-                    runCatching { m.cameraPosition }.getOrNull()?.let { cp -> zoomNow = cp.zoom; bearingNow = cp.bearing; cp.zoom }?.let { z ->
-                        val nowDot = z < DOT_ZOOM_ML
-                        val nowImages = z >= DOT_ZOOM_ML - 0.5     // obrázky se chystají o půl úrovně dřív, ať nic neprobliká
-                        if (nowImages && !needImages) modeFlipped = true
-                        dotMode = nowDot
-                        needImages = nowImages
-                        if (!modeKnown || !fade.appeared) fade.initDotMode(nowDot)
-                        else if (fade.setDotMode(nowDot)) { modeFlipped = true; labelsLoading.set(0) }
-                        modeKnown = true
-                        interval = when {
-                            // štítky: každý GeoJSON = nové rozřezání zdroje a rozmístění všech štítků v MapLibre
-                            // (render + 4 pracovní vlákna); v Praze přes tisíc vozidel => 30 Hz vytížilo GPU vlákno na 90 %
-                            !nowDot && lastCount > 800 -> VEHICLE_UPDATE_INTERVAL_MANY_MS
-                            !nowDot && lastCount > 300 -> VEHICLE_UPDATE_INTERVAL_MID_MS
-                            !nowDot -> VEHICLE_UPDATE_INTERVAL_MS
-                            z >= 10.0 -> DOT_UPDATE_INTERVAL_MS
-                            else -> DOT_UPDATE_INTERVAL_FAR_MS
-                        }
-                    }
-                }
-
-                hub.ensureRoutes(view, enabled = !dotMode)
-                val moved = hub.tick(now, view)
-                val metaChanged = dirty.getAndSet(false) || modeFlipped
-                // Polohy se posílají i během gesta (zoom, posun): posun ikony od kotvy je v pixelech pro zoom poslední
-                // dávky, takže bez nových dávek by vozy při zoomu „ujížděly“, stály a po puštění prstu skočily na místo.
-                if (!moved && !metaChanged && !camChanged && !pending) continue
-
-                val style = m.style
-                if (style == null || !style.isFullyLoaded) {
-                    dirty.set(true); continue
-                }
-                ensureVehicleLayer(style)
-
-                if (metaChanged || draws.isEmpty()) {
-                    val tgt = latestTarget
-                    val ph = latestPhase
-
-                    val list = ArrayList<VehicleDraw>(latestVehicles.size)
-
-                    for ((k, v) in latestVehicles) {
-                        list += VehicleDraw(
-                            k,
-                            v,
-                            if (tgt != null && v.uid == tgt) ph else 0
-                        )
-                    }
-
-                    // Stabilní pořadí features (= pořadí kreslení uvnitř vrstvy): podle klíče vozidla.
-                    // Vánoční vozy se od běžných oddělují vrstvami, ne řazením.
-                    list.sortBy { it.key }
-
-                    draws = list
-                    val live = HashSet<String>(list.size * 2)
-                    for (d in list) live += d.key
-                    shownImg.keys.retainAll(live)
-                }
-
-                // obrázky štítků jen pro vozidla ve viditelné oblasti a jen když se štítky kreslí
-                // (zvýrazněné vozidlo je štítek vždy).
-                val missing = LinkedHashMap<String, VehicleDraw>()
-                for (d in draws) {
-                    if (!needImages && d.iconPhase == 0) continue
-                    if (d.imgId in addedImages || d.imgId in missing) continue
-                    val p = hub.positionOf(d.key) ?: continue
-                    if (view != null && !view.contains(p.latitude, p.longitude)) continue
-                    missing[d.imgId] = d
-                    if (missing.size >= MAX_NEW_IMAGES_PER_PUSH) break
-                }
-                if (missing.isNotEmpty()) {
-                    // paralelně na všech jádrech a do MapLibre jedním voláním (každé addImage zvlášť = JNI
-                    // a nové rozmístění štítků, které na obrázek čekají)
-                    val dpi = context.resources.displayMetrics.densityDpi
-                    val newBitmaps = withContext(Dispatchers.Default) {
-                        missing.entries.map { (imgId, d) ->
-                            async {
-                                val bmp = markerBitmap(context, d.v.line, d.style, d.iconPhase, d.late, d.v.christmas)
-                                    .copy(Bitmap.Config.ARGB_8888, false).apply { setDensity(dpi) }
-                                imgId to bmp
-                            }
-                        }.awaitAll()
-                    }
-                    val batch = HashMap<String, Bitmap>(newBitmaps.size * 2)
-                    for ((imgId, bmp) in newBitmaps) if (addedImages.add(imgId)) batch[imgId] = bmp
-                    if (batch.isNotEmpty()) style.addImages(batch)
-                }
-                pending = false
-
-                // polohy se čtou na hlavním vlákně (MotionHub není thread-safe), samotný GeoJSON se staví na pozadí
-                val nDraws = draws.size
-                val lats = DoubleArray(nDraws)
-                val lngs = DoubleArray(nDraws)
-                for (i in 0 until nDraws) {
-                    val p = hub.positionOf(draws[i].key)
-                    if (p == null) { lats[i] = Double.NaN } else { lats[i] = p.latitude; lngs[i] = p.longitude }
-                }
-                val labelsOn = !fade.dotMode || fade.switching()
-                val drawsSnap = draws
-                val zoomSnap = zoomNow
-                val bearingSnap = bearingNow
-                val built = withContext(Dispatchers.Default) {
-                    buildVehicleJson(drawsSnap, lats, lngs, view, labelsOn, addedImages, shownImg, zoomSnap, bearingSnap)
-                }
-                if (built.pending) pending = true
-
-                // první dávka se štítky po přepnutí: prolínání počká, až je MapLibre zpracuje (viz labelsLoading)
-                if (modeFlipped && !fade.dotMode && fade.switching()) labelsLoading.set(1)
-                style.getSourceAs<GeoJsonSource>(VEH_SRC)?.setGeoJson(built.json)
-                if (built.count > 0) fade.startAppear()
-                lastCount = built.count
-                lastPush = now
-            }
-        } finally {
-            mapView.removeOnSourceChangedListener(sourceListener)
-            mapView.removeOnDidFinishRenderingFrameListener(frameListener)
-        }
-    }
 }
 
+
+/** Kamera MapLibre pro overlay vozidel: zoom v měřítku Google (MapLibre má dlaždice 512 => o 1 menší zoom). */
+private fun overlayCamera(m: MapLibreMap): OverlayCamera? {
+    val cp = runCatching { m.cameraPosition }.getOrNull() ?: return null
+    val t = cp.target ?: return null
+    return OverlayCamera(t.latitude, t.longitude, (cp.zoom + 1.0).toFloat(), cp.bearing.toFloat())
+}
 
 private fun softenDark(style: Style) {
     style.layers.forEach { layer ->
