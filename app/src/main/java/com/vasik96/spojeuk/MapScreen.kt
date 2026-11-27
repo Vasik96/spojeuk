@@ -551,11 +551,14 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
                     else if (shownRoute.segments.isNotEmpty()) shownRoute.segments
                     else listOf(shownRoute.route)
 
-                    for (line in segments) {
+                    // spojení s přestupem: každá jízda v barvě svého druhu dopravy
+                    val segStyles = shownRoute.segmentStyles.takeIf { segments === shownRoute.segments && it.size == segments.size }
+                    for ((i, line) in segments.withIndex()) {
                         if (line.size >= 2) {
+                            val segColor = segStyles?.get(i)?.let { Color(if (useDarkMap) it.routeDark else it.route) } ?: primaryColor
                             Polyline(
                                 points = line,
-                                color = primaryColor.copy(alpha = routeAlpha),
+                                color = segColor.copy(alpha = routeAlpha),
                                 width = 12f,
                                 zIndex = 0f,
                                 startCap = RoundCap(),
@@ -932,6 +935,7 @@ private fun sourceLabelText(label: String, normal: Color, bad: Color) = buildAnn
 internal class ShownRoute {
     var route by mutableStateOf<List<LatLng>>(emptyList())
     var segments by mutableStateOf<List<List<LatLng>>>(emptyList())
+    var segmentStyles by mutableStateOf<List<VehicleStyle?>>(emptyList())
     var full by mutableStateOf<List<LatLng>>(emptyList())
     var walks by mutableStateOf<List<WalkRoute>>(emptyList())
     var stopDots by mutableStateOf<List<LatLng>>(emptyList())
@@ -947,19 +951,20 @@ private fun rememberShownRoute(appState: SpojeAppState, showFullRoute: Boolean):
     val s = remember { ShownRoute() }
     val route = appState.tripRoute
     val segments = appState.tripRouteSegments
+    val segmentStyles = appState.tripRouteSegmentStyles
     val full = appState.fullRoute
     val walks = if (appState.journeyWalks.isNotEmpty()) appState.journeyWalks
     else listOfNotNull(appState.journeyWalk)
     val stopDots = appState.stopDots(showFullRoute)
-    LaunchedEffect(route, segments, full, walks, stopDots) {
+    LaunchedEffect(route, segments, segmentStyles, full, walks, stopDots) {
         if (route.isNotEmpty()) {
             val appearing = s.route.isEmpty()
-            s.route = route; s.segments = segments; s.full = full; s.walks = walks; s.stopDots = stopDots
+            s.route = route; s.segments = segments; s.segmentStyles = segmentStyles; s.full = full; s.walks = walks; s.stopDots = stopDots
             if (appearing) s.alpha.snapTo(0f)
             if (s.alpha.targetValue < 1f || appearing) s.alpha.animateTo(1f, tween(ROUTE_FADE_IN_MS, easing = LinearOutSlowInEasing))
         } else if (s.route.isNotEmpty()) {
             s.alpha.animateTo(0f, tween(ROUTE_FADE_OUT_MS, easing = FastOutLinearInEasing))
-            s.route = emptyList(); s.segments = emptyList(); s.full = emptyList(); s.walks = emptyList(); s.stopDots = emptyList()
+            s.route = emptyList(); s.segments = emptyList(); s.segmentStyles = emptyList(); s.full = emptyList(); s.walks = emptyList(); s.stopDots = emptyList()
         }
     }
     return s

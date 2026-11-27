@@ -212,6 +212,12 @@ class SpojeAppState(
      * vozidla" zůstávají na mapě i jejich vozy, ale jen spárované přesně podle čísla spoje (odhad jen u aktuální jízdy).
      */
     internal var journeyOtherRideTids by mutableStateOf<Set<Int>>(emptySet())
+
+    /**
+     * Druh dopravy každého úseku [tripRouteSegments] (stejné pořadí): spojení s přestupem má každou jízdu ve své
+     * barvě (autobus zeleně, trolejbus tyrkysově…). null = barva [routeStyle] (jízda, ke které se hledá vůz).
+     */
+    internal var tripRouteSegmentStyles by mutableStateOf<List<VehicleStyle?>>(emptyList())
     var tripRouteSegments by mutableStateOf<List<List<LatLng>>>(emptyList())
     var tripStops by mutableStateOf<List<LatLng>>(emptyList())
 
@@ -323,6 +329,7 @@ class SpojeAppState(
         journeyOtherRideTids = emptySet()
         tripRoute = emptyList()
         tripRouteSegments = emptyList()
+        tripRouteSegmentStyles = emptyList()
         fullRoute = emptyList()
         tripStops = emptyList()
         journeyStops = null
@@ -359,7 +366,9 @@ class SpojeAppState(
 
         val job = scope.launch(Dispatchers.Default) {
             try {
-                val segments = api.journeySegments(journey)
+                val byRide = api.journeySegmentsByRide(journey)
+                val segments = byRide.map { it.second }
+                val segStyles = byRide.map { (tid, _) -> if (tid == ref.tid) null else api.tripStyleOf(tid) }
                 val points = api.journeyGeometry(journey)
                 val full = api.firstLegFullRoute(journey)
                 val stops = api.firstLegStopLocations(journey)
@@ -374,6 +383,7 @@ class SpojeAppState(
                 withContext(Dispatchers.Main) {
                     if (!isActive) return@withContext
                     tripRouteSegments = segLatLng
+                    tripRouteSegmentStyles = segStyles
                     tripRoute = ptsLatLng
                     fullRoute = fullLatLng
                     tripStops = stopsLatLng

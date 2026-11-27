@@ -782,6 +782,11 @@ class TransitRepository(context: Context? = null) {
         geometry.forJourneySegments(store.ensure().timetable, j)
     }
 
+    /** Úseky jízd spojení se spojem (tid), ke kterému patří. */
+    suspend fun journeySegmentsByRide(j: Journey): List<Pair<Int, List<Pair<Double, Double>>>> = withContext(Dispatchers.IO) {
+        geometry.forJourneySegmentsByRide(store.ensure().timetable, j)
+    }
+
     suspend fun journeyGeometry(j: Journey): List<Pair<Double, Double>> = withContext(Dispatchers.IO) {
         geometry.forJourney(store.ensure().timetable, j)
     }

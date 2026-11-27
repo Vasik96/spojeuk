@@ -513,13 +513,14 @@ internal fun MapLibreScreenContent(
     else listOfNotNull(appState.journeyWalk)
     val tripRoute = appState.tripRoute
     val tripRouteSegments = appState.tripRouteSegments
+    val tripRouteSegmentStyles = appState.tripRouteSegmentStyles
     val fullRoute = appState.fullRoute
     val stopDots = appState.stopDots(showFullRoute)
 
     // ── TRASY (nezávisí na zoomu, šipky a tečky kreslí MapLibre nativně) ──
     LaunchedEffect(
-        map, tripRoute, tripRouteSegments, fullRoute, walkList, showFullRoute, stopDots,
-        primaryColorArgb, tertiaryArgb, arrowArgb, styleVersion
+        map, tripRoute, tripRouteSegments, tripRouteSegmentStyles, fullRoute, walkList, showFullRoute, stopDots,
+        primaryColorArgb, useDarkMap, tertiaryArgb, arrowArgb, styleVersion
     ) {
         val m = map ?: return@LaunchedEffect
         val style = m.style ?: return@LaunchedEffect
@@ -550,9 +551,15 @@ internal fun MapLibreScreenContent(
             else if (tripRouteSegments.isNotEmpty()) tripRouteSegments
             else listOf(tripRoute)
 
+            // spojení s přestupem: každá jízda v barvě svého druhu dopravy (vlastnost "c" úseku)
+            val segStyles = tripRouteSegmentStyles.takeIf { segments === tripRouteSegments && it.size == segments.size }
             val routeFeatures = withContext(Dispatchers.Default) {
-                segments.mapNotNull { seg ->
-                    if (seg.size >= 2) Feature.fromGeometry(seg.toLineString()) else null
+                segments.mapIndexedNotNull { i, seg ->
+                    if (seg.size < 2) return@mapIndexedNotNull null
+                    val argb = segStyles?.get(i)?.let { if (useDarkMap) it.routeDark else it.route } ?: primaryColorArgb
+                    Feature.fromGeometry(seg.toLineString()).apply {
+                        addStringProperty("c", String.format("#%06X", argb and 0xFFFFFF))
+                    }
                 }
             }
 
@@ -566,7 +573,7 @@ internal fun MapLibreScreenContent(
                 addBelowMarkers(
                     style,
                     LineLayer("route-line", "route-src").withProperties(
-                        PropertyFactory.lineColor(primaryColorArgb),
+                        PropertyFactory.lineColor(Expression.toColor(Expression.get("c"))),
                         PropertyFactory.lineWidth(12f / density),
                         PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
                         PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)

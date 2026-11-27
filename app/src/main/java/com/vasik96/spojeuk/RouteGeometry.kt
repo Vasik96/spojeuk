@@ -45,8 +45,12 @@ class RouteGeometry(
 
     /** Trasy jednotlivých jízd spojení (samostatné úseky pro zamezení rovných čar mezi přestupy). */
     fun forJourneySegments(tt: Timetable, j: Journey): List<LatLngList> =
+        forJourneySegmentsByRide(tt, j).map { it.second }
+
+    /** Úseky jízd spojení i se spojem (tid), ke kterému patří (barva úseku podle druhu dopravy). */
+    fun forJourneySegmentsByRide(tt: Timetable, j: Journey): List<Pair<Int, LatLngList>> =
         j.rawLegs.filter { it.kind == "ride" }.mapNotNull { leg ->
-            (legShape(tt, leg) ?: legFallback(tt, leg)).takeIf { it.isNotEmpty() }
+            (legShape(tt, leg) ?: legFallback(tt, leg)).takeIf { it.isNotEmpty() }?.let { leg.tid to it }
         }
 
     /** Trasa všech jízd spojení. */
