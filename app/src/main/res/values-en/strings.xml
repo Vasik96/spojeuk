@@ -1,4 +1,4 @@
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="common_close">Close</string>
     <string name="common_ok_understood">Got it</string>
     <string name="settings_app_theme_dialog_title">Choose app theme</string>
@@ -140,6 +140,7 @@
     <string name="map_metro_no_live">The metro has no live position, showing the route only</string>
     <string name="map_not_departed">The trip has not departed yet, showing the route</string>
     <string name="map_vehicle_not_found">Could not find this trip\'s vehicle on the map, showing the route</string>
+    <string name="map_osm_attribution">© OpenStreetMap contributors, © CARTO</string>
     <string name="map_mapy_attribution">© Seznam.cz a.s. and others, © OpenStreetMap</string>
     <string name="map_title">Vehicle map</string>
     <string name="map_loading_positions">Loading vehicle positions…</string>
@@ -183,7 +184,7 @@
     <string name="search_results">Results</string>
     <string name="common_loading">Loading…</string>
     <string name="search_earlier">Earlier</string>
-    <string name="search_found">%1$d found</string>
+    <string name="search_found" tools:ignore="PluralsCandidate">%1$d found</string>
     <string name="search_empty_title">Where are you heading today?</string>
     <string name="search_empty_text">Choose the departure and destination stop.</string>
     <string name="search_load_more_retry">Load more – try again</string>
@@ -242,7 +243,7 @@
     <string name="imp_processing">Processing timetables…</string>
     <string name="imp_processing_bus">Processing buses… %1$s trips</string>
     <string name="imp_processing_rail">Processing trains… %1$s trips</string>
-    <string name="imp_feed_done">Feed %1$d/%2$d done, trips in total: %3$d</string>
+    <string name="imp_feed_done" tools:ignore="PluralsCandidate">Feed %1$d/%2$d done, trips in total: %3$d</string>
     <string name="diag_no_requests">no requests yet</string>
     <plurals name="dl_osrm_cleared">
         <item quantity="one">Route cache cleared (%1$d file deleted).</item>
@@ -280,9 +281,15 @@
     <string name="map_filter_select_all">Select all</string>
     <string name="map_filter_bus_note">including trolleybuses</string>
     <string name="stop_departures">Departures</string>
-    <string name="stop_departures_none">Nothing departs from here in the next %1$d hours</string>
+    <plurals name="stop_departures_none">
+        <item quantity="one">Nothing departs from here in the next %1$d hour</item>
+        <item quantity="other">Nothing departs from here in the next %1$d hours</item>
+    </plurals>
     <string name="stop_departures_loading">Loading departures…</string>
-    <string name="stop_departures_note">Scheduled, next %1$d hours</string>
+    <plurals name="stop_departures_note">
+        <item quantity="one">Scheduled, next %1$d hour</item>
+        <item quantity="other">Scheduled, next %1$d hours</item>
+    </plurals>
     <string name="stop_in_min">in %1$d min</string>
     <string name="stop_now">now</string>
     <string name="jd_title">Trip details</string>
@@ -397,4 +404,7 @@
     <string name="about_libs_text">Jetpack Compose and Material 3, MapLibre Native, Google Maps SDK and Maps Compose, OkHttp.</string>
     <string name="about_disclaimer">Unofficial app, not affiliated with DÚK or the operators. Times, delays and positions come without warranty.</string>
     <string name="update_dont_show_again">Don\'t show again</string>
+    <string name="shortcut_map_short">Map</string>
+    <string name="shortcut_map_long">Vehicle map</string>
+    <string name="shortcut_route_long">%1$s → %2$s</string>
 </resources>

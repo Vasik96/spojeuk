@@ -2,6 +2,9 @@
 
 package com.vasik96.spojeuk
 
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.runtime.Stable
 import androidx.compose.animation.core.Animatable
@@ -166,7 +169,8 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     }
 
     // polling poloh
-    LaunchedEffect(active) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(active, lifecycleOwner) {
         if (!active) return@LaunchedEffect
         // Pokud již máme vozidla z paměti/cache repozitáře, ihned je zobrazit, ať banner neukazuje spinner
         val curr = api.currentVehicles()
@@ -180,21 +184,24 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
         } else {
             appState.vehiclesLoaded = false
         }
-        while (true) {
-            runCatching { api.vehiclePositions(maxAgeMs = 4_000) }
-                .onSuccess {
-                    appState.updateVehicles(it)
-                    appState.heldCount = api.heldCount()
-                    appState.vehicleSource = api.sourceLabel()
-                    appState.mapError = if (api.vehicleFetchFailing()) tr(R.string.map_positions_failed) else null
-                }
-                .onFailure {
-                    if (it is CancellationException) throw it
-                    appState.mapError = tr(R.string.map_positions_failed)
-                }
-            appState.vehiclesLoaded = true
-            // při výpadku zkoušet častěji, ať se polohy vrátí hned, jak server / síť zase jede
-            delay((if (api.vehicleFetchFailing()) 2_500 else 6_000).milliseconds)
+        // jen když je appka vidět: na pozadí (zamčený telefon, jiná appka) polling stojí, po návratu se hned stáhne znovu
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                runCatching { api.vehiclePositions(maxAgeMs = 4_000) }
+                    .onSuccess {
+                        appState.updateVehicles(it)
+                        appState.heldCount = api.heldCount()
+                        appState.vehicleSource = api.sourceLabel()
+                        appState.mapError = if (api.vehicleFetchFailing()) tr(R.string.map_positions_failed) else null
+                    }
+                    .onFailure {
+                        if (it is CancellationException) throw it
+                        appState.mapError = tr(R.string.map_positions_failed)
+                    }
+                appState.vehiclesLoaded = true
+                // při výpadku zkoušet častěji, ať se polohy vrátí hned, jak server / síť zase jede
+                delay((if (api.vehicleFetchFailing()) 2_500 else 6_000).milliseconds)
+            }
         }
     }
 
@@ -613,10 +620,16 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
             )
         }
 
-        // Mapy.cz vyžaduje uvedení zdroje dat (logo Mapy.cz viz poznámka v README)
-        if (appState.mapProvider == MapProvider.MAPYCZ && BuildConfig.MAPYCZ_API_KEY.isNotBlank()) {
+        // uvedení zdroje dat vlevo dole (logo Mapy.cz viz poznámka v README); Google má vlastní logo.
+        // OpenStreetMap = vektorové dlaždice CARTO; na ně se přepne i Mapy.com bez API klíče.
+        val attribution = when {
+            appState.mapProvider == MapProvider.GOOGLE -> null
+            appState.mapProvider == MapProvider.MAPYCZ && BuildConfig.MAPYCZ_API_KEY.isNotBlank() -> R.string.map_mapy_attribution
+            else -> R.string.map_osm_attribution
+        }
+        if (attribution != null) {
             Text(
-                stringResource(R.string.map_mapy_attribution),
+                stringResource(attribution),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier

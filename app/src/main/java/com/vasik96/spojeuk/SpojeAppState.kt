@@ -1,6 +1,8 @@
 package com.vasik96.spojeuk
 
 import android.content.Context
+import android.os.Bundle
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -822,6 +824,78 @@ class SpojeAppState(
         }
         stops = newStops
         indexedStops = idx
+        resolveRestoredStops()
+    }
+
+    // ───── obnova po ukončení procesu (Android appku na pozadí ukončí, po návratu se má otevřít, jak byla) ─────
+
+    /**
+     * Hledání čeká na načtené zastávky (viz SearchScreen): výsledky byly otevřené před ukončením procesu,
+     * nebo přišlo ze zkratky launcheru.
+     */
+    var restoredSearchPending by mutableStateOf(false)
+    /** Čekající hledání se zapíše do historie a používání (zkratka ano, obnova po ukončení procesu ne). */
+    var pendingSearchRecord = false
+    private var restoredFromName: String? = null
+    private var restoredToName: String? = null
+
+    /** Jen to, co se nedá dopočítat: zadání hledání, záložka a pohled mapy (výsledky se spočítají znovu). */
+    fun saveInstance(): Bundle = Bundle().apply {
+        putInt("tab", selectedTab)
+        putString("from", from?.name ?: restoredFromName)
+        putString("to", to?.name ?: restoredToName)
+        putString("fromQ", fromQuery)
+        putString("toQ", toQuery)
+        putString("departAt", departAt?.toString())
+        putBoolean("arriveBy", arriveBy)
+        putBoolean("results", showResults || restoredSearchPending)
+        savedMapCenter?.let { putDouble("mapLat", it.latitude); putDouble("mapLng", it.longitude) }
+        savedMapZoom?.let { putFloat("mapZoom", it) }
+    }
+
+    fun restoreInstance(b: Bundle) {
+        selectedTab = b.getInt("tab", 0)
+        fromQuery = b.getString("fromQ").orEmpty()
+        toQuery = b.getString("toQ").orEmpty()
+        restoredFromName = b.getString("from")
+        restoredToName = b.getString("to")
+        departAt = b.getString("departAt")?.let { runCatching { java.time.LocalDateTime.parse(it) }.getOrNull() }
+        arriveBy = b.getBoolean("arriveBy", false)
+        // vyplněná pole uživatel (nebo předvyplnění) už jednou zvolil: předvyplnění podle polohy je nepřepíše
+        if (fromQuery.isNotBlank() || toQuery.isNotBlank() || restoredFromName != null || restoredToName != null) autoFillDone = true
+        restoredSearchPending = b.getBoolean("results", false) && restoredFromName != null && restoredToName != null
+        if (b.containsKey("mapLat")) savedMapCenter = LatLng(b.getDouble("mapLat"), b.getDouble("mapLng"))
+        if (b.containsKey("mapZoom")) savedMapZoom = b.getFloat("mapZoom")
+    }
+
+    /** Zkratka launcheru se spojením: vyplní pole a hledá, jakmile jsou načtené zastávky (přebije předvyplnění). */
+    fun requestSearch(fromName: String, toName: String) {
+        autoFillDone = true
+        autoFillPreview = null
+        from = null
+        to = null
+        fromQuery = stopLabel(fromName)
+        toQuery = stopLabel(toName)
+        restoredFromName = fromName
+        restoredToName = toName
+        pendingSearchRecord = true
+        if (stops.isNotEmpty()) resolveRestoredStops()
+        restoredSearchPending = true
+    }
+
+    /** Zastávky z obnoveného stavu: vyberou se, jakmile je načtený seznam zastávek. */
+    private fun resolveRestoredStops() {
+        restoredFromName?.let { n -> if (from == null) from = stops.firstOrNull { it.name == n } }
+        restoredToName?.let { n -> if (to == null) to = stops.firstOrNull { it.name == n } }
+        restoredFromName = null
+        restoredToName = null
+    }
+
+    companion object {
+        fun saver(context: Context) = Saver<SpojeAppState, Bundle>(
+            save = { it.saveInstance() },
+            restore = { b -> SpojeAppState(context).also { it.restoreInstance(b) } },
+        )
     }
 
     suspend fun refreshUsage() {

@@ -156,7 +156,6 @@ class JourneyTrackingService : Service() {
     }
 
     private suspend fun run(initialJ: Journey, repo: TransitRepository) {
-        val nm = NotificationManagerCompat.from(this)
         var j = initialJ
         while (JourneyTracker.current.value?.key == j.key) {
             val detail = repo.journeyDetailNow(j) ?: catchingNonCancel { repo.journeyDetail(j) } ?: emptyList()
@@ -189,7 +188,7 @@ class JourneyTrackingService : Service() {
             val alightNear = alight == null || alightImminent(
                 phase.arrSec - nowSec, alight.nextStopIsAlight, alight.distM,
             )
-            runCatching { nm.notify(NOTIF_ID, buildNotification(this, j, detail, live, phase, alightNear)) }
+            postNotification(NOTIF_ID, buildNotification(this, j, detail, live, phase, alightNear))
             maybeAlertAlighting(j, detail, phase, nowSec, alight, repo)
 
             val soon = when (phase) {
@@ -260,7 +259,7 @@ class JourneyTrackingService : Service() {
             .setContentIntent(openIntent(this))
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
-        runCatching { NotificationManagerCompat.from(this).notify(ALERT_ID, n) }
+        postNotification(ALERT_ID, n)
     }
 
     /** Automatické vyhledání náhradního spojení při zmeškání přestupu. */
@@ -359,7 +358,6 @@ class JourneyTrackingService : Service() {
         // jen spoj, který ještě neodjel. Časy jsou v sekundách od půlnoci VLASTNÍHO dne spojení (po půlnoci / přes ni
         // se dny liší), proto porovnání v absolutním čase
         val newJ = altJourneys.firstOrNull { it.key != j.key && !absDep(it).isBefore(searchFrom) }
-        val nm = NotificationManagerCompat.from(this)
 
         if (newJ != null) {
             JourneyTracker.replace(newJ)
@@ -376,7 +374,7 @@ class JourneyTrackingService : Service() {
                 .setContentIntent(openIntent(this))
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .build()
-            runCatching { nm.notify(ALERT_ID, n) }
+            postNotification(ALERT_ID, n)
             return newJ
         } else {
             val n = NotificationCompat.Builder(this, CHANNEL_ALERTS)
@@ -390,13 +388,23 @@ class JourneyTrackingService : Service() {
                 .setContentIntent(openIntent(this))
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .build()
-            runCatching { nm.notify(ALERT_ID, n) }
+            postNotification(ALERT_ID, n)
             return null
         }
     }
 
     /** Odjezd spojení jako datum a čas (dep = sekundy od půlnoci dne spojení, může přesáhnout 24 h). */
     private fun absDep(j: Journey): java.time.LocalDateTime = j.day.atStartOfDay().plusSeconds(j.dep.toLong())
+
+    /**
+     * Zobrazí / aktualizuje notifikaci, jen když má appka povolení (na Androidu 13+ ho uživatel může kdykoli odebrat;
+     * bez něj by notify nic neukázalo). Chyby systému notifikací sledování neshodí.
+     */
+    @android.annotation.SuppressLint("MissingPermission")   // povolení se kontroluje hned na prvním řádku
+    private fun postNotification(id: Int, n: android.app.Notification) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+        runCatching { NotificationManagerCompat.from(this).notify(id, n) }
+    }
 
     /** runCatching, který nespolkne zrušení coroutiny (jinak by zrušená smyčka ještě chvíli běžela a posílala notifikace). */
     private inline fun <T> catchingNonCancel(block: () -> T): T? = try {

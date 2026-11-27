@@ -2,6 +2,9 @@
 
 package com.vasik96.spojeuk
 
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
@@ -140,10 +143,13 @@ internal fun JourneyDetailScreen(
         if (value == null) value = runCatching { api.journeyDetail(j) }.getOrDefault(emptyList())
     }
     // živé vozy: jen dokud má smysl (liveOn sám vrací null mimo okno jízdy)
-    val live by produceState(remember(j.key) { api.journeyLiveNow(j) }, j.key) {
-        while (true) {
-            runCatching { api.journeyLive(j) }.getOrNull()?.let { value = it }
-            delay(15.seconds)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val live by produceState(remember(j.key) { api.journeyLiveNow(j) }, j.key, lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {   // na pozadí nestahovat
+            while (true) {
+                runCatching { api.journeyLive(j) }.getOrNull()?.let { value = it }
+                delay(15.seconds)
+            }
         }
     }
 
@@ -737,10 +743,13 @@ internal fun JourneyLegSheet(
         if (value == null) value = runCatching { api.journeyDetail(j) }.getOrNull()
             ?.filterIsInstance<DetailLeg.Ride>()?.firstOrNull { it.index == legIndex }
     }
-    val vehicle by produceState(remember(j.key, legIndex) { api.journeyLiveNow(j)[legIndex] }, j.key, legIndex) {
-        while (true) {
-            runCatching { api.journeyLive(j) }.getOrNull()?.let { value = it[legIndex] }
-            delay(15.seconds)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val vehicle by produceState(remember(j.key, legIndex) { api.journeyLiveNow(j)[legIndex] }, j.key, legIndex, lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {   // na pozadí nestahovat
+            while (true) {
+                runCatching { api.journeyLive(j) }.getOrNull()?.let { value = it[legIndex] }
+                delay(15.seconds)
+            }
         }
     }
     val rideNo = j.rawLegs.take(legIndex + 1).count { it.kind == "ride" }

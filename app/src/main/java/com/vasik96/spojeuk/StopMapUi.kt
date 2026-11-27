@@ -1,5 +1,8 @@
 package com.vasik96.spojeuk
 
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import android.graphics.Bitmap
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -127,11 +131,14 @@ private fun StopDeparturesSheet(
     onDismiss: () -> Unit,
 ) {
     // odjezdy spočítané před otevřením (SpojeAppState.openStop), pak obnova každou minutu (odjeté zmizí)
-    val deps by produceState(prefetched, stop.key) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val deps by produceState(prefetched, stop.key, lifecycleOwner) {
         if (value != null) delay(60.seconds)
-        while (true) {
-            value = runCatching { api.stopDepartures(stop, STOP_DEPARTURE_HOURS) }.getOrDefault(value ?: emptyList())
-            delay(60.seconds)
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {   // na pozadí nepočítat, po návratu hned čerstvé
+            while (true) {
+                value = runCatching { api.stopDepartures(stop, STOP_DEPARTURE_HOURS) }.getOrDefault(value ?: emptyList())
+                delay(60.seconds)
+            }
         }
     }
     val now by produceState(nowPrague(), stop.key) {
@@ -157,7 +164,7 @@ private fun StopDeparturesSheet(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                stringResource(R.string.stop_departures_note, STOP_DEPARTURE_HOURS),
+                pluralStringResource(R.plurals.stop_departures_note, STOP_DEPARTURE_HOURS, STOP_DEPARTURE_HOURS),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -166,7 +173,7 @@ private fun StopDeparturesSheet(
             when {
                 list == null -> Text(stringResource(R.string.stop_departures_loading), style = MaterialTheme.typography.bodyMedium)
                 list.isEmpty() -> Text(
-                    stringResource(R.string.stop_departures_none, STOP_DEPARTURE_HOURS),
+                    pluralStringResource(R.plurals.stop_departures_none, STOP_DEPARTURE_HOURS, STOP_DEPARTURE_HOURS),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -1,5 +1,5 @@
-<resources>
-    <string name="app_name">Spoje UK</string>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <string name="app_name" translatable="false">Spoje UK</string>
     <string name="common_close">Zavřít</string>
     <string name="common_ok_understood">Rozumím</string>
     <string name="settings_app_theme_dialog_title">Výběr motivu aplikace</string>
@@ -147,6 +147,7 @@
     <string name="map_metro_no_live">Metro nemá živou polohu, zobrazuji jen trasu</string>
     <string name="map_not_departed">Spoj ještě nevyjel, zobrazuji trasu</string>
     <string name="map_vehicle_not_found">Vozidlo tohoto spoje se na mapě nepodařilo najít, zobrazuji trasu</string>
+    <string name="map_osm_attribution">© přispěvatelé OpenStreetMap, © CARTO</string>
     <string name="map_mapy_attribution">© Seznam.cz a.s. a další, © OpenStreetMap</string>
     <string name="map_title">Mapa vozidel</string>
     <string name="map_loading_positions">Načítání poloh vozidel…</string>
@@ -194,7 +195,7 @@
     <string name="search_results">Výsledky</string>
     <string name="common_loading">Načítám…</string>
     <string name="search_earlier">Dřívější</string>
-    <string name="search_found">%1$d nalezeno</string>
+    <string name="search_found" tools:ignore="PluralsCandidate">%1$d nalezeno</string>
     <string name="search_empty_title">Kam dnes vyrazíš?</string>
     <string name="search_empty_text">Vyber výchozí a cílovou zastávku.</string>
     <string name="search_load_more_retry">Načíst další – zkusit znovu</string>
@@ -255,7 +256,7 @@
     <string name="imp_processing">Zpracovávám jízdní řády…</string>
     <string name="imp_processing_bus">Zpracovávám autobusy… %1$s spojů</string>
     <string name="imp_processing_rail">Zpracovávám vlaky… %1$s spojů</string>
-    <string name="imp_feed_done">Feed %1$d/%2$d hotový, spojů celkem: %3$d</string>
+    <string name="imp_feed_done" tools:ignore="PluralsCandidate">Feed %1$d/%2$d hotový, spojů celkem: %3$d</string>
     <string name="diag_no_requests">zatím žádný dotaz</string>
     <plurals name="dl_osrm_cleared">
         <item quantity="one">Cache tras vyčištěna (%1$d soubor smazán).</item>
@@ -301,9 +302,19 @@
     <string name="map_filter_select_all">Vybrat vše</string>
     <string name="map_filter_bus_note">včetně trolejbusů</string>
     <string name="stop_departures">Odjezdy</string>
-    <string name="stop_departures_none">V příštích %1$d hodinách odsud nic nejede</string>
+    <plurals name="stop_departures_none">
+        <item quantity="one">V příští %1$d hodině odsud nic nejede</item>
+        <item quantity="few">V příštích %1$d hodinách odsud nic nejede</item>
+        <item quantity="many">V příštích %1$d hodinách odsud nic nejede</item>
+        <item quantity="other">V příštích %1$d hodinách odsud nic nejede</item>
+    </plurals>
     <string name="stop_departures_loading">Načítám odjezdy…</string>
-    <string name="stop_departures_note">Podle jízdního řádu, nejbližší %1$d hodiny</string>
+    <plurals name="stop_departures_note">
+        <item quantity="one">Podle jízdního řádu, nejbližší %1$d hodina</item>
+        <item quantity="few">Podle jízdního řádu, nejbližší %1$d hodiny</item>
+        <item quantity="many">Podle jízdního řádu, nejbližších %1$d hodiny</item>
+        <item quantity="other">Podle jízdního řádu, nejbližších %1$d hodin</item>
+    </plurals>
     <string name="stop_in_min">za %1$d min</string>
     <string name="stop_now">teď</string>
     <string name="jd_title">Detail spojení</string>
@@ -422,4 +433,7 @@
     <string name="about_libs_text">Jetpack Compose a Material 3, MapLibre Native, Google Maps SDK a Maps Compose, OkHttp.</string>
     <string name="about_disclaimer">Neoficiální aplikace, není spojená s DÚK ani s dopravci. Časy, zpoždění a polohy jsou bez záruky.</string>
     <string name="update_dont_show_again">Znovu neukazovat</string>
+    <string name="shortcut_map_short">Mapa</string>
+    <string name="shortcut_map_long">Mapa vozidel</string>
+    <string name="shortcut_route_long">%1$s → %2$s</string>
 </resources>

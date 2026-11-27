@@ -2,6 +2,9 @@
 
 package com.vasik96.spojeuk
 
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.ui.text.style.TextAlign
@@ -124,8 +127,6 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
 private const val SEARCH_BUTTON_FADE_MS = 250   // prolnutí tlačítka Najít spojení (aktivní ↔ neaktivní)
-private const val FIRST_PAGE = 8
-private const val MORE_PAGE = 6
 
 private const val WALK_MAX_MIN = 20
 
@@ -423,6 +424,8 @@ internal fun SearchScreen(
                     appState.autoFillDone = true
                     appState.autoFillPreview = null
                     appState.saveAutoFillPreview(lat, lng, from.name, to?.name)
+                    // zkratka launcheru "Odkud → Kam" = to, co se po spuštění předvyplnilo
+                    if (to != null) AppShortcuts.publishRoute(context, from.name, to.name)
                     return true
                 }
 
@@ -514,202 +517,22 @@ internal fun SearchScreen(
         focusManager.clearFocus()
     }
 
-    // ───── nové hledání ─────
+    // ───── hledání a stránkování výsledků (SearchPaging.kt) ─────
     fun runSearch() {
-        val a = appState.from ?: return
-        val b = appState.to ?: return
+        if (appState.from == null || appState.to == null) return
         dismissKeyboard()
-        appState.searchJob?.cancel()
-
-        appState.usageManager.recordUsage(a.name)
-        appState.usageManager.recordUsage(b.name)
-
-        appState.history.record(a.name, b.name)
-
-        scope.launch {
-            appState.refreshUsage()
-        }
-
-        val s = api.newSearch(a.name, b.name, modeFilter = appState.modeFilter, departAt = appState.departAt,
-            arriveBy = appState.arriveBy && appState.departAt != null)
-        appState.search = s
-        appState.journeys = emptyList()
-        appState.searched = true
-        appState.searchLoading = true
-        appState.loadingMore = false
-        appState.refreshing = false
-        appState.loadMoreFailed = false
-        appState.hasMore = true
-        appState.hasEarlier = true
-        appState.loadingEarlier = false
-        appState.searchError = null
-        appState.searchedFrom = a
-        appState.searchedTo = b
-        appState.searchedArriveBy = appState.arriveBy && appState.departAt != null
-        appState.historyRev++
-        appState.detailJourney = null
-        appState.showResults = true
-
-        appState.shownKeys.clear()
-        listState.requestScrollToItem(0)
-
-        appState.searchJob = scope.launch {
-            try {
-                val r = withContext(Dispatchers.Default) { s.loadMore(FIRST_PAGE) }
-                if (appState.search === s) {
-                    appState.journeys = r
-                    appState.hasMore = s.hasMore
-                    // podle příjezdu: nejlepší (nejpozdější odjezd, který ještě stihne) je poslední => ukázat ho
-                    if (appState.searchedArriveBy && r.isNotEmpty()) listState.requestScrollToItem(r.lastIndex)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                if (appState.search === s) appState.searchError = tr(R.string.search_failed, e.message.orEmpty())
-            } finally {
-                withContext(NonCancellable) {
-                    if (appState.search === s) appState.searchLoading = false
-                }
-            }
-        }
+        appState.startSearch(api, scope)
     }
+    fun refresh() = appState.refreshSearch(scope)
 
-    // ───── pull-to-refresh (nahoře) ─────
-    fun refresh() {
-        val old = appState.search ?: return
-        appState.searchJob?.cancel()
-        val s = old.fresh()
-        appState.search = s
-        appState.refreshing = true
-        appState.loadingMore = false
-        appState.loadMoreFailed = false
-        appState.hasEarlier = true
-        appState.loadingEarlier = false
-        appState.searchError = null
-
-        appState.shownKeys.clear()
-
-        appState.searchJob = scope.launch {
-            // Refresh poběží minimálně 700 ms.
-            val refreshStartedAt = System.currentTimeMillis()
-            var wasCancelled = false
-
-            try {
-                val r = withContext(Dispatchers.Default) {
-                    s.loadMore(FIRST_PAGE)
-                }
-
-                if (appState.search === s) {
-                    appState.journeys = r
-                    appState.hasMore = s.hasMore
-                }
-            } catch (e: CancellationException) {
-                wasCancelled = true
-                throw e
-            } catch (e: Exception) {
-                if (appState.search === s) {
-                    appState.searchError = tr(R.string.search_refresh_failed, e.message.orEmpty())
-                }
-            } finally {
-                withContext(NonCancellable) {
-                    try {
-                        val elapsed = System.currentTimeMillis() - refreshStartedAt
-                        val remaining = 700L - elapsed
-                        if (remaining > 0 && !wasCancelled) {
-                            delay(remaining)
-                        }
-                    } catch (_: CancellationException) {
-                    }
-                    if (appState.search === s) {
-                        appState.refreshing = false
-                    }
-                }
-            }
-        }
+    // po ukončení procesu byly otevřené výsledky: hledání znovu, jakmile jsou zastávky načtené a vybrané
+    LaunchedEffect(appState.restoredSearchPending, appState.indexedStops.isNotEmpty()) {
+        if (!appState.restoredSearchPending || appState.indexedStops.isEmpty()) return@LaunchedEffect
+        if (appState.from != null && appState.to != null) appState.startSearch(api, scope, record = appState.pendingSearchRecord)
+        else appState.restoredSearchPending = false
     }
-
-    // ───── doplnění dalších spojů (dole) ─────
-    fun loadMore() {
-        val s = appState.search ?: return
-        if (appState.loadingMore || appState.searchLoading || appState.refreshing ||
-            appState.loadMoreFailed || !s.hasMore
-        ) return
-        appState.loadingMore = true
-
-        appState.searchJob = scope.launch {
-            try {
-                val r = withContext(Dispatchers.Default) { s.loadMore(MORE_PAGE) }
-                if (appState.search === s) {
-                    appState.journeys = r
-                    appState.hasMore = s.hasMore
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                if (appState.search === s) {
-                    appState.searchError = tr(R.string.search_more_failed, e.message.orEmpty())
-                    appState.loadMoreFailed = true
-                }
-            } finally {
-                withContext(NonCancellable) {
-                    if (appState.search === s) appState.loadingMore = false
-                }
-            }
-        }
-    }
-
-    fun loadEarlier() {
-        val s = appState.search ?: return
-
-        if (appState.loadingEarlier || appState.loadingMore ||
-            appState.searchLoading || appState.refreshing
-        ) return
-
-        // Zapamatuj si spoj, který je právě vidět, a jeho pozici.
-        val visibleItem = listState.layoutInfo.visibleItemsInfo.firstOrNull()
-        val anchorKey = visibleItem?.key
-        val anchorOffset = listState.firstVisibleItemScrollOffset
-
-        appState.loadingEarlier = true
-
-        scope.launch {
-            try {
-                val r = withContext(Dispatchers.Default) {
-                    s.loadEarlier()
-                }
-
-                if (appState.search === s) {
-                    val newIndex = r.indexOfFirst {
-                        it.key == anchorKey
-                    }
-
-                    // Nastav pozici ještě před změnou seznamu.
-                    if (newIndex >= 0) {
-                        listState.requestScrollToItem(
-                            index = newIndex,
-                            scrollOffset = anchorOffset
-                        )
-                    }
-
-                    appState.journeys = r
-                    appState.hasEarlier = s.hasEarlier
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                if (appState.search === s) {
-                    appState.searchError =
-                        tr(R.string.search_earlier_failed, e.message.orEmpty())
-                }
-            } finally {
-                withContext(NonCancellable) {
-                    if (appState.search === s) {
-                        appState.loadingEarlier = false
-                    }
-                }
-            }
-        }
-    }
+    fun loadMore() = appState.loadMoreJourneys(scope)
+    fun loadEarlier() = appState.loadEarlierJourneys(scope)
 
     // Automaticky dotahuje, dokud je konec seznamu na dohled a server má další odjezdy.
     val nearEnd by remember {
@@ -1023,7 +846,7 @@ internal fun SearchScreen(
                                     modifier = Modifier.size(24.dp),
                                     color = MaterialTheme.colorScheme.primary,
                                     wavelength = 8.dp,
-                                    amplitude = 1.5f
+                                    amplitude = 1f
                                 )
                             } else {
                                 Icon(Icons.Default.Search, contentDescription = null)
@@ -1157,35 +980,44 @@ internal fun SearchScreen(
     }
 
     // odjezdy z nejbližší zastávky (podle polohy), obnova každou minutu
-    val nearby by produceState<NearbyDepartures?>(null, appState.userLoc, appState.indexedStops.isNotEmpty()) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val nearby by produceState<NearbyDepartures?>(null, appState.userLoc, appState.indexedStops.isNotEmpty(), lifecycleOwner) {
         // uložená karta z minula hned (jízdní řád se teprve načítá), čerstvý výpočet ji pak nahradí
         val u0 = appState.userLoc
         if (value == null && u0 != null) runCatching { api.cachedNearby(u0.first, u0.second) }.getOrNull()?.let { value = it }
-        while (true) {
-            val u = appState.userLoc
-            if (u != null) {
-                val res = runCatching {
-                    // stejná zastávka jako předvyplněné "Odkud": nejbližší po cestě (sdílený výpočet), ne vzdušnou čarou
-                    val near = runCatching { nearestFor(u.first, u.second).await() }.getOrNull()
-                    api.nearbyDepartures(u.first, u.second, near?.refined ?: near?.cands?.firstOrNull())
-                }
-                // zrušení (změna polohy restartuje výpočet) se nesmí tvářit jako "nic nenalezeno", jinak karta bliká
-                res.exceptionOrNull()?.let { if (it is kotlinx.coroutines.CancellationException) throw it }
-                res.onFailure { android.util.Log.w("Nearby", "odjezdy z blízké zastávky: ${it.message}") }
-                if (res.isSuccess) {
-                    val fresh = res.getOrNull()
-                    if (fresh != null) {
-                        value = fresh
-                        api.saveNearbySnapshot(u.first, u.second, fresh)
-                    } else if (value?.cached == true) {
-                        // čerstvý výpočet doběhl a nic nenašel (mimo dosah): uložená karta už neplatí
-                        value = null
+        var nextRunMs = 0L
+        // jen když je appka vidět; po návratu z pozadí se přepočítá, až když je výsledek starší než interval obnovy
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            val wait = nextRunMs - android.os.SystemClock.elapsedRealtime()
+            if (wait > 0) delay(wait)
+            while (true) {
+                val u = appState.userLoc
+                if (u != null) {
+                    val res = runCatching {
+                        // stejná zastávka jako předvyplněné "Odkud": nejbližší po cestě (sdílený výpočet), ne vzdušnou čarou
+                        val near = runCatching { nearestFor(u.first, u.second).await() }.getOrNull()
+                        api.nearbyDepartures(u.first, u.second, near?.refined ?: near?.cands?.firstOrNull())
+                    }
+                    // zrušení (změna polohy restartuje výpočet) se nesmí tvářit jako "nic nenalezeno", jinak karta bliká
+                    res.exceptionOrNull()?.let { if (it is kotlinx.coroutines.CancellationException) throw it }
+                    res.onFailure { android.util.Log.w("Nearby", "odjezdy z blízké zastávky: ${it.message}") }
+                    if (res.isSuccess) {
+                        val fresh = res.getOrNull()
+                        if (fresh != null) {
+                            value = fresh
+                            api.saveNearbySnapshot(u.first, u.second, fresh)
+                        } else if (value?.cached == true) {
+                            // čerstvý výpočet doběhl a nic nenašel (mimo dosah): uložená karta už neplatí
+                            value = null
+                        }
                     }
                 }
+                // na načtení jízdního řádu se čeká uvnitř nearbyDepartures (hned po dokončení), tady jen obnova za minutu;
+                // prázdný výsledek (mimo dosah, chyba) se zkusí o něco dřív
+                val interval = if (value == null) 15_000L else 60_000L
+                nextRunMs = android.os.SystemClock.elapsedRealtime() + interval
+                delay(interval)
             }
-            // na načtení jízdního řádu se čeká uvnitř nearbyDepartures (hned po dokončení), tady jen obnova za minutu;
-            // prázdný výsledek (mimo dosah, chyba) se zkusí o něco dřív
-            delay(if (value == null) 15_000 else 60_000)
         }
     }
 

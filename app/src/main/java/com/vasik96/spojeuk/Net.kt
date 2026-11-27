@@ -167,176 +167,12 @@ class Net private constructor(
         }
     }
 
-    fun raptor(srcs: List<Int>, dsts: Set<Int>, t0Sec: Int, kmax: Int = 4, modeFilter: ModeFilter = ModeFilter.ALL): List<Journey> {
-        val foot = tt.foot
-        val INF = 1_000_000_000
-        val arrs = Array(kmax + 1) { HashMap<Int, Int>() }
-        val par = Array(kmax + 1) { HashMap<Int, ParentRef>() }
-        val best = HashMap<Int, Int>()
-        var marked = HashSet<Int>()
+    fun raptor(srcs: List<Int>, dsts: Set<Int>, t0Sec: Int, kmax: Int = 4, modeFilter: ModeFilter = ModeFilter.ALL): List<Journey> =
+        Raptor(patterns, stopPats, tt.foot) { tt.trips.category(it) }
+            .search(srcs, dsts, t0Sec, kmax, modeFilter)
+            .map { buildJourney(it) }
 
-        for (s in srcs) {
-            arrs[0][s] = t0Sec
-            best[s] = t0Sec
-            marked.add(s)
-        }
-        val fs = foot.data
-        for (s in srcs) {
-            for (q in foot.from(s) until foot.to(s) step 2) {
-                val s2 = fs[q]; val d = fs[q + 1]
-                if (t0Sec + d < (best[s2] ?: INF)) {
-                    arrs[0][s2] = t0Sec + d
-                    best[s2] = t0Sec + d
-                    par[0][s2] = ParentRef.Walk(s, d)
-                    marked.add(s2)
-                }
-            }
-        }
-
-        var target = INF
-        val found = ArrayList<Journey>()
-
-        for (k in 1..kmax) {
-            val queue = HashMap<Int, Int>()
-            for (s in marked) {
-                val sp = stopPats.data
-                for (q in stopPats.from(s) until stopPats.to(s) step 2) {
-                    val pi = sp[q]; val pos = sp[q + 1]
-                    val currentMin = queue[pi] ?: INF
-                    if (pos < currentMin) queue[pi] = pos
-                }
-            }
-
-            val newMarked = HashSet<Int>()
-            val prevArrs = arrs[k - 1]
-            val curArrs = arrs[k]
-            val curPar = par[k]
-            val mt = if (k == 1) 0 else MIN_TRANSFER
-
-            for ((pi, start) in queue) {
-                val pattern = patterns[pi]
-                val stops = pattern.stops
-                var trip = -1
-                var board = -1
-                var boardPrev = INF   // příjezd 1. spoje na zastávku nástupu (menší = dřívější přestup)
-
-                for (i in start until stops.size) {
-                    val s = stops[i]
-                    if (trip >= 0) {
-                        val a = pattern.arr(trip, i)
-                        if (a < (best[s] ?: INF) && a < target) {
-                            best[s] = a
-                            curArrs[s] = a
-                            curPar[s] = ParentRef.Ride(pi, trip, board, i)
-                            newMarked.add(s)
-                        }
-                    }
-                    val p = prevArrs[s]
-                    if (p != null) {
-                        val m = pattern.m
-                        var j = pattern.firstDepAtOrAfter(i, p + mt)
-                        if (!modeFilter.isAll) {
-                            while (j < m) {
-                                val tid = pattern.tid(j)
-                                if (modeFilter.accepts(tt.trips.category(tid))) break
-                                j++
-                            }
-                        }
-                        if (j < m && (trip < 0 || j < trip || (j == trip && p < boardPrev))) {
-                            trip = j
-                            board = i
-                            boardPrev = p
-                        }
-                    }
-                }
-            }
-
-            for (s in newMarked.toList()) {
-                val curS = curArrs[s] ?: continue
-                for (q in foot.from(s) until foot.to(s) step 2) {
-                    val s2 = fs[q]; val d = fs[q + 1]
-                    val a = curS + d
-                    if (a < (best[s2] ?: INF) && a < target) {
-                        best[s2] = a
-                        curArrs[s2] = a
-                        curPar[s2] = ParentRef.Walk(s, d)
-                        newMarked.add(s2)
-                    }
-                }
-            }
-
-            marked = newMarked
-            val hit = dsts.mapNotNull { d -> curArrs[d]?.let { it to d } }
-            if (hit.isNotEmpty()) {
-                val minHit = hit.minByOrNull { it.first }!!
-                target = minHit.first
-                found.add(buildJourney(par, k, minHit.second))
-            }
-            if (marked.isEmpty()) break
-        }
-
-        return found
-    }
-
-    private fun buildJourney(par: Array<HashMap<Int, ParentRef>>, startK: Int, targetStop: Int): Journey {
-        val legs = ArrayList<Leg>()
-        var s = targetStop
-        var k = startK
-
-        while (true) {
-            val p = par[k][s] ?: break
-            when (p) {
-                is ParentRef.Walk -> {
-                    legs.add(Leg(kind = "walk", fromStop = p.fromStop, toStop = s, dep = 0, arr = p.duration))
-                    s = p.fromStop
-                }
-                is ParentRef.Ride -> {
-                    val pattern = patterns[p.patternIdx]
-                    val stops = pattern.stops
-                    val arr = IntArray(stops.size) { i -> pattern.arr(p.tripIdx, i) }
-                    val dep = IntArray(stops.size) { i -> pattern.dep(p.tripIdx, i) }
-                    val seq = (p.boardIdx..p.alightIdx).map { i -> Triple(stops[i], arr[i], dep[i]) }
-
-                    legs.add(
-                        Leg(
-                            kind = "ride",
-                            fromStop = stops[p.boardIdx],
-                            toStop = stops[p.alightIdx],
-                            dep = dep[p.boardIdx],
-                            arr = arr[p.alightIdx],
-                            tid = pattern.tid(p.tripIdx),
-                            stops = seq,
-                            t0 = dep[0],
-                            t1 = arr.last()
-                        )
-                    )
-                    s = stops[p.boardIdx]
-                    k -= 1
-                }
-            }
-        }
-
-        legs.reverse()
-
-        // časy pěších úseků se dopočítají podle sousedních jízd
-        for (i in legs.indices) {
-            val l = legs[i]
-            if (l.kind == "walk") {
-                val dur = l.arr
-                val nxt = legs.subList(i + 1, legs.size).firstOrNull { it.kind == "ride" }
-                val prv = if (i > 0) legs[i - 1] else null
-                if (prv != null && prv.kind == "ride") {
-                    l.dep = prv.arr
-                    l.arr = prv.arr + dur
-                } else if (nxt != null) {
-                    l.dep = nxt.dep - dur
-                    l.arr = nxt.dep
-                }
-            }
-        }
-
-
-
+    private fun buildJourney(legs: List<Leg>): Journey {
         val rides = legs.filter { it.kind == "ride" }
         val firstRide = rides.first()
         val firstWalk = legs.first().takeIf { it.kind == "walk" }
@@ -416,6 +252,193 @@ class Net private constructor(
             lines = allLines,
             transferList = transferList
         )
+    }
+}
+
+/**
+ * Jádro RAPTORu: jen vzory jízd, pěší přesuny a druh spoje (pro filtr), bez jízdního řádu a databáze,
+ * takže jde testovat na JVM. Texty spojení (linky, cíle, přestupy) doplní [Net].
+ */
+internal class Raptor(
+    private val patterns: List<Pattern>,
+    private val stopPats: IntCsr,
+    private val foot: IntCsr,
+    private val category: (Int) -> MapCategory,
+) {
+    /**
+     * Úseky nalezených spojení z [srcs] do kterékoli z [dsts] s odchodem od [t0Sec]: pro každý počet jízd
+     * (1..[kmax]), který zlepšil příjezd do cíle, jedno spojení (méně přestupů = dřív v seznamu).
+     */
+    fun search(srcs: List<Int>, dsts: Set<Int>, t0Sec: Int, kmax: Int = 4, modeFilter: ModeFilter = ModeFilter.ALL): List<List<Leg>> {
+        val INF = 1_000_000_000
+        val arrs = Array(kmax + 1) { HashMap<Int, Int>() }
+        val par = Array(kmax + 1) { HashMap<Int, ParentRef>() }
+        val best = HashMap<Int, Int>()
+        var marked = HashSet<Int>()
+
+        for (s in srcs) {
+            arrs[0][s] = t0Sec
+            best[s] = t0Sec
+            marked.add(s)
+        }
+        val fs = foot.data
+        for (s in srcs) {
+            for (q in foot.from(s) until foot.to(s) step 2) {
+                val s2 = fs[q]; val d = fs[q + 1]
+                if (t0Sec + d < (best[s2] ?: INF)) {
+                    arrs[0][s2] = t0Sec + d
+                    best[s2] = t0Sec + d
+                    par[0][s2] = ParentRef.Walk(s, d)
+                    marked.add(s2)
+                }
+            }
+        }
+
+        var target = INF
+        val found = ArrayList<List<Leg>>()
+
+        for (k in 1..kmax) {
+            val queue = HashMap<Int, Int>()
+            for (s in marked) {
+                val sp = stopPats.data
+                for (q in stopPats.from(s) until stopPats.to(s) step 2) {
+                    val pi = sp[q]; val pos = sp[q + 1]
+                    val currentMin = queue[pi] ?: INF
+                    if (pos < currentMin) queue[pi] = pos
+                }
+            }
+
+            val newMarked = HashSet<Int>()
+            val prevArrs = arrs[k - 1]
+            val curArrs = arrs[k]
+            val curPar = par[k]
+            val mt = if (k == 1) 0 else MIN_TRANSFER
+
+            for ((pi, start) in queue) {
+                val pattern = patterns[pi]
+                val stops = pattern.stops
+                var trip = -1
+                var board = -1
+                var boardPrev = INF   // příjezd 1. spoje na zastávku nástupu (menší = dřívější přestup)
+
+                for (i in start until stops.size) {
+                    val s = stops[i]
+                    if (trip >= 0) {
+                        val a = pattern.arr(trip, i)
+                        if (a < (best[s] ?: INF) && a < target) {
+                            best[s] = a
+                            curArrs[s] = a
+                            curPar[s] = ParentRef.Ride(pi, trip, board, i)
+                            newMarked.add(s)
+                        }
+                    }
+                    val p = prevArrs[s]
+                    if (p != null) {
+                        val m = pattern.m
+                        var j = pattern.firstDepAtOrAfter(i, p + mt)
+                        if (!modeFilter.isAll) {
+                            while (j < m) {
+                                val tid = pattern.tid(j)
+                                if (modeFilter.accepts(category(tid))) break
+                                j++
+                            }
+                        }
+                        if (j < m && (trip < 0 || j < trip || (j == trip && p < boardPrev))) {
+                            trip = j
+                            board = i
+                            boardPrev = p
+                        }
+                    }
+                }
+            }
+
+            for (s in newMarked.toList()) {
+                val curS = curArrs[s] ?: continue
+                for (q in foot.from(s) until foot.to(s) step 2) {
+                    val s2 = fs[q]; val d = fs[q + 1]
+                    val a = curS + d
+                    if (a < (best[s2] ?: INF) && a < target) {
+                        best[s2] = a
+                        curArrs[s2] = a
+                        curPar[s2] = ParentRef.Walk(s, d)
+                        newMarked.add(s2)
+                    }
+                }
+            }
+
+            marked = newMarked
+            val hit = dsts.mapNotNull { d -> curArrs[d]?.let { it to d } }
+            if (hit.isNotEmpty()) {
+                val minHit = hit.minByOrNull { it.first }!!
+                target = minHit.first
+                found.add(legsOf(par, k, minHit.second))
+            }
+            if (marked.isEmpty()) break
+        }
+
+        return found
+    }
+
+
+    /** Úseky spojení zpětně od cíle podle rodičů; časy pěších úseků podle sousedních jízd. */
+    private fun legsOf(par: Array<HashMap<Int, ParentRef>>, startK: Int, targetStop: Int): List<Leg> {
+        val legs = ArrayList<Leg>()
+        var s = targetStop
+        var k = startK
+
+        while (true) {
+            val p = par[k][s] ?: break
+            when (p) {
+                is ParentRef.Walk -> {
+                    legs.add(Leg(kind = "walk", fromStop = p.fromStop, toStop = s, dep = 0, arr = p.duration))
+                    s = p.fromStop
+                }
+                is ParentRef.Ride -> {
+                    val pattern = patterns[p.patternIdx]
+                    val stops = pattern.stops
+                    val arr = IntArray(stops.size) { i -> pattern.arr(p.tripIdx, i) }
+                    val dep = IntArray(stops.size) { i -> pattern.dep(p.tripIdx, i) }
+                    val seq = (p.boardIdx..p.alightIdx).map { i -> Triple(stops[i], arr[i], dep[i]) }
+
+                    legs.add(
+                        Leg(
+                            kind = "ride",
+                            fromStop = stops[p.boardIdx],
+                            toStop = stops[p.alightIdx],
+                            dep = dep[p.boardIdx],
+                            arr = arr[p.alightIdx],
+                            tid = pattern.tid(p.tripIdx),
+                            stops = seq,
+                            t0 = dep[0],
+                            t1 = arr.last()
+                        )
+                    )
+                    s = stops[p.boardIdx]
+                    k -= 1
+                }
+            }
+        }
+
+        legs.reverse()
+
+        // časy pěších úseků se dopočítají podle sousedních jízd
+        for (i in legs.indices) {
+            val l = legs[i]
+            if (l.kind == "walk") {
+                val dur = l.arr
+                val nxt = legs.subList(i + 1, legs.size).firstOrNull { it.kind == "ride" }
+                val prv = if (i > 0) legs[i - 1] else null
+                if (prv != null && prv.kind == "ride") {
+                    l.dep = prv.arr
+                    l.arr = prv.arr + dur
+                } else if (nxt != null) {
+                    l.dep = nxt.dep - dur
+                    l.arr = nxt.dep
+                }
+            }
+        }
+
+        return legs
     }
 }
 

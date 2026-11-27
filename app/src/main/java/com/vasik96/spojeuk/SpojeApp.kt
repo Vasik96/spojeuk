@@ -89,7 +89,8 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 @Composable
 internal fun SpojeApp() {
     val context = LocalContext.current
-    val appState = remember { SpojeAppState(context) }
+    // rememberSaveable: po ukončení procesu na pozadí se obnoví zadání hledání, záložka a pohled mapy
+    val appState = androidx.compose.runtime.saveable.rememberSaveable(saver = SpojeAppState.saver(context)) { SpojeAppState(context) }
     val api = remember { TransitRepository.get(context) }
     val scope = rememberCoroutineScope()
 
@@ -229,6 +230,24 @@ internal fun SpojeApp() {
     LaunchedEffect(appState.selectedTab) {
         if (appState.selectedTab == 1 && !mapVisited) {
             mapVisited = true
+        }
+    }
+
+    // zkratky launcheru: Mapa / spojení Odkud → Kam (rovnou hledá)
+    LaunchedEffect(Unit) {
+        AppShortcuts.pending.collect { req ->
+            if (req == null) return@collect
+            AppShortcuts.pending.value = null
+            AppShortcuts.reportUsed(context, req)
+            appState.legSheet = null
+            appState.detailJourney = null
+            when (req) {
+                AppShortcuts.Request.OpenMap -> appState.selectedTab = 1
+                is AppShortcuts.Request.Search -> {
+                    appState.selectedTab = 0
+                    appState.requestSearch(req.fromName, req.toName)
+                }
+            }
         }
     }
 

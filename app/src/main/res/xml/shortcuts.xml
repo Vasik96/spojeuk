@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Statické zkratky launcheru (dlouhé podržení ikony). Spojení "Odkud → Kam" přidává appka dynamicky (AppShortcuts). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="map"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_map"
+        android:shortcutShortLabel="@string/shortcut_map_short"
+        android:shortcutLongLabel="@string/shortcut_map_long">
+        <intent
+            android:action="com.vasik96.spojeuk.OPEN_MAP"
+            android:targetPackage="com.vasik96.spojeuk"
+            android:targetClass="com.vasik96.spojeuk.MainActivity" />
+    </shortcut>
+</shortcuts>

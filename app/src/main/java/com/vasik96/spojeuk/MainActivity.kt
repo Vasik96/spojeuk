@@ -14,12 +14,15 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         handleIntent(intent)
+        // zkratka launcheru jen při skutečném spuštění: po obnově (ukončený proces) by se jinak provedla znovu
+        if (savedInstanceState == null) AppShortcuts.handle(intent)
         setContent { SpojeApp() }
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)
+        AppShortcuts.handle(intent)
     }
 
     /** Ťuknutí na notifikaci sledované cesty: otevřít její detail. */

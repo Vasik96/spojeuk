@@ -123,7 +123,7 @@ internal fun GoogleVehicleOverlay(
                 val bv = baseView
                 val show = sIdx != null && bv != null && cam.zoom >= STOP_MIN_ZOOM_GOOGLE
                 // velký okraj: při rychlém posunu (33 ms mezi přepočty) musí být zastávky za okrajem obrazovky už připravené
-            if (show) layer.setStops(sIdx.inView(bv.expanded(STOP_VIEW_MARGIN), limit = STOP_VIEW_LIMIT))
+                if (show) layer.setStops(sIdx.inView(bv.expanded(STOP_VIEW_MARGIN), limit = STOP_VIEW_LIMIT))
                 layer.setStopsVisible(show, now)
             }
 

@@ -2,6 +2,9 @@
 
 package com.vasik96.spojeuk
 
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
@@ -104,12 +107,15 @@ internal fun VehicleDetailBottomSheet(
 
     val currentVehicle by rememberUpdatedState(vehicle)
 
-    LaunchedEffect(vehicle.uid) {
-        while (true) {
-            runCatching { api.vehicleTripInfo(currentVehicle) }
-                .getOrNull()
-                ?.let { tripInfo = it }   // při chybě necháme poslední známou hodnotu
-            delay(10_000.milliseconds)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(vehicle.uid, lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {   // na pozadí nestahovat
+            while (true) {
+                runCatching { api.vehicleTripInfo(currentVehicle) }
+                    .getOrNull()
+                    ?.let { tripInfo = it }   // při chybě necháme poslední známou hodnotu
+                delay(10_000.milliseconds)
+            }
         }
     }
 
