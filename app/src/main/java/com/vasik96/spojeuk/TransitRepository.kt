@@ -78,8 +78,46 @@ class TransitRepository(context: Context? = null) {
     fun setDisabledVehicleSources(ids: Set<String>) {
         hub.setDisabledSources(ids)
     }
+    /**
+     * Zvýší se, když se za běhu vymění jízdní řád nebo trasy: mezipaměti podle id spoje / tvaru (trasy vozidel
+     * v [VehicleRoutes]) se pak zahodí, jinak by id ze starého jízdního řádu ukazovala na jiné spoje.
+     */
+    @Volatile var dataGeneration = 0
+        private set
+
+    /** Výsledek nasazení nového jízdního řádu po aktualizaci (viz [applyStagedTimetable]). */
+    enum class TimetableApply { APPLIED, NOTHING, AFTER_TRACKING, AFTER_RESTART }
+
+    /**
+     * Stažený jízdní řád se nasadí hned, bez restartu ([TimetableStore.applyPendingNow]). Během sledování cesty se
+     * čeká na jeho konec (sledované spojení drží id spojů a zastávek ze současného jízdního řádu).
+     */
+    suspend fun applyStagedTimetable(): TimetableApply {
+        if (!store.hasPending()) return TimetableApply.NOTHING
+        if (JourneyTracker.current.value != null) return TimetableApply.AFTER_TRACKING
+        val r = store.applyPendingNow()
+        return when (r.swap) {
+            TimetableStore.Swap.APPLIED -> {
+                quickStops = null
+                dataGeneration++
+                // starý jízdní řád ještě chvíli slouží rozběhnutým hledáním a párování, pak se zavře. Jen slabý odkaz:
+                // když ho už nikdo nedrží, GC ho uvolní hned (dva jízdní řády v paměti = ~300 MB haldy)
+                r.retired?.let { old ->
+                    val ref = java.lang.ref.WeakReference(old.timetable)
+                    scope.launch { kotlinx.coroutines.delay(RETIRE_DELAY_MS); ref.get()?.retire() }
+                }
+                TimetableApply.APPLIED
+            }
+            TimetableStore.Swap.NOTHING -> TimetableApply.NOTHING
+            TimetableStore.Swap.LOW_MEMORY, TimetableStore.Swap.FAILED -> TimetableApply.AFTER_RESTART
+        }
+    }
+
+    fun hasStagedTimetable(): Boolean = store.hasPending()
+
     private fun onTimetableLoaded(tt: Timetable) {
         Log.i(TAG, "DB: hasGid=${tt.hasGid} trips=${tt.meta["trips"]} tag=${tt.meta["tag"]}")
+        TripEnricher.clearCache()   // přiřazení vozů ke spojům drží id spojů (při výměně za běhu by byla cizí)
         prewarmPlanner()
         hub.onTimetableLoaded()
         scope.launch { runCatching { saveTrainLines(tt.trainLineTable()) }.onFailure { Log.w(TAG, "uložení linek vlaků selhalo: ${it.message}") } }
@@ -324,6 +362,7 @@ class TransitRepository(context: Context? = null) {
         withContext(Dispatchers.IO) {
             log(tr(R.string.dl_checking_shapes))
             val updated = shapes.sync(http, force = true, forceDownload = forceDownload)
+            if (updated) dataGeneration++   // trasy vozidel se přepočítají nad novými tvary
             runCatching { trainShapes.sync(http, force = true, forceDownload = forceDownload) }
                 .onFailure { Log.w(TAG, "sync tras vlaků selhal: ${it.message}") }
             runCatching { pidShapes.sync(http, force = true, forceDownload = forceDownload) }
@@ -963,6 +1002,8 @@ class TransitRepository(context: Context? = null) {
 
     companion object {
         const val TAG = "TransitRepository"
+        /** Jak dlouho po výměně za běhu ještě žije starý jízdní řád (doběhnou nad ním rozběhnutá hledání). */
+        private const val RETIRE_DELAY_MS = 30_000L
 
         @Volatile
         private var instance: TransitRepository? = null

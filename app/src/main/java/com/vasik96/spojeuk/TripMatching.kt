@@ -67,6 +67,9 @@ object TripEnricher {
     private const val PID_CACHE_MS = 90_000L
     private const val PID_CACHE_MAX = 6_000
 
+    /** Nový jízdní řád (jiná id spojů): zapamatovaná přiřazení neplatí. */
+    fun clearCache() = pidCache.clear()
+
     private fun matchCached(v: Vehicle, tt: Timetable, m: TripMatcher): TripMatchResult? {
         val now = System.currentTimeMillis()
         val c = pidCache[v.uid]

@@ -7,6 +7,22 @@ import androidx.compose.material.icons.filled.Place
 import androidx.compose.foundation.layout.Box
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.material3.CircularWavyProgressIndicator
+import androidx.compose.material3.LinearWavyProgressIndicator
+import androidx.compose.material3.ProgressIndicatorDefaults
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -57,14 +73,12 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
@@ -737,69 +751,7 @@ private fun DataUpdatesScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        if (appState.isUpdatingData || appState.updateStatusMessage != null) {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                ),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.5.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                        Text(
-                            stringResource(R.string.updates_in_progress),
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    }
-                    appState.updateStatusMessage?.let { msg ->
-                        Text(
-                            msg,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    }
-                    if (appState.updateProgress > 0f) {
-                        LinearProgressIndicator(
-                            progress = { appState.updateProgress },
-                            modifier = Modifier.fillMaxWidth(),
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                    }
-                }
-            }
-        }
-
-        appState.updateSuccess?.let { successMsg ->
-            val (successContainer, onSuccessContainer) = successColors()
-            StatusCard(
-                message = successMsg,
-                icon = Icons.Default.CheckCircle,
-                container = successContainer,
-                content = onSuccessContainer
-            )
-        }
-
-        appState.updateError?.let { errorMsg ->
-            StatusCard(
-                message = errorMsg,
-                icon = Icons.Default.Error,
-                container = MaterialTheme.colorScheme.errorContainer,
-                content = MaterialTheme.colorScheme.onErrorContainer
-            )
-        }
+        UpdateBanner(appState)
 
         Card(
             colors = CardDefaults.cardColors(
@@ -939,6 +891,128 @@ private fun DataUpdatesScreen(
     }
 }
 
+/** Banner aktualizace dat: probíhá / hotovo / chyba (jeden slot, přechody mezi stavy se animují). */
+private sealed interface BannerState {
+    data object Running : BannerState
+    data class Done(val message: String) : BannerState
+    data class Failed(val message: String) : BannerState
+}
+
+@Composable
+private fun UpdateBanner(appState: SpojeAppState) {
+    val current: BannerState? = when {
+        appState.isUpdatingData || appState.updateStatusMessage != null -> BannerState.Running
+        appState.updateError != null -> BannerState.Failed(appState.updateError!!)
+        appState.updateSuccess != null -> BannerState.Done(appState.updateSuccess!!)
+        else -> null
+    }
+    // poslední zobrazený stav: banner při skrývání dojede s obsahem, ne prázdný
+    var shown by remember { mutableStateOf(current) }
+    if (current != null) shown = current
+
+    AnimatedVisibility(
+        visible = current != null,
+        enter = fadeIn(tween(250)) + expandVertically(spring(stiffness = Spring.StiffnessMediumLow)) +
+            scaleIn(spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow), initialScale = 0.92f),
+        exit = fadeOut(tween(180)) + shrinkVertically(tween(250)) + scaleOut(tween(180), targetScale = 0.95f),
+    ) {
+        AnimatedContent(
+            targetState = shown,
+            contentKey = { it?.javaClass },
+            transitionSpec = {
+                (fadeIn(tween(250, delayMillis = 80)) +
+                    scaleIn(spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow), initialScale = 0.9f))
+                    .togetherWith(fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.96f))
+                    .using(SizeTransform(clip = false) { _, _ -> spring(stiffness = Spring.StiffnessMediumLow) })
+            },
+            label = "updateBanner",
+        ) { st ->
+            when (st) {
+                BannerState.Running -> UpdateProgressCard(appState)
+                is BannerState.Done -> {
+                    val (successContainer, onSuccessContainer) = successColors()
+                    StatusCard(st.message, Icons.Default.CheckCircle, successContainer, onSuccessContainer)
+                }
+                is BannerState.Failed -> StatusCard(
+                    st.message, Icons.Default.Error,
+                    MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer
+                )
+                null -> Spacer(Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+/** Probíhající aktualizace: vlnité indikátory, plynulý průběh, hláška kroku s přechodem jen při změně kroku. */
+@Composable
+private fun UpdateProgressCard(appState: SpojeAppState) {
+    // neutrální podklad (surfaceContainerHigh), na něm indikátory v primary dobře vyniknou
+    val onContainer = MaterialTheme.colorScheme.onSurface
+    val indicator = MaterialTheme.colorScheme.primary
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                CircularWavyProgressIndicator(
+                    modifier = Modifier.size(28.dp),
+                    color = indicator,
+                    trackColor = indicator.copy(alpha = 0.3f),
+                )
+                Text(
+                    stringResource(R.string.updates_in_progress),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = onContainer
+                )
+            }
+            // čísla (MB, počty spojů) se mění často: přechod jen při změně kroku (text bez čísel), čísla se mění na místě
+            AnimatedContent(
+                targetState = appState.updateStatusMessage.orEmpty(),
+                contentKey = { msg -> msg.filterNot { it.isDigit() } },
+                transitionSpec = {
+                    (fadeIn(tween(220, delayMillis = 60)) + slideInVertically(tween(260)) { it / 2 })
+                        .togetherWith(fadeOut(tween(120)) + slideOutVertically(tween(160)) { -it / 2 })
+                        .using(SizeTransform(clip = false))
+                },
+                label = "updateStep",
+            ) { msg ->
+                Text(msg, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth())
+            }
+            // průběh: pružina navazuje na rychlost => plynulý pohyb i při řídkých hlášeních; bez známého postupu neurčitý
+            val target = appState.updateProgress.coerceIn(0f, 1f)
+            val progress by animateFloatAsState(target, ProgressIndicatorDefaults.ProgressAnimationSpec, label = "updateProgress")
+            AnimatedContent(
+                targetState = target > 0f,
+                transitionSpec = { fadeIn(tween(250)).togetherWith(fadeOut(tween(150))) },
+                label = "updateProgressMode",
+            ) { determinate ->
+                if (determinate) {
+                    LinearWavyProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = indicator,
+                        trackColor = indicator.copy(alpha = 0.3f),
+                    )
+                } else {
+                    LinearWavyProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = indicator,
+                        trackColor = indicator.copy(alpha = 0.3f),
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun StatusCard(
     message: String,
@@ -955,7 +1029,17 @@ private fun StatusCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Icon(imageVector = icon, contentDescription = null, tint = content)
+            // ikona naskočí s pružinou, když se banner objeví
+            val iconScale = remember { androidx.compose.animation.core.Animatable(0.4f) }
+            LaunchedEffect(Unit) {
+                iconScale.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium))
+            }
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = content,
+                modifier = Modifier.graphicsLayer { scaleX = iconScale.value; scaleY = iconScale.value }
+            )
             Text(
                 message,
                 style = MaterialTheme.typography.bodyMedium,

@@ -170,7 +170,28 @@ class Timetable(val dbFile: File) {
     private var sharedDb: SQLiteDatabase? = null
 
     private fun readDb(): SQLiteDatabase = synchronized(dbLock) {
-        sharedDb?.takeIf { it.isOpen } ?: SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY).also { sharedDb = it }
+        sharedDb?.takeIf { it.isOpen }?.let { return@synchronized it }
+        // vyřazený jízdní řád (vyměněný za běhu): pod jeho cestou už je jiný soubor s jinými id spojů
+        check(!retired) { "jízdní řád byl vyměněn za novější" }
+        SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY).also { sharedDb = it }
+    }
+
+    @Volatile private var retired = false
+
+    /**
+     * Před výměnou souboru za běhu ([TimetableStore.applyPendingNow]): otevře sdílené spojení a mezipaměť sítě, takže
+     * tahle instance dál čte svoje (stará) data i po přejmenování souboru (otevřený soubor zůstává platný).
+     */
+    fun pinFiles() {
+        readDb()
+        netCache
+    }
+
+    /** Po výměně a odkladu: zavře spojení; další čtení selže výjimkou, místo aby tiše četlo nový soubor. */
+    fun retire() = synchronized(dbLock) {
+        retired = true
+        runCatching { sharedDb?.close() }
+        sharedDb = null
     }
 
     /** Zavře sdílené spojení (volat při zahazování tohoto jízdního řádu). */

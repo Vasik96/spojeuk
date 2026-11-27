@@ -79,6 +79,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -981,7 +982,11 @@ internal fun SearchScreen(
 
     // odjezdy z nejbližší zastávky (podle polohy), obnova každou minutu
     val lifecycleOwner = LocalLifecycleOwner.current
-    val nearby by produceState<NearbyDepartures?>(null, appState.userLoc, appState.indexedStops.isNotEmpty(), lifecycleOwner) {
+    // timetableRev: po výměně jízdního řádu za běhu nový výpočet (odjezdy nesou id spojů ze starého)
+    var nearbyRev by remember { mutableIntStateOf(appState.timetableRev) }
+    val nearby by produceState<NearbyDepartures?>(null, appState.userLoc, appState.indexedStops.isNotEmpty(), lifecycleOwner, appState.timetableRev) {
+        // stará karta (id spojů ze starého jízdního řádu) se nesmí ukazovat ani do přepočtu: ťuknutí by otevřelo cizí spoj
+        if (nearbyRev != appState.timetableRev) { value = null; nearbyRev = appState.timetableRev }
         // uložená karta z minula hned (jízdní řád se teprve načítá), čerstvý výpočet ji pak nahradí
         val u0 = appState.userLoc
         if (value == null && u0 != null) runCatching { api.cachedNearby(u0.first, u0.second) }.getOrNull()?.let { value = it }

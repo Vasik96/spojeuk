@@ -928,7 +928,13 @@ internal class VehicleRoutes(private val api: TransitRepository) {
     }
     private val gate = Semaphore(3)   // OSRM / SQLite nezahltíme sty souběžných dotazů
 
+    /** Generace dat ([TransitRepository.dataGeneration]), pro kterou platí [byTid]. */
+    private var generation = api.dataGeneration
+
     suspend fun get(v: Vehicle): PathMeasure? {
+        // nový jízdní řád nebo trasy za běhu: id spojů ukazují jinam, uložené trasy neplatí
+        val gen = api.dataGeneration
+        if (gen != generation) { byTid.clear(); generation = gen }
         val tid = api.resolveTripId(v) ?: return null
         if (byTid.containsKey(tid)) return byTid[tid]
         val pts = gate.withPermit { api.routeForTrip(tid) }
@@ -942,7 +948,7 @@ internal class VehicleRoutes(private val api: TransitRepository) {
                 )
             } else null
         }
-        byTid[tid] = pm
+        if (api.dataGeneration == gen) byTid[tid] = pm   // mezitím vyměněná data: neukládat
         return pm
     }
 }

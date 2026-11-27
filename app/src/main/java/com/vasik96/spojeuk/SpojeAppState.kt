@@ -537,11 +537,18 @@ class SpojeAppState(
     fun updateNotifyAppUpdates(on: Boolean) {
         notifyAppUpdates = on
         settingsPrefs.edit().putBoolean("notify_app_updates", on).apply()
-        if (!on) appUpdateOffer = null
+        if (!on && !appUpdateManual) appUpdateOffer = null
     }
 
-    /** Novější verze nalezená po spuštění: zobrazí se dialog (null = nic). */
+    /** Novější verze (po spuštění, nebo z nastavení): zobrazí se dialog (null = nic). */
     internal var appUpdateOffer by mutableStateOf<AppRelease?>(null)
+    /** Dialog otevřený ručně z nastavení (bez "Znovu neukazovat"). */
+    internal var appUpdateManual by mutableStateOf(false)
+
+    internal fun showAppUpdate(release: AppRelease, manual: Boolean) {
+        appUpdateManual = manual
+        appUpdateOffer = release
+    }
 
     fun updateShowOnlyMapFilters(showOnly: Boolean) {
         showOnlyMapFilters = showOnly
@@ -694,6 +701,7 @@ class SpojeAppState(
                     progress = { updateProgress = it },
                     forceShapes = false,   // při automatice stahovat shapes jen když se změnily
                 )
+                val applied = applyNewTimetable(api)
                 stopsLoading = true
                 val loaded = api.loadStops(
                     log = { updateStatusMessage = it },
@@ -701,8 +709,9 @@ class SpojeAppState(
                 )
                 updateIndexedStops(loaded)
                 stopsLoading = false
-            }.onSuccess {
-                updateSuccess = tr(R.string.upd_all_ok)
+                applied
+            }.onSuccess { applied ->
+                updateSuccess = withApplyNote(tr(R.string.upd_all_ok), applied)
                 updateStatusMessage = null
                 onSuccess()
             }.onFailure {
@@ -725,6 +734,7 @@ class SpojeAppState(
                     log = { updateStatusMessage = it },
                     progress = { updateProgress = it }
                 )
+                val applied = applyNewTimetable(api)
                 stopsLoading = true
                 val loaded = api.loadStops(
                     log = { updateStatusMessage = it },
@@ -732,15 +742,82 @@ class SpojeAppState(
                 )
                 updateIndexedStops(loaded)
                 stopsLoading = false
-            }.onSuccess {
-                updateSuccess = tr(R.string.upd_tt_ok)
+                applied
+            }.onSuccess { applied ->
+                updateSuccess = withApplyNote(tr(R.string.upd_tt_ok), applied)
                 updateStatusMessage = null
             }.onFailure {
+                stopsLoading = false
                 if (it is CancellationException) throw it
                 updateError = tr(R.string.upd_tt_failed, it.message.orEmpty())
                 updateStatusMessage = null
             }
             isUpdatingData = false
+        }
+    }
+
+    /** Nový jízdní řád čeká na konec sledování cesty, pak se nasadí sám (SpojeApp). */
+    var timetableSwapDeferred = false
+
+    /** Počet výměn jízdního řádu za běhu: klíč pro data odvozená z něj (zastávky na mapě, blízké odjezdy). */
+    var timetableRev by mutableIntStateOf(0)
+        private set
+
+    /** Stažený jízdní řád hned nasadit (bez restartu); při úspěchu zahodit vše, co drží id ze starého. */
+    private suspend fun applyNewTimetable(api: TransitRepository): TransitRepository.TimetableApply {
+        updateStatusMessage = tr(R.string.upd_applying)
+        val r = api.applyStagedTimetable()
+        when (r) {
+            TransitRepository.TimetableApply.APPLIED -> onTimetableSwapped()
+            TransitRepository.TimetableApply.AFTER_TRACKING -> timetableSwapDeferred = true
+            else -> Unit
+        }
+        return r
+    }
+
+    /** Sledování cesty skončilo a nový jízdní řád na něj čekal: nasadit teď. */
+    suspend fun applyDeferredTimetable(api: TransitRepository) {
+        if (!timetableSwapDeferred) return
+        timetableSwapDeferred = false
+        if (api.applyStagedTimetable() == TransitRepository.TimetableApply.APPLIED) {
+            onTimetableSwapped()
+            updateIndexedStops(api.loadStops())
+        }
+    }
+
+    private fun withApplyNote(base: String, r: TransitRepository.TimetableApply): String = when (r) {
+        TransitRepository.TimetableApply.AFTER_TRACKING -> "$base ${tr(R.string.upd_note_after_tracking)}"
+        TransitRepository.TimetableApply.AFTER_RESTART -> "$base ${tr(R.string.upd_note_after_restart)}"
+        else -> base
+    }
+
+    /**
+     * Jízdní řád se vyměnil za běhu: id spojů a zastávek jsou jiná, takže vše, co je drží (výsledky hledání, detail,
+     * trasa a hledaný vůz na mapě, panel zastávky), se zahodí. Otevřené výsledky se spočítají znovu (SearchScreen).
+     */
+    private fun onTimetableSwapped() {
+        timetableRev++
+        detailJourney = null
+        legSheet = null
+        selectedStop = null
+        selectedStopDeps = null
+        vehicleChoices = emptyList()
+        stopOpenSeq++
+        clearRoute()
+        nearestKey = null
+        nearestJob = null
+        searchJob?.cancel()
+        search = null
+        journeys = emptyList()
+        searchLoading = false
+        loadingMore = false
+        loadingEarlier = false
+        refreshing = false
+        if (showResults && from != null && to != null) {
+            pendingSearchRecord = false
+            restoredSearchPending = true
+        } else {
+            showResults = false
         }
     }
 

@@ -114,7 +114,7 @@ internal fun SpojeApp() {
     LaunchedEffect(appState.notifyAppUpdates) {
         if (!appState.notifyAppUpdates || BuildConfig.DEBUG) return@LaunchedEffect
         val rel = runCatching { UpdateChecker.fetchLatest() }.getOrNull() ?: return@LaunchedEffect
-        if (UpdateChecker.shouldNotify(rel, APP_VERSION, UpdateChecker.buildTimeMs)) appState.appUpdateOffer = rel
+        if (UpdateChecker.shouldNotify(rel, APP_VERSION, UpdateChecker.buildTimeMs)) appState.showAppUpdate(rel, manual = false)
     }
 
     // živé polohy rovnou při startu, ať jsou na mapě hned při jejím otevření
@@ -251,6 +251,16 @@ internal fun SpojeApp() {
         }
     }
 
+    // nový jízdní řád stažený během sledování cesty čeká na jeho konec, pak se nasadí bez restartu
+    LaunchedEffect(Unit) {
+        JourneyTracker.current.collect { tracked ->
+            if (tracked == null && appState.timetableSwapDeferred) {
+                runCatching { appState.applyDeferredTimetable(api) }
+                    .onFailure { if (it is CancellationException) throw it }
+            }
+        }
+    }
+
     // ťuknutí na notifikaci sledované cesty => detail spojení na záložce Spoje
     LaunchedEffect(Unit) {
         JourneyTracker.openRequested.collect { requested ->
@@ -355,7 +365,7 @@ internal fun SpojeApp() {
     MaterialTheme(colorScheme = scheme) {
         // uvnitř motivu aplikace, jinak by dialog měl výchozí (světlé) barvy i v tmavém režimu
         appState.appUpdateOffer?.let { rel ->
-            AppUpdateDialog(rel, onDismiss = { dontShowAgain ->
+            AppUpdateDialog(rel, manual = appState.appUpdateManual, onDismiss = { dontShowAgain ->
                 appState.appUpdateOffer = null
                 if (dontShowAgain) appState.updateNotifyAppUpdates(false)
             })

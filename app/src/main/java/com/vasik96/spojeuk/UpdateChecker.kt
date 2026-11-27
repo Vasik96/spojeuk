@@ -14,6 +14,10 @@ internal data class AppRelease(
     /** Stránka releasu (odkaz na stažení APK). */
     val url: String,
     val publishedMs: Long,
+    /** Přímý odkaz na APK z assetů releasu (stažení v aplikaci), null = release APK nemá. */
+    val apkUrl: String? = null,
+    /** Velikost APK v B (0 = neznámá). */
+    val apkSize: Long = 0L,
 )
 
 /**
@@ -45,10 +49,15 @@ internal object UpdateChecker {
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) error("HTTP ${resp.code}")
             val o = JSONObject(resp.body.string())
+            val assets = o.optJSONArray("assets")
+            val apk = assets?.let { a -> (0 until a.length()).map { a.getJSONObject(it) } }
+                ?.firstOrNull { it.optString("name").endsWith(".apk", ignoreCase = true) }
             AppRelease(
                 version = o.getString("tag_name").removePrefix("v").trim(),
                 url = o.optString("html_url").ifEmpty { "https://github.com/Vasik96/spojeuk/releases/latest" },
                 publishedMs = runCatching { Instant.parse(o.getString("published_at")).toEpochMilli() }.getOrDefault(0L),
+                apkUrl = apk?.optString("browser_download_url")?.takeIf { it.startsWith("https://") },
+                apkSize = apk?.optLong("size", 0L) ?: 0L,
             )
         }
     }

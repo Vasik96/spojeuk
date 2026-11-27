@@ -440,7 +440,9 @@ internal fun MapScreen(modifier: Modifier = Modifier, appState: SpojeAppState, a
     }
 
     // ── zastávky (index se postaví, jakmile je načtený jízdní řád) ──
-    val loadedStops by produceState<StopIndex?>(null, api) {
+    // timetableRev: po výměně jízdního řádu za běhu nový index (zastávky nesou id spojů a zastávek)
+    val loadedStops by produceState<StopIndex?>(null, api, appState.timetableRev) {
+        value = null
         while (value == null) {
             value = runCatching { api.mapStops() }.getOrNull()
             if (value == null) delay(3_000)

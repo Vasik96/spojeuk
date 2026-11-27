@@ -43,13 +43,20 @@ class TimetableStore(
     var current: TimetableBundle? = null
         private set
 
-    /** Dokončí se ve chvíli, kdy je jízdní řád načtený; kdo na něj čeká, nemusí dotazovat dokola (viz [awaitCurrent]). */
-    private val ready = CompletableDeferred<TimetableBundle>()
+    /**
+     * Dokončí se ve chvíli, kdy je jízdní řád načtený; kdo na něj čeká, nemusí dotazovat dokola (viz [awaitCurrent]).
+     * Jen signál (Unit), ne bundle: jinak by si navždy držel první jízdní řád i po výměně za běhu (+~150 MB haldy).
+     */
+    private val ready = CompletableDeferred<Unit>()
 
     /**
      * Počká na načtený jízdní řád, ale sám ho nespouští ani nestahuje (jako [ensure]). Bez zpoždění, jakmile je hotový.
      */
-    suspend fun awaitCurrent(): TimetableBundle = current ?: ready.await()
+    suspend fun awaitCurrent(): TimetableBundle {
+        current?.let { return it }
+        ready.await()
+        return checkNotNull(current)   // install() nastaví current dřív, než dokončí ready
+    }
 
     private val loadLock = Mutex()
     private val importLock = Mutex()
@@ -109,6 +116,11 @@ class TimetableStore(
             File(dir, "gtfs.zip").delete()
             File(dir, "gtfs_rail.zip").delete()
             File(dir, "gtfs_temp").deleteRecursively()
+            // přerušená výměna za běhu (proces skončil mezi přejmenováními): vrátit odložený starý jízdní řád
+            val prev = File(dir, "static.sqlite.prev")
+            if (prev.exists()) {
+                if (!dbFile.exists() || dbFile.length() < MIN_DB_BYTES) prev.renameTo(dbFile) else prev.delete()
+            }
 
             val p = pendingFile
             if (!p.exists()) return
@@ -124,10 +136,89 @@ class TimetableStore(
 
 
 
+    /** Výsledek výměny jízdního řádu za běhu. */
+    enum class Swap {
+        /** Nový jízdní řád je načtený a používá se. */
+        APPLIED,
+        /** Nebylo co měnit (žádný připravený soubor, nebo jízdní řád ještě není načtený: nasadí se při načtení). */
+        NOTHING,
+        /** Málo paměti na chvíli se dvěma jízdními řády: nasadí se při dalším startu. */
+        LOW_MEMORY,
+        /** Výměna se nepovedla (původní data zůstala): nasadí se při dalším startu, nebo se zahodí, je-li vadný. */
+        FAILED,
+    }
+
+    class SwapResult(val swap: Swap, val retired: TimetableBundle? = null)
+
+    /**
+     * Nasadí připravený jízdní řád ([pendingFile]) hned, bez restartu. Bezpečně:
+     *  - starý jízdní řád si předem otevře svůj soubor i mezipaměť sítě ([Timetable.pinFiles]), takže rozběhnutá
+     *    hledání / párování dál čtou stará data a nepomíchají se s novými id spojů,
+     *  - starý soubor se do úspěšného načtení nového jen odloží (static.sqlite.prev); při chybě se vrátí,
+     *  - chvíli jsou v paměti oba jízdní řády: když na to není místo, nic se nemění ([Swap.LOW_MEMORY]).
+     * Vyřazený bundle vrací v [SwapResult.retired]: volající ho po chvíli vyřadí ([Timetable.retire]).
+     */
+    suspend fun applyPendingNow(): SwapResult = withContext(Dispatchers.IO) {
+        loadLock.withLock {
+            importLock.withLock {
+                val p = pendingFile
+                val old = current
+                if (!p.exists() || old == null) return@withLock SwapResult(Swap.NOTHING)
+
+                fun trips(f: File) = runCatching { Timetable.readMeta(f)["trips"]?.toIntOrNull() }.getOrNull() ?: 0
+                val newTrips = trips(p)
+                // ochrana proti rozbitému buildu (stejná jako při startu)
+                if (newTrips <= 0 || newTrips * 2 < trips(dbFile)) {
+                    p.delete()
+                    return@withLock SwapResult(Swap.FAILED)
+                }
+
+                // nový jízdní řád zabere zhruba tolik, kolik teď celá halda; GC jen jako nápověda (uživatel to spustil sám)
+                val rt = Runtime.getRuntime()
+                rt.gc()
+                val used = rt.totalMemory() - rt.freeMemory()
+                if (rt.maxMemory() - used < used + SWAP_MEMORY_MARGIN) {
+                    Log.w(TAG, "výměna za běhu: málo paměti (${used / 1048576} MB z ${rt.maxMemory() / 1048576} MB)")
+                    return@withLock SwapResult(Swap.LOW_MEMORY)
+                }
+
+                try {
+                    old.timetable.pinFiles()
+                } catch (e: Exception) {
+                    Log.w(TAG, "výměna za běhu: starý jízdní řád nejde připnout: ${e.message}")
+                    return@withLock SwapResult(Swap.FAILED)
+                }
+
+                val prev = File(dbFile.parentFile, "static.sqlite.prev")
+                prev.delete()
+                if (!dbFile.renameTo(prev)) return@withLock SwapResult(Swap.FAILED)
+                if (!p.renameTo(dbFile)) {
+                    prev.renameTo(dbFile)
+                    return@withLock SwapResult(Swap.FAILED)
+                }
+                val tt = try {
+                    Timetable(dbFile)
+                } catch (e: Throwable) {   // i OutOfMemoryError: rozpracovaný jízdní řád se zahodí, starý běží dál
+                    Log.w(TAG, "výměna za běhu: nový jízdní řád nejde načíst: $e")
+                    val oom = e is OutOfMemoryError
+                    // málo paměti: soubor je v pořádku, nasadí se při startu; jinak je vadný a zahodí se
+                    if (oom) dbFile.renameTo(p) else dbFile.delete()
+                    prev.renameTo(dbFile)
+                    return@withLock SwapResult(if (oom) Swap.LOW_MEMORY else Swap.FAILED)
+                }
+                prev.delete()   // starý jízdní řád ho má otevřený, data zůstanou čitelná až do jeho vyřazení
+                install(tt)
+                Log.i(TAG, "jízdní řád vyměněn za běhu: ${old.timetable.meta["tag"]} -> ${tt.meta["tag"]}")
+                onLoaded(tt)
+                SwapResult(Swap.APPLIED, retired = old)
+            }
+        }
+    }
+
     private fun install(tt: Timetable): TimetableBundle {
         val bundle = TimetableBundle(tt, Planner(tt))
         current = bundle
-        ready.complete(bundle)
+        ready.complete(Unit)
         return bundle
     }
 
@@ -372,5 +463,7 @@ class TimetableStore(
         /** Verze formátu hotové DB z GitHubu (tools/build_timetable_db.py SCHEMA); jiná => import ze zipů. */
         const val PREBUILT_SCHEMA = 1
         const val TAG = "GtfsImport"
+        /** Rezerva haldy nad odhadem velikosti nového jízdního řádu při výměně za běhu. */
+        private const val SWAP_MEMORY_MARGIN = 48L * 1024 * 1024
     }
 }
