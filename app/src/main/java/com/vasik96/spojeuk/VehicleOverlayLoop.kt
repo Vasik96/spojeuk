@@ -103,7 +103,8 @@ private suspend fun runVehicleLoop(
             lastStopIdx = sIdx
             val bv = baseView
             val show = sIdx != null && bv != null && cam.zoom >= stopMinZoom
-            if (show) layer.setStops(sIdx.inView(bv.expanded(0.1)))
+            // velký okraj: při rychlém posunu (33 ms mezi přepočty) musí být zastávky za okrajem obrazovky už připravené
+            if (show) layer.setStops(sIdx.inView(bv.expanded(STOP_VIEW_MARGIN), limit = STOP_VIEW_LIMIT))
             layer.setStopsVisible(show, now)
         }
 

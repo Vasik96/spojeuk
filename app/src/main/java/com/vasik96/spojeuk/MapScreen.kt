@@ -957,7 +957,10 @@ private fun rememberShownRoute(appState: SpojeAppState, showFullRoute: Boolean):
     val stopDots = appState.stopDots(showFullRoute)
     LaunchedEffect(route, segments, segmentStyles, full, walks, stopDots) {
         if (route.isNotEmpty()) {
-            val appearing = s.route.isEmpty()
+            // jiná trasa místo zobrazené (i uprostřed mizení předchozí): stará nejdřív doběhne do ztracena
+            val replacing = s.route.isNotEmpty() && s.route !== route
+            if (replacing && s.alpha.value > 0f) s.alpha.animateTo(0f, tween(ROUTE_FADE_OUT_MS, easing = FastOutLinearInEasing))
+            val appearing = s.route.isEmpty() || replacing
             s.route = route; s.segments = segments; s.segmentStyles = segmentStyles; s.full = full; s.walks = walks; s.stopDots = stopDots
             if (appearing) s.alpha.snapTo(0f)
             if (s.alpha.targetValue < 1f || appearing) s.alpha.animateTo(1f, tween(ROUTE_FADE_IN_MS, easing = LinearOutSlowInEasing))

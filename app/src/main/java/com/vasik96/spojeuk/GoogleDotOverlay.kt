@@ -60,6 +60,16 @@ internal fun GoogleDotOverlay(
             }
         }
     }
+    // prolínání jednotlivých vozidel (nová / zmizelá / dokreslený štítek)
+    LaunchedEffect(layer) {
+        snapshotFlow { layer.itemFadeKick.intValue }.collectLatest {
+            while (true) {
+                withFrameNanos { }
+                frame.intValue++
+                if (!layer.itemsFading(SystemClock.elapsedRealtime())) break
+            }
+        }
+    }
     LaunchedEffect(layer) {
         snapshotFlow { layer.fadeKick.intValue }.collectLatest {
             while (true) {
@@ -131,7 +141,7 @@ internal class DotPainter(private val context: Context) {
         w: Float, h: Float, density: Float,
     ) {
         val n = layer.count
-        if (n == 0 && layer.stops.isEmpty()) return
+        if (n == 0 && layer.stops.isEmpty() && layer.ghosts.isEmpty()) return
         val wx = layer.wx
         val wy = layer.wy
         val colors = layer.color
@@ -179,7 +189,7 @@ internal class DotPainter(private val context: Context) {
                 }
             }
         }
-        if (n == 0) { drawStops(); return }
+        if (n == 0 && layer.ghosts.isEmpty()) { drawStops(); return }
         val fade = layer.fade
         fade.tick(SystemClock.elapsedRealtime(), layer.labelsPending)
         val appear = fade.appearAlpha()
@@ -241,6 +251,9 @@ internal class DotPainter(private val context: Context) {
         val christmases = layer.christmas
         val labels = layer.label
         val hl = layer.hl
+        val appearAt = layer.appearAt
+        val labelAt = layer.labelAt
+        val now = SystemClock.elapsedRealtime()
         for (b in batches) b.reset()
         val a255 = (alpha * 255f).toInt().coerceIn(0, 255)
         val translucent = a255 < 254
@@ -248,6 +261,27 @@ internal class DotPainter(private val context: Context) {
         val paintAlpha = if (translucent && !saved) a255 else 255
         if (saved) canvas.saveLayerAlpha(null, a255)
         bmpPaint.alpha = paintAlpha
+        // zmizelá vozidla doznívají pod ostatními
+        for (g in layer.ghosts) {
+            val ga = 1f - itemProgress(now, g.at)
+            if (ga <= 0f) continue
+            val lb = g.label
+            when (mode) {
+                PASS_DOTS_UNLABELED -> if (lb != null) continue
+                PASS_DOTS_LABELED, PASS_LABELS -> if (lb == null) continue
+            }
+            val dx = (g.wx - cwx) * world
+            val dy = (g.wy - cwy) * world
+            val x = (dx * c + dy * s + cx).toFloat()
+            val y = (-dx * s + dy * c + cy).toFloat()
+            if (x < minX || x > maxX || y < minY || y > maxY) continue
+            val bmp = when (mode) {
+                PASS_ALL -> lb ?: dotFor(g.color, g.late, g.christmas)
+                PASS_LABELS -> lb!!
+                else -> dotFor(g.color, g.late, g.christmas)
+            }
+            quad(canvas, bmp, x - bmp.width / 2f, y - bmp.height / 2f, ga)
+        }
         for (i in 0 until n) {
             if (i == hl) continue
             val lb = labels[i]
@@ -264,22 +298,28 @@ internal class DotPainter(private val context: Context) {
             val y = (-dx * s + dy * c + cy).toFloat()
             // ořez před výběrem bitmapy (hranice nezávisí na bitmapě): tečka se hledá v cache jen pro viditelná vozidla
             if (x < minX || x > maxX || y < minY || y > maxY) continue
+            // nové vozidlo se plynule objeví
+            val va = if (appearAt[i] == 0L) 1f else itemProgress(now, appearAt[i])
+            if (va <= 0f) continue
+            // štítek dokreslený na pozadí: prolne se přes tečku (jen v běžném snímku, přepnutí režimu má vlastní)
+            val la = if (mode == PASS_ALL && lb != null && labelAt[i] != 0L) itemProgress(now, labelAt[i]) else 1f
+            if (la < 1f) {
+                val dot = dotFor(colors[i], lates[i], christmases[i])
+                quad(canvas, dot, snap(x - dot.width / 2f, mv), snap(y - dot.height / 2f, mv), va * (1f - la))
+            }
             val bmp = when (mode) {
                 PASS_ALL -> lb ?: dotFor(colors[i], lates[i], christmases[i])
                 PASS_LABELS -> lb!!
                 else -> dotFor(colors[i], lates[i], christmases[i])
             }
             // stojící vozidlo na celé pixely => bitmapa 1:1, ostrá; jedoucí sub-pixelově (zaokrouhlení by pomalý vůz
-            // posouvalo po skocích o pixel, viditelné trhání)
-            val left = if (mv) x - bmp.width / 2f else Math.round(x - bmp.width / 2f).toFloat()
-            val top = if (mv) y - bmp.height / 2f else Math.round(y - bmp.height / 2f).toFloat()
-            val sp = atlas.get(bmp)
-            if (sp == null) { canvas.drawBitmap(bmp, left, top, bmpPaint); continue }   // (atlas plný) výjimečně zvlášť
-            batch(sp.page).add(left, top, sp)
+            // posouval po skocích o pixel, viditelné trhání)
+            quad(canvas, bmp, snap(x - bmp.width / 2f, mv), snap(y - bmp.height / 2f, mv), va * la)
         }
         for (p in batches.indices) {
             val b = batches[p]
             if (b.quads > 0) {
+                // (průhlednost jednotlivých vozidel nese barva vrcholů)
                 val paint = atlas.paint(p)
                 paint.alpha = paintAlpha
                 b.draw(canvas, paint)
@@ -289,18 +329,48 @@ internal class DotPainter(private val context: Context) {
         if (saved) canvas.restore()
     }
 
+    /** Jeden obrázek do dávky s průhledností [alpha] (0..1). */
+    private fun quad(canvas: android.graphics.Canvas, bmp: Bitmap, left: Float, top: Float, alpha: Float) {
+        if (alpha <= 0.004f) return
+        val sp = atlas.get(bmp)
+        if (sp == null) {   // (atlas plný) výjimečně zvlášť
+            val a = bmpPaint.alpha
+            bmpPaint.alpha = (a * alpha).toInt().coerceIn(0, 255)
+            canvas.drawBitmap(bmp, left, top, bmpPaint)
+            bmpPaint.alpha = a
+            return
+        }
+        batch(sp.page).add(left, top, sp, alpha)
+    }
+
+    private fun snap(v: Float, moving: Boolean) = if (moving) v else Math.round(v).toFloat()
+
     /** Čtyřúhelníky jedné stránky atlasu (pozice, souřadnice v atlasu, indexy trojúhelníků). */
     private class Batch {
         var quads = 0
         private var verts = FloatArray(0)
         private var texs = FloatArray(0)
         private var idx = ShortArray(0)
+        /** Barva vrcholů = průhlednost čtyřúhelníku (násobí texturu); jen když je některý průhledný. */
+        private var cols = IntArray(0)
+        private var anyAlpha = false
 
-        fun reset() { quads = 0 }
+        fun reset() { quads = 0; anyAlpha = false }
 
-        fun add(left: Float, top: Float, sp: SpriteAtlas.Sprite) {
+        fun add(left: Float, top: Float, sp: SpriteAtlas.Sprite, alpha: Float = 1f) {
             if (quads >= MAX_QUADS) return
             if (verts.size < (quads + 1) * 8) grow()
+            val a = (alpha * 255f + 0.5f).toInt().coerceIn(0, 255)
+            if (a < 255 && !anyAlpha) {
+                // první průhledný: dosavadní čtyřúhelníky plně neprůhledné
+                anyAlpha = true
+                java.util.Arrays.fill(cols, 0, quads * 4, -1)
+            }
+            if (anyAlpha) {
+                val col = (a shl 24) or 0xFFFFFF
+                val ci = quads * 4
+                cols[ci] = col; cols[ci + 1] = col; cols[ci + 2] = col; cols[ci + 3] = col
+            }
             val v = quads * 8
             val right = left + sp.w
             val bottom = top + sp.h
@@ -319,6 +389,7 @@ internal class DotPainter(private val context: Context) {
             val q = maxOf(256, quads * 2)
             verts = verts.copyOf(q * 8)
             texs = texs.copyOf(q * 8)
+            cols = cols.copyOf(q * 4)
             val old = idx.size / 6
             idx = idx.copyOf(q * 6)
             for (i in old until q) {   // indexy jsou pro daný čtyřúhelník pořád stejné
@@ -331,7 +402,7 @@ internal class DotPainter(private val context: Context) {
         fun draw(canvas: android.graphics.Canvas, paint: Paint) {
             canvas.drawVertices(
                 android.graphics.Canvas.VertexMode.TRIANGLES, quads * 8, verts, 0, texs, 0,
-                null, 0, idx, 0, quads * 6, paint
+                if (anyAlpha) cols else null, 0, idx, 0, quads * 6, paint
             )
         }
 
@@ -424,3 +495,9 @@ private fun extrapolationMs(layer: GoogleVehicleLayer): Double {
 
 /** Delší mezeru mezi snímky poloh (tečky po 250 ms, zaseknutí) nedopočítávat, ať vůz nepřejede. */
 private const val MAX_EXTRAPOLATION_MS = 300.0
+
+/** Průběh prolnutí vozidla od času [t0] (elapsedRealtime), 0..1 se smoothstep. */
+private fun itemProgress(now: Long, t0: Long): Float {
+    val t = ((now - t0).toFloat() / ITEM_FADE_MS).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
+}

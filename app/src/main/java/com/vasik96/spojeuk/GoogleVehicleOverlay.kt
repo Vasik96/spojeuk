@@ -19,6 +19,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.LatLng
 import com.google.maps.android.compose.CameraPositionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -62,10 +63,12 @@ internal fun GoogleVehicleOverlay(
         snapshotFlow { shown.alpha.value }.collect { layer.setRouteAlpha(it) }
     }
 
-    val arrows by produceState(emptyList<RouteArrow>(), route, arrowSpacing) {
-        value = if (route.size < 2) emptyList()
-        else withContext(Dispatchers.Default) { createRouteArrows(route = route, spacingMeters = arrowSpacing) }
+    // šipky i s trasou, pro kterou jsou spočítané: nová trasa nesmí ani na chvíli dostat šipky předchozí
+    val arrowsOf by produceState(emptyList<LatLng>() to emptyList<RouteArrow>(), route, arrowSpacing) {
+        value = route to (if (route.size < 2) emptyList()
+        else withContext(Dispatchers.Default) { createRouteArrows(route = route, spacingMeters = arrowSpacing) })
     }
+    val arrows = arrowsOf.second.takeIf { arrowsOf.first === route } ?: emptyList()
 
     LaunchedEffect(route, full, useFull, stopDots, arrows, arrowArgb, routeColor) {
         layer.updateRoute(route, full, useFull, stopDots, arrows, arrowArgb, routeColor)
@@ -119,7 +122,8 @@ internal fun GoogleVehicleOverlay(
                 lastStopIdx = sIdx
                 val bv = baseView
                 val show = sIdx != null && bv != null && cam.zoom >= STOP_MIN_ZOOM_GOOGLE
-                if (show) layer.setStops(sIdx.inView(bv.expanded(0.1)))
+                // velký okraj: při rychlém posunu (33 ms mezi přepočty) musí být zastávky za okrajem obrazovky už připravené
+            if (show) layer.setStops(sIdx.inView(bv.expanded(STOP_VIEW_MARGIN), limit = STOP_VIEW_LIMIT))
                 layer.setStopsVisible(show, now)
             }
 

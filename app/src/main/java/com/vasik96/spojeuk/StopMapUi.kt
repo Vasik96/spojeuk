@@ -54,6 +54,9 @@ internal const val STOP_DEPARTURE_HOURS = 3
 
 /** Od jakého zoomu (Google) se kreslí ikony zastávek. */
 internal const val STOP_MIN_ZOOM_GOOGLE = 14.5f
+/** Zastávky pro overlay: výřez obrazovky + okraj (podíl rozměru) a nejvýš tolik zastávek. */
+internal const val STOP_VIEW_MARGIN = 0.6
+internal const val STOP_VIEW_LIMIT = 5000
 
 /** Bitmapy zastávek na mapě: kruh s ikonou autobusu / vlaku. */
 internal class StopIcons(val bus: Bitmap, val rail: Bitmap)

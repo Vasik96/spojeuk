@@ -6,6 +6,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import com.google.android.gms.maps.MapsInitializer
 import org.maplibre.android.MapLibre
+import org.maplibre.android.module.http.HttpRequestUtil
 
 class SpojeApplication : Application() {
     override fun onCreate() {
@@ -13,6 +14,8 @@ class SpojeApplication : Application() {
         I18n.init(this)
         LineKinds.init(this)
         MapLibre.getInstance(this)
+        // tmavé dlaždice Mapy.com se přebarvují při stažení (viz MapyDarkTiles)
+        HttpRequestUtil.setOkHttpClient(MapyDarkTiles.mapLibreHttpClient())
         // Google Maps: načtení modulu a rendereru z Play Services trvá stovky ms; uděláme to na pozadí hned při startu,
         // ať první GoogleMap v UI nic takového nepočítá (MapLibre se předehřívá řádkem výše)
         Thread {

@@ -56,6 +56,16 @@ internal fun VehicleCanvasOverlay(
             }
         }
     }
+    // prolínání jednotlivých vozidel (nová / zmizelá / dokreslený štítek)
+    LaunchedEffect(layer) {
+        snapshotFlow { layer.itemFadeKick.intValue }.collectLatest {
+            while (true) {
+                withFrameNanos { }
+                frame.intValue++
+                if (!layer.itemsFading(SystemClock.elapsedRealtime())) break
+            }
+        }
+    }
     LaunchedEffect(layer) {
         snapshotFlow { layer.fadeKick.intValue }.collectLatest {
             while (true) {

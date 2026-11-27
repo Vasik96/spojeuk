@@ -3,6 +3,7 @@ package com.vasik96.spojeuk
 import android.content.Context
 import android.graphics.Bitmap
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.withFrameNanos
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.Marker
@@ -25,6 +26,9 @@ internal class GoogleVehicleLayer(private val context: Context) {
     private var googleMap: GoogleMap? = null
 
     private val routeMarkers = ArrayList<Marker>()
+    /** Šipky trasy zvlášť: při změně rozestupu (zoom) se prolínají jen ony, ostatní markery trasy zůstanou. */
+    private var arrowMarkers = ArrayList<Marker>()
+    private var fadingArrows = ArrayList<Marker>()
     private var lastRoute: List<LatLng>? = null
     private var lastFull: List<LatLng>? = null
     private var lastUseFull = false
@@ -61,6 +65,30 @@ internal class GoogleVehicleLayer(private val context: Context) {
     private var lat = DoubleArray(0)
     private var lng = DoubleArray(0)
     private var vehicles = arrayOfNulls<Vehicle>(0)
+    private var keys = arrayOfNulls<String>(0)
+    /** Čas objevení vozidla (elapsedRealtime), 0 = je vidět odjakživa: overlay ho plynule zviditelní. */
+    var appearAt = LongArray(0)
+        private set
+    /** Čas, kdy vozidlu přibyl štítek (dokreslený na pozadí) místo tečky, 0 = žádný přechod: overlay je prolne. */
+    var labelAt = LongArray(0)
+        private set
+
+    // ── prolínání jednotlivých vozidel (nové / zmizelé v dávce dat, změna filtru, štítek dokreslený na pozadí) ──
+    private val appearByKey = HashMap<String, Long>()
+    private val labelByKey = HashMap<String, Long>()
+    /** Vozidla, která z dat zmizela: doznívají na posledním místě. */
+    val ghosts = ArrayList<VehicleGhost>()
+    private var lastDot = true
+    /** Zvýší se při startu prolínání vozidel => overlay kreslí každý snímek, dokud doznívá ([itemsFading]). */
+    val itemFadeKick = mutableIntStateOf(0)
+    private var itemFadeUntil = 0L
+
+    fun itemsFading(now: Long): Boolean = now < itemFadeUntil
+
+    private fun kickItemFade(now: Long) {
+        itemFadeUntil = now + ITEM_FADE_MS
+        itemFadeKick.intValue++
+    }
     var hl = -1                      // index zvýrazněného vozidla (kreslí se poslední), -1 = žádné
         private set
     // ── zastávky v záběru (kreslí je overlay pod vozidly) ──
@@ -157,6 +185,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
     /** Nové otevření mapy: vozidla se znovu plynule objeví. */
     fun restartAppear() {
         fade.resetAppear()
+        ghosts.clear(); appearByKey.clear(); labelByKey.clear()
         version.intValue++
     }
 
@@ -172,9 +201,10 @@ internal class GoogleVehicleLayer(private val context: Context) {
     }
 
     fun clearAll() {
-        for (i in 0 until count) { vehicles[i] = null; label[i] = null }
+        for (i in 0 until count) { vehicles[i] = null; label[i] = null; keys[i] = null }
         count = 0
         hl = -1
+        ghosts.clear(); appearByKey.clear(); labelByKey.clear()
         version.intValue++
         clearRoute()
     }
@@ -186,11 +216,16 @@ internal class GoogleVehicleLayer(private val context: Context) {
         if (a == routeAlpha) return
         routeAlpha = a
         for (m in routeMarkers) runCatching { m.alpha = a }
+        for (m in arrowMarkers) runCatching { m.alpha = a }
     }
 
     private fun clearRoute() {
         for (m in routeMarkers) runCatching { m.remove() }
         routeMarkers.clear()
+        for (m in arrowMarkers) runCatching { m.remove() }
+        arrowMarkers.clear()
+        for (m in fadingArrows) runCatching { m.remove() }
+        fadingArrows.clear()
         lastRoute = null
         lastFull = null
         lastStops = null
@@ -221,6 +256,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
     private fun ensureMeta(list: List<Pair<String, Vehicle>>) {
         if (list === metaSrc) return
         metaSrc = list
+        trackAppearances(list)
         mSorted = if (list.any { it.second.christmas }) list.sortedBy { (_, v) -> if (v.christmas) 1 else 0 } else list
         val n = mSorted.size
         if (mStyle.size < n) {
@@ -238,6 +274,32 @@ internal class GoogleVehicleLayer(private val context: Context) {
             mLabel[i] = null
         }
         for (i in n until mStyle.size) { mStyle[i] = null; mKey[i] = null; mLabel[i] = null }
+    }
+
+    /**
+     * Nová dávka vozidel: nová vozidla se objeví plynule, zmizelá doznívají (duchové). Při prvním zobrazení
+     * (vozidla se objevují všechna najednou přes [fade]) a po znovuotevření mapy se jednotlivě neprolínají.
+     */
+    private fun trackAppearances(list: List<Pair<String, Vehicle>>) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (count == 0 || !fade.appeared) return
+        appearByKey.entries.removeAll { now - it.value >= ITEM_FADE_MS }
+        labelByKey.entries.removeAll { now - it.value >= ITEM_FADE_MS }
+        ghosts.removeAll { now - it.at >= ITEM_FADE_MS }
+        val newKeys = HashSet<String>(list.size * 2)
+        for ((k, _) in list) newKeys += k
+        val oldKeys = HashSet<String>(count * 2)
+        var changed = false
+        for (i in 0 until count) {
+            val k = keys[i] ?: continue
+            oldKeys += k
+            if (k !in newKeys && i != hl && ghosts.size < MAX_GHOSTS) {
+                ghosts += VehicleGhost(wx[i], wy[i], color[i], late[i], christmas[i], label[i], now)
+                changed = true
+            }
+        }
+        for ((k, _) in list) if (k !in oldKeys) { appearByKey[k] = now; changed = true }
+        if (changed) kickItemFade(now)
     }
 
     /**
@@ -282,13 +344,18 @@ internal class GoogleVehicleLayer(private val context: Context) {
         val cap = activeVehicles.size
         if (wx.size < cap) {
             val sz = cap + cap / 4 + 16
-            wx = DoubleArray(sz); wy = DoubleArray(sz); vwx = DoubleArray(sz); vwy = DoubleArray(sz); color = IntArray(sz); late = BooleanArray(sz); christmas = BooleanArray(sz); label = arrayOfNulls(sz)
-            lat = DoubleArray(sz); lng = DoubleArray(sz); vehicles = arrayOfNulls(sz)
+            wx = wx.copyOf(sz); wy = wy.copyOf(sz); vwx = DoubleArray(sz); vwy = DoubleArray(sz); color = color.copyOf(sz)
+            late = late.copyOf(sz); christmas = christmas.copyOf(sz); label = label.copyOf(sz)
+            lat = DoubleArray(sz); lng = DoubleArray(sz); vehicles = arrayOfNulls(sz); keys = keys.copyOf(sz)
+            appearAt = LongArray(sz); labelAt = LongArray(sz)
         }
         var n = 0
         var h = -1
         var anyMoving = false
         val sortedVehicles = mSorted
+        val now = android.os.SystemClock.elapsedRealtime()
+        var labelKick = false
+        if (ghosts.isNotEmpty() && !itemsFading(now)) ghosts.clear()   // doznělí duchové
         for (idx in sortedVehicles.indices) {
             val (key, v) = sortedVehicles[idx]
             val e = hub.entryOf(key)
@@ -316,19 +383,31 @@ internal class GoogleVehicleLayer(private val context: Context) {
             christmas[n] = v.christmas
             lat[n] = la; lng[n] = lo; vehicles[n] = v
             val inView = view == null || view.contains(la, lo)
-            label[n] = when {
+            val prevLabel = if (keys[n] == key) label[n] else null
+            val sameSlot = keys[n] == key
+            val lb = when {
                 // zvýrazněné: pulzující štítek (jen pár variant, kreslí se hned)
                 isHl && !dot -> markerBitmap(context, v.line, style, phase, lateMin, v.christmas)
                 isHl -> null
                 !dot -> labelOf(idx, v, order = inView)
                 else -> { if (prewarm && inView) labelOf(idx, v, order = true); null }
             }
+            // štítek dokreslený na pozadí, zatímco vozidlo už bylo vidět jako tečka (ne přepnutí režimu): prolnout
+            if (lb != null && prevLabel == null && sameSlot && !dot && !lastDot && !isHl && fade.appeared) {
+                labelByKey[key] = now; labelKick = true
+            }
+            label[n] = lb
+            keys[n] = key
+            appearAt[n] = appearByKey[key] ?: 0L
+            labelAt[n] = labelByKey[key] ?: 0L
             if (isHl) h = n
             n++
         }
-        for (i in n until count) { vehicles[i] = null; label[i] = null }
+        for (i in n until count) { vehicles[i] = null; label[i] = null; keys[i] = null }
         count = n
         hl = h
+        lastDot = dot
+        if (labelKick) kickItemFade(now)
         val mv = anyMoving && smooth
         if (moving.value != mv) moving.value = mv
         if (n > 0 && fade.startAppear()) fadeKick.intValue++
@@ -366,7 +445,7 @@ internal class GoogleVehicleLayer(private val context: Context) {
         return listOfNotNull(best)
     }
 
-    fun updateRoute(
+    suspend fun updateRoute(
         route: List<LatLng>,
         full: List<LatLng>,
         useFull: Boolean,
@@ -380,6 +459,15 @@ internal class GoogleVehicleLayer(private val context: Context) {
             stopDots == lastStops && arrows === lastArrows && arrowColor == lastArrowColor &&
             stopColor == lastStopColor
         ) return
+
+        // změnily se jen šipky (rozestup podle zoomu): ostatní markery zůstanou, šipky se prolnou
+        val onlyArrows = route === lastRoute && full === lastFull && useFull == lastUseFull && stopDots == lastStops &&
+            stopColor == lastStopColor && arrowColor == lastArrowColor && arrows !== lastArrows && routeMarkers.isNotEmpty()
+        if (onlyArrows) {
+            lastArrows = arrows
+            crossfadeArrows(map, arrows, arrowColor)
+            return
+        }
 
         clearRoute()
         lastRoute = route; lastFull = full; lastUseFull = useFull
@@ -402,9 +490,14 @@ internal class GoogleVehicleLayer(private val context: Context) {
             add(MarkerOptions().position(stop).icon(stopDesc).anchor(0.5f, 0.5f).zIndex(1.05f))
         }
 
+        arrowMarkers = addArrows(map, arrows, arrowColor, routeAlpha)
+    }
+
+    private fun addArrows(map: GoogleMap, arrows: List<RouteArrow>, arrowColor: Int, alpha: Float): ArrayList<Marker> {
+        val out = ArrayList<Marker>(arrows.size)
         val arrowDesc = routeArrowDescriptor(arrowColor, 1.0f)   // jedna sdílená ikona místo bitmapy pro každou šipku
         for (arrow in arrows) {
-            add(
+            map.addMarker(
                 MarkerOptions()
                     .position(arrow.position)
                     .icon(arrowDesc)
@@ -412,13 +505,48 @@ internal class GoogleVehicleLayer(private val context: Context) {
                     .rotation(arrow.bearing)
                     .flat(true)
                     .zIndex(1.2f)
-            )
+                    .alpha(alpha)
+            )?.let { out.add(it) }
+        }
+        return out
+    }
+
+    /** Nové šipky se objeví, staré zmizí (prolnutí [ARROW_FADE_MS]); přerušené prolnutí se dokončí skokem. */
+    private suspend fun crossfadeArrows(map: GoogleMap, arrows: List<RouteArrow>, arrowColor: Int) {
+        // předchozí (přerušené) prolnutí: zbylé staré šipky pryč
+        for (m in fadingArrows) runCatching { m.remove() }
+        fadingArrows = arrowMarkers
+        arrowMarkers = addArrows(map, arrows, arrowColor, 0f)
+        try {
+            val t0 = withFrameNanos { it }
+            while (true) {
+                val t = ((withFrameNanos { it } - t0) / 1_000_000f / ARROW_FADE_MS).coerceIn(0f, 1f)
+                val a = routeAlpha
+                for (m in arrowMarkers) runCatching { m.alpha = a * t }
+                for (m in fadingArrows) runCatching { m.alpha = a * (1f - t) }
+                if (t >= 1f) break
+            }
+        } finally {
+            for (m in fadingArrows) runCatching { m.remove() }
+            fadingArrows = ArrayList()
+            for (m in arrowMarkers) runCatching { m.alpha = routeAlpha }
         }
     }
 
     private companion object {
+        const val ARROW_FADE_MS = 250f
+        const val MAX_GHOSTS = 6000
         const val MAX_MISSING = 256
         const val LABEL_ENTER_MAX = 1500    // pojistka: štítky, když je v záběru nejvýš tolik vozidel…
         const val LABEL_LEAVE_MAX = 1800    // …a zpět na tečky až nad tímto počtem
     }
 }
+
+/** Prolnutí jednoho vozidla (objevení, zmizení, tečka -> štítek), ms. */
+internal const val ITEM_FADE_MS = 300L
+
+/** Vozidlo, které z dat zmizelo: doznívá na posledním místě (poloha ve světových souřadnicích, vzhled). */
+internal class VehicleGhost(
+    val wx: Double, val wy: Double, val color: Int, val late: Boolean, val christmas: Boolean, val label: Bitmap?,
+    val at: Long,
+)

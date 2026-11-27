@@ -64,20 +64,22 @@ import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
-import java.util.concurrent.atomic.AtomicBoolean
 
-/** Mapy.cz (api.mapy.com) nemá vektorový styl ani tmavou variantu => rastrové dlaždice jako MapLibre style JSON. */
+/**
+ * Mapy.cz (api.mapy.com) nemá vektorový styl ani tmavou variantu => rastrové dlaždice jako MapLibre style JSON.
+ * Tmavé dlaždice přebarvuje při stažení [MapyDarkTiles] (parametr v URL), ne vrstva mapy.
+ */
 private fun mapyStyleJson(dark: Boolean): String {
-    val tiles = "https://api.mapy.com/v1/maptiles/basic/256@2x/{z}/{x}/{y}?apikey=${BuildConfig.MAPYCZ_API_KEY}"
-    // tmavý režim: inverze jasu + otočení odstínu zpět (aproximace tmavé mapy z rastru)
-    val paint = if (dark)
-        """{"raster-brightness-min":1,"raster-brightness-max":0,"raster-hue-rotate":180,"raster-saturation":-0.35,"raster-contrast":-0.1}"""
-    else "{}"
+    val darkParam = if (dark) "&${MapyDarkTiles.DARK_PARAM}=1" else ""
+    val tiles = "https://api.mapy.com/v1/maptiles/basic/256@2x/{z}/{x}/{y}?apikey=${BuildConfig.MAPYCZ_API_KEY}$darkParam"
+    val paint = "{}"
+    val bg = if (dark) "#1d2430" else "#f1f0e5"   // barva pozadí dlaždic, než se načtou
     return """
         {"version":8,
          "sources":{"mapy":{"type":"raster","tiles":["$tiles"],"tileSize":256,"maxzoom":19,
             "attribution":"© Seznam.cz a.s. a další, © OpenStreetMap"}},
-         "layers":[{"id":"mapy-layer","type":"raster","source":"mapy","paint":$paint}]}
+         "layers":[{"id":"mapy-bg","type":"background","paint":{"background-color":"$bg"}},
+                   {"id":"mapy-layer","type":"raster","source":"mapy","paint":$paint}]}
     """.trimIndent()
 }
 
@@ -111,6 +113,8 @@ internal fun frameElapsedMs(frameNanos: Long): Long =
 
 /** Prolnutí zastávek při objevení / zmizení (ms). */
 internal const val STOP_FADE_MS = 250L
+/** O kolik úrovní pod hranicí zobrazení zastávek se jejich vrstva MapLibre ještě zpracovává (doznění). */
+private const val STOP_LAYER_MIN_ZOOM_MARGIN = 0.6
 
 private const val STOPS_SRC = "map-stops-src"
 private const val STOPS_LAYER = "map-stops"
@@ -214,9 +218,17 @@ internal fun MapLibreScreenContent(
     // ── stav vozidel ──
     val latestVehicles by rememberUpdatedState(activeVehicles)
 
-    // zastávky: přepočet výřezu po zastavení kamery; ťuknutí hledá v tom, co je nakreslené
-    val stopsDirty = remember { AtomicBoolean(true) }
-    var shownStops by remember { mutableStateOf<List<MapStop>>(emptyList()) }
+    // zastávky: všechny ve zdroji mapy; viditelnost podle zoomu hlídá pohyb kamery (viz syncStopVisibility)
+    val latestStopIndex by rememberUpdatedState(stopIndex)
+    val stopVis = remember { StopVisibility() }
+    fun syncStopVisibility(m: MapLibreMap, force: Boolean = false) {
+        val st = m.style ?: return
+        val show = latestStopIndex != null && m.cameraPosition.zoom >= STOP_MIN_ZOOM_GOOGLE - 1.0
+        if (!force && show == stopVis.shown) return
+        val layer = st.getLayer(STOPS_LAYER) as? SymbolLayer ?: return
+        stopVis.shown = show
+        layer.setProperties(PropertyFactory.iconOpacity(if (show) 1f else 0f))
+    }
 
     // overlay vozidel (stejný jako u Google mapy) a počítadlo pohybu kamery, které ho překresluje
     val overlayLayer = remember(context) { GoogleVehicleLayer(context) }
@@ -250,12 +262,15 @@ internal fun MapLibreScreenContent(
                     // overlay vozidel počítá s pohledem shora (jako Google mapa): bez náklonu
                     m.uiSettings.isTiltGesturesEnabled = false
                     m.addOnCameraMoveStartedListener { cameraMoving = true }
-                    m.addOnCameraMoveListener { camTick.longValue++ }
+                    m.addOnCameraMoveListener {
+                        camTick.longValue++
+                        syncStopVisibility(m)   // přechod přes hranici zoomu: prolnutí hned, ne až po zastavení
+                    }
                     // stav kamery se ukládá až když se mapa zastaví, ne při každém framu pohybu
                     m.addOnCameraIdleListener {
                         cameraMoving = false
                         camTick.longValue++
-                        stopsDirty.set(true)
+                        syncStopVisibility(m)
                         val cp = m.cameraPosition
                         cp.target?.let {
                             appState.mapCenter = LatLng(it.latitude, it.longitude)
@@ -340,7 +355,10 @@ internal fun MapLibreScreenContent(
                                         val iconDp = stopIconDpForZoom(m.cameraPosition.zoom)
                                         val hitRadiusDp = iconDp / 2f + 4f
                                         val r = hitRadiusDp * density * m.projection.getMetersPerPixelAtLatitude(ll.latitude)
-                                        shownStops
+                                        val idx = latestStopIndex
+                                        val dLat = r / 111_320.0
+                                        val dLng = dLat / kotlin.math.cos(Math.toRadians(ll.latitude)).coerceAtLeast(0.01)
+                                        (idx?.inView(ViewBox(ll.latitude - dLat, ll.longitude - dLng, ll.latitude + dLat, ll.longitude + dLng)) ?: emptyList())
                                             .map { it to Geo.distanceM(ll.latitude, ll.longitude, it.lat, it.lng) }
                                             .filter { it.second <= r }
                                             .minByOrNull { it.second }
@@ -371,76 +389,54 @@ internal fun MapLibreScreenContent(
     }
 
 
-    // ── ZASTÁVKY: ikony v záběru (jen přiblížená mapa), přepočet po zastavení kamery ──
+    // ── ZASTÁVKY: všechny naráz ve zdroji mapy; MapLibre si je sám rozřeže do dlaždic (na pozadí), takže při posunu
+    // mapy jsou hned na místě. Dřív jen výřez obrazovky, přepočítaný až po zastavení kamery (+ smyčka po 100 ms):
+    // po rychlém posunu se zastávky na okrajích objevily až za ~1 s. Pod hranicí zoomu plynule zmizí (průhlednost).
     LaunchedEffect(map, styleVersion, stopIndex, stopIcons) {
         val m = map ?: return@LaunchedEffect
+        val style = m.style?.takeIf { it.isFullyLoaded } ?: return@LaunchedEffect
         val idx = stopIndex
         if (idx == null) {
             // zastávky vypnuté v nastavení: vrstva plynule zmizí, ťuknutí už nic nenajde
-            (m.style?.getLayer(STOPS_LAYER) as? SymbolLayer)?.setProperties(PropertyFactory.iconOpacity(0f))
-            shownStops = emptyList()
+            syncStopVisibility(m, force = true)
             return@LaunchedEffect
         }
-        stopsDirty.set(true)
-        var iconsAdded = false
-        var stopsShown: Boolean? = null
-        while (true) {
-            delay(100)
-            val style = m.style
-            if (style == null || !style.isFullyLoaded) continue
-            if (!iconsAdded || style.getImage(STOP_IMG_BUS) == null) {
-                // barvy motivu: při změně se obrázky přepíšou
-                style.addImage(STOP_IMG_BUS, stopIcons.bus)
-                style.addImage(STOP_IMG_RAIL, stopIcons.rail)
-                iconsAdded = true
-            }
-            if (style.getSource(STOPS_SRC) == null) {
-                style.addSource(GeoJsonSource(STOPS_SRC, FeatureCollection.fromFeatures(emptyList<Feature>())))
-                // zastávky pod vozidly
-                ensureRouteAnchor(style)
-                style.addLayerBelow(
-                    SymbolLayer(STOPS_LAYER, STOPS_SRC).withProperties(
-                        PropertyFactory.iconImage(Expression.get("img")),
-                        PropertyFactory.iconAllowOverlap(true),
-                        PropertyFactory.iconIgnorePlacement(true),
-                        PropertyFactory.iconOpacity(0f),
-                        PropertyFactory.iconSize(
-                            Expression.interpolate(
-                                Expression.linear(), Expression.zoom(),
-                                Expression.stop(13.5, STOP_ICON_MIN_DP / STOP_ICON_MAX_DP),
-                                Expression.stop(17.0, 1.0f)
-                            )
-                        ),
-                    ).also { it.iconOpacityTransition = TransitionOptions(STOP_FADE_MS, 0, false) },
-                    ROUTE_ANCHOR_LAYER
-                )
-                stopsShown = null
-                stopsDirty.set(true)
-            }
-            // objevení / zmizení při přechodu přes hranici zoomu: prolnutí průhlednosti vrstvy (jako u vozidel)
-            val zoom = m.cameraPosition.zoom
-            val show = zoom >= STOP_MIN_ZOOM_GOOGLE - 1.0
-            if (show != stopsShown) {
-                stopsShown = show
-                (style.getLayer(STOPS_LAYER) as? SymbolLayer)?.setProperties(PropertyFactory.iconOpacity(if (show) 1f else 0f))
-                if (show) stopsDirty.set(true)
-            }
-            // skryté zastávky zůstanou ve zdroji (doznívají), seznam se obnoví až po objevení
-            if (!show || !stopsDirty.getAndSet(false)) continue
-            val b = runCatching { m.projection.visibleRegion.latLngBounds }.getOrNull() ?: continue
-            val list = withContext(Dispatchers.Default) {
-                idx.inView(ViewBox(b.latitudeSouth, b.longitudeWest, b.latitudeNorth, b.longitudeEast).expanded(0.1))
-            }
-            if (list == shownStops && list.isNotEmpty()) continue
-            shownStops = list
-            style.getSourceAs<GeoJsonSource>(STOPS_SRC)?.setGeoJson(
-                FeatureCollection.fromFeatures(list.map { st ->
-                    Feature.fromGeometry(Point.fromLngLat(st.lng, st.lat)).also { f ->
-                        f.addStringProperty("img", if (st.kind == StopKind.RAIL) STOP_IMG_RAIL else STOP_IMG_BUS)
-                    }
-                })
+        // barvy motivu: při změně se obrázky přepíšou
+        style.addImage(STOP_IMG_BUS, stopIcons.bus)
+        style.addImage(STOP_IMG_RAIL, stopIcons.rail)
+        val json = withContext(Dispatchers.Default) { stopsGeoJson(idx) }
+        if (m.style !== style || !style.isFullyLoaded) return@LaunchedEffect
+        val src = style.getSourceAs<GeoJsonSource>(STOPS_SRC)
+        if (src != null) src.setGeoJson(json)
+        else {
+            style.addSource(GeoJsonSource(STOPS_SRC, json))
+            // zastávky pod vozidly
+            ensureRouteAnchor(style)
+            style.addLayerBelow(
+                SymbolLayer(STOPS_LAYER, STOPS_SRC).withProperties(
+                    PropertyFactory.iconImage(Expression.get("img")),
+                    PropertyFactory.iconAllowOverlap(true),
+                    PropertyFactory.iconIgnorePlacement(true),
+                    PropertyFactory.iconOpacity(0f),
+                    PropertyFactory.iconSize(
+                        Expression.interpolate(
+                            Expression.linear(), Expression.zoom(),
+                            Expression.stop(13.5, STOP_ICON_MIN_DP / STOP_ICON_MAX_DP),
+                            Expression.stop(17.0, 1.0f)
+                        )
+                    ),
+                ).also {
+                    it.iconOpacityTransition = TransitionOptions(STOP_FADE_MS, 0, false)
+                    // Pod hranicí se vrstva vůbec nezpracovává: s průhledností 0 by MapLibre při oddálení dál
+                    // rozmisťoval a kreslil desítky tisíc ikon (oddálená republika: render vlákno 98 % i v klidu).
+                    // Rezerva pod hranicí, ať mizení při oddalování stihne doběhnout.
+                    it.minZoom = (STOP_MIN_ZOOM_GOOGLE - 1.0 - STOP_LAYER_MIN_ZOOM_MARGIN).toFloat()
+                },
+                ROUTE_ANCHOR_LAYER
             )
         }
+        // objevení / zmizení při přechodu přes hranici zoomu: prolnutí průhlednosti vrstvy (jako u vozidel)
+        syncStopVisibility(m, force = true)
     }
 
     LaunchedEffect(map) {
@@ -515,6 +511,10 @@ internal fun MapLibreScreenContent(
     val stopDots = appState.stopDots(showFullRoute)
 
     // ── TRASY (nezávisí na zoomu, šipky a tečky kreslí MapLibre nativně) ──
+    // Jiná trasa: stará plynule zmizí, nová se plynule objeví. Změna jen vzhledu téže trasy (celá trasa, tečky
+    // zastávek, barvy): výměna vrstev bez animace. Vše se připraví předem, vrstvy se vyměňují naráz (bez snímku,
+    // ve kterém by trasa chyběla a bliknula).
+    val drawnRoute = remember { DrawnRoute() }
     LaunchedEffect(
         map, tripRoute, tripRouteSegments, tripRouteSegmentStyles, fullRoute, walkList, showFullRoute, stopDots,
         primaryColorArgb, useDarkMap, tertiaryArgb, arrowArgb, styleVersion
@@ -525,162 +525,138 @@ internal fun MapLibreScreenContent(
 
         ensureRouteAnchor(style) // kotva musí existovat dřív než trasy (vkládají se pod ni)
         val hadRoute = style.getLayer("route-line") != null
-        // zrušená trasa nejdřív plynule zmizí, teprve pak se vrstvy odeberou
-        if (tripRoute.size < 2 && hadRoute) {
+        val newRoute = tripRoute.size >= 2
+        // jiná trasa (nebo žádná) než ta nakreslená: nejdřív plynule zmizí
+        val different = !hadRoute || drawnRoute.route !== tripRoute
+        if (hadRoute && different) {
             setRouteOpacity(style, 0f, ROUTE_FADE_OUT_MS.toLong())
             delay(ROUTE_FADE_OUT_MS.toLong() + 40)
         }
-        removeRouteLayers(style)
+        if (!newRoute) {
+            removeRouteLayers(style)
+            drawnRoute.route = null
+            return@LaunchedEffect
+        }
 
-        if (tripRoute.size >= 2) {
-            val routeBitmap = withContext(Dispatchers.Default) {
-                Triple(
-                    routeArrowBitmap(arrowArgb),
-                    routeStartBitmap(context),
-                    routeEndBitmap(context)
-                )
-            }
-            style.addImage("route-arrow", routeBitmap.first)
-            style.addImage("route-start", routeBitmap.second)
-            style.addImage("route-end", routeBitmap.third)
-
-            val segments = if (showFullRoute && fullRoute.size >= 2) listOf(fullRoute)
-            else if (tripRouteSegments.isNotEmpty()) tripRouteSegments
-            else listOf(tripRoute)
-
-            // spojení s přestupem: každá jízda v barvě svého druhu dopravy (vlastnost "c" úseku)
-            val segStyles = tripRouteSegmentStyles.takeIf { segments === tripRouteSegments && it.size == segments.size }
-            val routeFeatures = withContext(Dispatchers.Default) {
-                segments.mapIndexedNotNull { i, seg ->
+        val segments = if (showFullRoute && fullRoute.size >= 2) listOf(fullRoute)
+        else if (tripRouteSegments.isNotEmpty()) tripRouteSegments
+        else listOf(tripRoute)
+        // spojení s přestupem: každá jízda v barvě svého druhu dopravy (vlastnost "c" úseku)
+        val segStyles = tripRouteSegmentStyles.takeIf { segments === tripRouteSegments && it.size == segments.size }
+        val routeLine = if (showFullRoute && fullRoute.size >= 2) fullRoute else tripRoute
+        val prep = withContext(Dispatchers.Default) {
+            RoutePrep(
+                arrow = routeArrowBitmap(arrowArgb),
+                start = routeStartBitmap(context),
+                end = routeEndBitmap(context),
+                stop = if (stopDots.isNotEmpty()) routeStopBitmap(context, primaryColorArgb) else null,
+                lines = segments.mapIndexedNotNull { i, seg ->
                     if (seg.size < 2) return@mapIndexedNotNull null
                     val argb = segStyles?.get(i)?.let { if (useDarkMap) it.routeDark else it.route } ?: primaryColorArgb
                     Feature.fromGeometry(seg.toLineString()).apply {
                         addStringProperty("c", String.format("#%06X", argb and 0xFFFFFF))
                     }
-                }
-            }
-
-            if (routeFeatures.isNotEmpty()) {
-                style.addSource(
-                    GeoJsonSource(
-                        "route-src",
-                        FeatureCollection.fromFeatures(routeFeatures)
-                    )
-                )
-                addBelowMarkers(
-                    style,
-                    LineLayer("route-line", "route-src").withProperties(
-                        PropertyFactory.lineColor(Expression.toColor(Expression.get("c"))),
-                        PropertyFactory.lineWidth(12f / density),
-                        PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
-                        PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
-                    )
-                )
-            }
-
-            // pěší trasa: čárkovaná linka s kulatými konci = tečky, kreslí GPU
-            val walkLines = withContext(Dispatchers.Default) {
-                walkList.filter { it.points.size >= 2 }.map { w ->
-                    Feature.fromGeometry(
-                        LineString.fromLngLats(w.points.map { Point.fromLngLat(it.second, it.first) })
-                    )
-                }
-            }
-            if (walkLines.isNotEmpty()) {
-                style.addSource(
-                    GeoJsonSource("walk-src", FeatureCollection.fromFeatures(walkLines))
-                )
-                addBelowMarkers(
-                    style,
-                    LineLayer("walk-dots", "walk-src").withProperties(
-                        PropertyFactory.lineColor(tertiaryArgb),
-                        PropertyFactory.lineWidth(14f / density),
-                        PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
-                        PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
-                        PropertyFactory.lineDasharray(arrayOf(0.01f, 2f))
-                    )
-                )
-            }
-
-            // šipky: symbol podél linie, rozestup i natočení řeší MapLibre
-            style.addSource(
-                GeoJsonSource(
-                    "arrows-src",
-                    FeatureCollection.fromFeatures(listOf(Feature.fromGeometry(tripRoute.toLineString())))
-                )
+                },
+                // pěší trasa: čárkovaná linka s kulatými konci = tečky, kreslí GPU
+                walks = walkList.filter { it.points.size >= 2 }.map { w ->
+                    Feature.fromGeometry(LineString.fromLngLats(w.points.map { Point.fromLngLat(it.second, it.first) }))
+                },
+                arrowLine = Feature.fromGeometry(tripRoute.toLineString()),
+                stops = stopDots.map { Feature.fromGeometry(Point.fromLngLat(it.longitude, it.latitude)) },
+                ends = listOf(
+                    Feature.fromGeometry(Point.fromLngLat(routeLine.first().longitude, routeLine.first().latitude))
+                        .also { it.addStringProperty("img", "route-start") },
+                    Feature.fromGeometry(Point.fromLngLat(routeLine.last().longitude, routeLine.last().latitude))
+                        .also { it.addStringProperty("img", "route-end") }
+                ),
             )
+        }
+        if (m.style !== style || !style.isFullyLoaded) return@LaunchedEffect
+
+        // ── výměna vrstev naráz (žádné čekání mezi odebráním a přidáním) ──
+        removeRouteLayers(style)
+        style.addImage("route-arrow", prep.arrow)
+        style.addImage("route-start", prep.start)
+        style.addImage("route-end", prep.end)
+        if (prep.lines.isNotEmpty()) {
+            style.addSource(GeoJsonSource("route-src", FeatureCollection.fromFeatures(prep.lines)))
             addBelowMarkers(
                 style,
-                SymbolLayer("route-arrows", "arrows-src").withProperties(
-                    PropertyFactory.symbolPlacement(Property.SYMBOL_PLACEMENT_LINE),
-                    PropertyFactory.symbolSpacing(110f),
-                    PropertyFactory.iconImage("route-arrow"),
-                    PropertyFactory.iconRotate(90f), // bitmapa míří nahoru, linie doprava
-                    PropertyFactory.iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
-                    PropertyFactory.iconAllowOverlap(true),
-                    PropertyFactory.iconIgnorePlacement(true),
-                    PropertyFactory.iconSize(
-                        Expression.interpolate(
-                            Expression.linear(), Expression.zoom(),
-                            Expression.stop(8, 0.3f / density),
-                            Expression.stop(9, 0.45f / density),
-                            Expression.stop(11, 0.65f / density),
-                            Expression.stop(13, 0.9f / density),
-                            Expression.stop(15, 1.15f / density),
-                            Expression.stop(17, 1.4f / density)
-                        )
+                LineLayer("route-line", "route-src").withProperties(
+                    PropertyFactory.lineColor(Expression.toColor(Expression.get("c"))),
+                    PropertyFactory.lineWidth(12f / density),
+                    PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                    PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
+                )
+            )
+        }
+        if (prep.walks.isNotEmpty()) {
+            style.addSource(GeoJsonSource("walk-src", FeatureCollection.fromFeatures(prep.walks)))
+            addBelowMarkers(
+                style,
+                LineLayer("walk-dots", "walk-src").withProperties(
+                    PropertyFactory.lineColor(tertiaryArgb),
+                    PropertyFactory.lineWidth(14f / density),
+                    PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                    PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+                    PropertyFactory.lineDasharray(arrayOf(0.01f, 2f))
+                )
+            )
+        }
+        // šipky: symbol podél linie, rozestup i natočení řeší MapLibre
+        style.addSource(GeoJsonSource("arrows-src", FeatureCollection.fromFeatures(listOf(prep.arrowLine))))
+        addBelowMarkers(
+            style,
+            SymbolLayer("route-arrows", "arrows-src").withProperties(
+                PropertyFactory.symbolPlacement(Property.SYMBOL_PLACEMENT_LINE),
+                PropertyFactory.symbolSpacing(110f),
+                PropertyFactory.iconImage("route-arrow"),
+                PropertyFactory.iconRotate(90f), // bitmapa míří nahoru, linie doprava
+                PropertyFactory.iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+                PropertyFactory.iconAllowOverlap(true),
+                PropertyFactory.iconIgnorePlacement(true),
+                PropertyFactory.iconSize(
+                    Expression.interpolate(
+                        Expression.linear(), Expression.zoom(),
+                        Expression.stop(8, 0.3f / density),
+                        Expression.stop(9, 0.45f / density),
+                        Expression.stop(11, 0.65f / density),
+                        Expression.stop(13, 0.9f / density),
+                        Expression.stop(15, 1.15f / density),
+                        Expression.stop(17, 1.4f / density)
                     )
                 )
             )
-
-            // mezilehlé zastávky: tečky na přesné poloze zastávky (pod začátkem / koncem)
-            if (stopDots.isNotEmpty()) {
-                style.addImage("route-stop", routeStopBitmap(context, primaryColorArgb))
-                val stopFeatures = withContext(Dispatchers.Default) {
-                    FeatureCollection.fromFeatures(
-                        stopDots.map { Feature.fromGeometry(Point.fromLngLat(it.longitude, it.latitude)) }
-                    )
-                }
-                style.addSource(GeoJsonSource("stops-src", stopFeatures))
-                addBelowMarkers(
-                    style,
-                    SymbolLayer("route-stops", "stops-src").withProperties(
-                        PropertyFactory.iconImage("route-stop"),
-                        PropertyFactory.iconAllowOverlap(true),
-                        PropertyFactory.iconIgnorePlacement(true)
-                    )
-                )
-            }
-
-            // začátek a konec (pod autobusy)
-            val routeLine = if (showFullRoute && fullRoute.size >= 2) fullRoute else tripRoute
-            val s = routeLine.first()
-            val e = routeLine.last()
-            val ends = withContext(Dispatchers.Default) {
-                FeatureCollection.fromFeatures(
-                    listOf(
-                        Feature.fromGeometry(Point.fromLngLat(s.longitude, s.latitude))
-                            .also { it.addStringProperty("img", "route-start") },
-                        Feature.fromGeometry(Point.fromLngLat(e.longitude, e.latitude))
-                            .also { it.addStringProperty("img", "route-end") }
-                    )
-                )
-            }
-            style.addSource(GeoJsonSource("ends-src", ends))
+        )
+        // mezilehlé zastávky: tečky na přesné poloze zastávky (pod začátkem / koncem)
+        if (prep.stop != null && prep.stops.isNotEmpty()) {
+            style.addImage("route-stop", prep.stop)
+            style.addSource(GeoJsonSource("stops-src", FeatureCollection.fromFeatures(prep.stops)))
             addBelowMarkers(
                 style,
-                SymbolLayer("route-ends", "ends-src").withProperties(
-                    PropertyFactory.iconImage(Expression.get("img")),
+                SymbolLayer("route-stops", "stops-src").withProperties(
+                    PropertyFactory.iconImage("route-stop"),
                     PropertyFactory.iconAllowOverlap(true),
                     PropertyFactory.iconIgnorePlacement(true)
                 )
             )
-            // nová trasa se plynule objeví (výměna trasy za jinou bez animace, ať nebliká)
-            if (!hadRoute) {
-                setRouteOpacity(style, 0f, 0)
-                delay(32)   // jeden snímek s průhledností 0, jinak by přechod neměl odkud začít
-                setRouteOpacity(style, 1f, ROUTE_FADE_IN_MS.toLong())
-            }
+        }
+        // začátek a konec (pod autobusy)
+        style.addSource(GeoJsonSource("ends-src", FeatureCollection.fromFeatures(prep.ends)))
+        addBelowMarkers(
+            style,
+            SymbolLayer("route-ends", "ends-src").withProperties(
+                PropertyFactory.iconImage(Expression.get("img")),
+                PropertyFactory.iconAllowOverlap(true),
+                PropertyFactory.iconIgnorePlacement(true)
+            )
+        )
+        drawnRoute.route = tripRoute
+        // nová (jiná) trasa se plynule objeví; změna vzhledu téže trasy bez animace
+        if (different) {
+            setRouteOpacity(style, 0f, 0)
+            delay(32)   // jeden snímek s průhledností 0, jinak by přechod neměl odkud začít
+            setRouteOpacity(style, 1f, ROUTE_FADE_IN_MS.toLong())
         }
     }
 
@@ -780,3 +756,32 @@ private fun removeRouteLayers(style: Style) {
 
 private fun List<LatLng>.toLineString() =
     LineString.fromLngLats(map { Point.fromLngLat(it.longitude, it.latitude) })
+
+/** Stav viditelnosti vrstvy zastávek (null = ještě nenastaveno). */
+private class StopVisibility { var shown: Boolean? = null }
+
+/** Všechny zastávky jako GeoJSON (řetězec: MapLibre ho parsuje a řeže do dlaždic na pracovním vlákně). */
+private fun stopsGeoJson(idx: StopIndex): String {
+    val sb = StringBuilder(idx.stops.size * 110 + 64)
+    sb.append("""{"type":"FeatureCollection","features":[""")
+    for ((i, st) in idx.stops.withIndex()) {
+        if (i > 0) sb.append(',')
+        sb.append("""{"type":"Feature","geometry":{"type":"Point","coordinates":[""")
+            .append(st.lng).append(',').append(st.lat)
+            .append("""]},"properties":{"img":"""")
+            .append(if (st.kind == StopKind.RAIL) STOP_IMG_RAIL else STOP_IMG_BUS)
+            .append("\"}}")
+    }
+    sb.append("]}")
+    return sb.toString()
+}
+
+/** Trasa, jejíž vrstvy jsou na mapě (podle ní se pozná výměna za jinou trasu). */
+private class DrawnRoute { var route: List<LatLng>? = null }
+
+/** Vše pro vrstvy trasy, připravené na pozadí (vrstvy se pak vyměňují naráz). */
+private class RoutePrep(
+    val arrow: Bitmap, val start: Bitmap, val end: Bitmap, val stop: Bitmap?,
+    val lines: List<Feature>, val walks: List<Feature>, val arrowLine: Feature, val stops: List<Feature>,
+    val ends: List<Feature>,
+)
